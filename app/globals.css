@@ -1,0 +1,273 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary-brown: #5a3e2b;
+  --color-dark-brown: #3d2817;
+  --color-darker-brown: #2a1a0f;
+  --color-accent-gold: #d4af37;
+  --color-accent-gold-hover: #f0c860;
+  --color-text-light: #f5e6d3;
+  --color-text-muted: #c9b89b;
+  --color-glass-bg: rgba(42, 26, 15, 0.85);
+  --color-danger: #8b3e2e;
+  --color-danger-hover: #a04a38;
+
+  --font-serif: Georgia, "Times New Roman", serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-serif);
+  background-color: var(--color-darker-brown);
+  color: var(--color-text-light);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-darker-brown);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-primary-brown);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent-gold);
+}
+
+@layer components {
+  .wood-texture {
+    background: linear-gradient(135deg, #5a3e2b 0%, #3d2817 100%);
+  }
+
+  .glass-panel {
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(10px);
+    border: 2px solid var(--color-accent-gold);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .btn {
+    @apply inline-block px-8 py-3 bg-accent-gold text-darker-brown border-none rounded font-bold text-lg cursor-pointer transition-all duration-300;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  }
+
+  .btn:hover {
+    @apply bg-accent-gold-hover -translate-y-0.5;
+    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .btn:active {
+    @apply translate-y-0;
+  }
+
+  .btn-secondary {
+    @apply bg-primary-brown text-text-light;
+  }
+
+  .btn-secondary:hover {
+    background: #6b4a37;
+  }
+
+  .btn-danger {
+    @apply bg-danger text-text-light;
+  }
+
+  .btn-danger:hover {
+    @apply bg-danger-hover;
+  }
+
+  .form-input {
+    @apply w-full px-3 py-3 rounded border border-accent-gold text-text-light text-base;
+    background: rgba(42, 26, 15, 0.8);
+    font-family: inherit;
+  }
+
+  .form-input:focus {
+    @apply outline-none border-accent-gold-hover;
+    box-shadow: 0 0 8px rgba(212, 175, 55, 0.4);
+  }
+
+  .form-label {
+    @apply block text-accent-gold font-bold mb-2;
+  }
+
+  .hud {
+    @apply fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-3 sm:px-6 py-2 sm:py-3;
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(10px);
+    border-bottom: 2px solid var(--color-accent-gold);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }
+
+  .hud-title {
+    @apply text-accent-gold text-base sm:text-xl font-bold;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  .mobile-nav-drawer {
+    @apply fixed left-0 right-0 z-40 px-4 py-4;
+    top: 3.5rem;
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(12px);
+    border-bottom: 2px solid var(--color-accent-gold);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+
+  .mobile-nav-link {
+    @apply block px-3 py-2.5 text-text-light hover:text-accent-gold hover:bg-primary-brown/30 rounded transition-colors;
+  }
+
+  /* Faction page layers (ported from legacy/style.css) */
+  .profile-container {
+    @apply relative w-full;
+    min-height: calc(100vh - 4rem);
+  }
+
+  .design-layer {
+    @apply fixed top-0 left-0 w-full h-full overflow-auto;
+    z-index: 1;
+    padding-top: 4rem;
+  }
+
+  .faction-layer-header {
+    @apply fixed left-0 right-0 px-4 py-3;
+    top: 4rem;
+    z-index: 50;
+    background: rgba(42, 26, 15, 0.75);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid rgba(212, 175, 55, 0.4);
+  }
+
+  .feed-layer {
+    @apply fixed bottom-0 left-0 right-0 overflow-y-auto px-4 sm:px-6 py-4 sm:py-6;
+    max-height: 50vh;
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(15px);
+    border-top: 2px solid var(--color-accent-gold);
+    z-index: 100;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .feed-container {
+    @apply max-w-5xl mx-auto;
+  }
+
+  .feed-title {
+    @apply text-accent-gold text-2xl font-bold text-center;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Admin queue (ported from legacy/style.css) */
+  .admin-container {
+    @apply max-w-5xl mx-auto;
+  }
+
+  .admin-header h1 {
+    @apply text-accent-gold font-bold;
+  }
+
+  .queue-list {
+    @apply flex flex-col gap-6;
+  }
+
+  .queue-item {
+    background: var(--color-glass-bg);
+    @apply border-2 border-accent-gold rounded-lg p-6;
+  }
+
+  .queue-item-header {
+    @apply flex justify-between items-center flex-wrap gap-4;
+  }
+
+  .queue-item-info h3 {
+    @apply text-accent-gold text-xl font-bold mb-1;
+  }
+
+  .queue-item-info p {
+    @apply text-text-muted text-sm;
+  }
+
+  .queue-item-actions {
+    @apply flex gap-3 flex-wrap;
+  }
+
+  /* Modals (ported from legacy/style.css) */
+  .modal-overlay {
+    @apply fixed inset-0 flex items-center justify-center p-8;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(4px);
+    z-index: 99998;
+  }
+
+  .modal {
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(15px);
+    @apply border-2 border-accent-gold rounded-lg p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  }
+
+  .modal-header {
+    @apply flex justify-between items-center mb-6 pb-4 border-b-2 border-accent-gold;
+  }
+
+  .modal-title {
+    @apply text-accent-gold text-2xl font-bold;
+  }
+
+  .modal-close {
+    @apply bg-transparent border-none text-text-light text-3xl cursor-pointer leading-none p-0 w-8 h-8 flex items-center justify-center transition-colors;
+  }
+
+  .modal-close:hover {
+    @apply text-accent-gold;
+  }
+
+  .modal-body {
+    @apply mb-6;
+  }
+
+  .modal-footer {
+    @apply flex justify-end gap-4 pt-4 border-t border-accent-gold/30;
+  }
+
+  .editor-textarea {
+    min-height: 400px;
+    font-family: "Courier New", monospace;
+    font-size: 0.95rem;
+  }
+}
+
+@media (max-width: 768px) {
+  .feed-layer {
+    max-height: 45vh;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  .feed-title {
+    @apply text-xl;
+  }
+
+  .btn {
+    @apply text-base px-5 py-2.5;
+  }
+
+  .glass-panel {
+    @apply p-4;
+  }
+
+  .faction-layer-header {
+    @apply px-3 py-2;
+  }
+}

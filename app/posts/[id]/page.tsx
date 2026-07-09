@@ -1,0 +1,206 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { collection, doc, onSnapshot, query, where, getDocs } from "firebase/firestore";
+import { useAuth } from "@/components/auth/AuthProvider";
+import { TipTapContent } from "@/components/editor/TipTapEditor";
+import { BuildCarousel } from "@/components/posts/BuildCarousel";
+import { PostTypeBadge } from "@/components/posts/PostTypeBadge";
+import { DebateThread } from "@/components/debates/DebateThread";
+import { ReactionBar } from "@/components/reactions/ReactionBar";
+import { getClientDb } from "@/lib/firebase";
+import {
+  getCharacter,
+  getFaction,
+} from "@/lib/firestore/posts";
+import type { Character, Faction, Post } from "@/lib/types";
+import type { Timestamp } from "firebase/firestore";
+
+function formatDateTime(ts: Timestamp | undefined): string {
+  if (!ts?.toDate) return "";
+  return ts.toDate().toLocaleString(undefined, {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+export default function PostDetailPage() {
+  const params = useParams();
+  const postId = params.id as string;
+  const { user, loading: authLoading } = useAuth();
+
+  const [post, setPost] = useState<Post | null>(null);
+  const [faction, setFaction] = useState<Faction | null>(null);
+  const [character, setCharacter] = useState<Character | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [canCreatePoll, setCanCreatePoll] = useState(false);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+
+    const db = getClientDb();
+    const postRef = doc(db, "posts", postId);
+
+    const unsubscribe = onSnapshot(
+      postRef,
+      async (snapshot) => {
+        if (!snapshot.exists()) {
+          setError("Post not found.");
+          setPost(null);
+          setLoading(false);
+          return;
+        }
+
+        const fetched = { id: snapshot.id, ...snapshot.data() } as Post;
+        setPost(fetched);
+        setError(null);
+
+        const [f, c] = await Promise.all([
+          getFaction(fetched.factionId),
+          getCharacter(fetched.characterId),
+        ]);
+        setFaction(f);
+        setCharacter(c);
+        setLoading(false);
+      },
+      () => {
+        setError("Could not load this post.");
+        setLoading(false);
+      }
+    );
+
+    return unsubscribe;
+  }, [postId, user, authLoading]);
+
+  useEffect(() => {
+    if (!user || !post || post.poll) {
+      setCanCreatePoll(false);
+      return;
+    }
+
+    async function checkPollPermission() {
+      const db = getClientDb();
+      const memberSnap = await getDocs(
+        query(
+          collection(db, "faction_members"),
+          where("uid", "==", user!.uid),
+          where("factionId", "==", post!.factionId)
+        )
+      );
+      setCanCreatePoll(!memberSnap.empty);
+    }
+
+    checkPollPermission().catch(() => setCanCreatePoll(false));
+  }, [user, post]);
+
+  if (authLoading || loading) {
+    return <div className="text-center py-16 text-text-muted">Loading…</div>;
+  }
+
+  if (!user) {
+    return (
+      <div className="max-w-lg mx-auto py-16 px-4 text-center">
+        <p className="text-text-muted mb-4">Sign in to view posts.</p>
+        <Link href="/login" className="btn">
+          Sign In
+        </Link>
+      </div>
+    );
+  }
+
+  if (error || !post) {
+    return (
+      <div className="max-w-lg mx-auto py-16 px-4 text-center">
+        <p className="text-text-muted mb-4">{error ?? "Post not found."}</p>
+        <Link href="/" className="btn">
+          Back to feed
+        </Link>
+      </div>
+    );
+  }
+
+  const factionColor = faction?.colors?.primary ?? "#d4af37";
+
+  return (
+    <div className="wood-texture min-h-[calc(100vh-4rem)] py-8 px-4">
+      <div className="max-w-3xl mx-auto">
+        <Link
+          href="/"
+          className="text-accent-gold text-sm hover:text-accent-gold-hover mb-6 inline-block"
+        >
+          ← Back to feed
+        </Link>
+
+        <article
+          className={`glass-panel p-6 md:p-8 ${post.pinned ? "ring-2 ring-accent-gold" : ""}`}
+          style={{ borderLeftColor: factionColor, borderLeftWidth: "4px" }}
+        >
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <PostTypeBadge type={post.type} />
+            {post.pinned && (
+              <span className="text-xs font-bold text-accent-gold uppercase">
+                Pinned
+              </span>
+            )}
+            <span className="text-text-muted text-sm ml-auto">
+              {formatDateTime(post.createdAt)}
+            </span>
+          </div>
+
+          <h1 className="text-3xl md:text-4xl font-bold text-text-light mb-3">
+            {post.title}
+          </h1>
+
+          <p className="text-accent-gold mb-6">
+            {character?.name ?? "Unknown character"}
+            {character?.title && (
+              <span className="text-text-muted"> · {character.title}</span>
+            )}
+            <span className="text-text-muted"> · </span>
+            {faction?.name ?? "Unknown faction"}
+          </p>
+
+          {post.type === "build" && post.images && post.images.length > 0 && (
+            <div className="mb-8">
+              <BuildCarousel images={post.images} title={post.title} />
+            </div>
+          )}
+
+          {post.body && (
+            <div className="mb-8">
+              <TipTapContent html={post.body} />
+            </div>
+          )}
+
+          <ReactionBar postId={post.id} />
+
+          {post.type === "debate" && (
+            <DebateThread post={post} canCreatePoll={canCreatePoll} />
+          )}
+
+          {post.type === "event" && (
+            <p className="text-text-muted text-sm italic border-t border-accent-gold/20 pt-4">
+              Realm event
+            </p>
+          )}
+
+          {post.type === "wiki" && (
+            <p className="text-text-muted text-sm italic border-t border-accent-gold/20 pt-4">
+              Wiki entry — full wiki sections on faction pages in Phase 4.
+            </p>
+          )}
+        </article>
+      </div>
+    </div>
+  );
+}

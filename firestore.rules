@@ -1,0 +1,164 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return isSignedIn() && userDoc().data.isAdmin == true;
+    }
+
+    function memberDocId(uid, factionId) {
+      return uid + '_' + factionId;
+    }
+
+    function factionMemberDoc(uid, factionId) {
+      return get(/databases/$(database)/documents/faction_members/$(memberDocId(uid, factionId)));
+    }
+
+    function isFactionOwner(factionId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/faction_members/$(memberDocId(request.auth.uid, factionId))) &&
+        factionMemberDoc(request.auth.uid, factionId).data.role == 'owner';
+    }
+
+    function isFactionMember(factionId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/faction_members/$(memberDocId(request.auth.uid, factionId)));
+    }
+
+    function ownerSubmittingHtml() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['pendingHtml', 'htmlStatus', 'htmlSubmittedAt']) &&
+        request.resource.data.htmlStatus == 'pending_review' &&
+        request.resource.data.pendingHtml is string &&
+        request.resource.data.pendingHtml.size() > 0 &&
+        request.resource.data.pendingHtml.size() <= 500000;
+    }
+
+    function ownerUpdatingProfile() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['liveHtml', 'pendingHtml', 'htmlStatus', 'htmlSubmittedAt', 'htmlReviewedAt', 'ownerUids']);
+    }
+
+    function adminApprovingHtml() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['liveHtml', 'pendingHtml', 'htmlStatus', 'htmlReviewedAt']) &&
+        request.resource.data.htmlStatus in ['approved', 'rejected'];
+    }
+
+    function validPollVote() {
+      return resource.data.poll != null &&
+        request.resource.data.poll != null &&
+        request.resource.data.poll.question == resource.data.poll.question &&
+        request.resource.data.poll.options == resource.data.poll.options &&
+        request.resource.data.poll.votes.keys().hasOnly(
+          resource.data.poll.votes.keys().union([request.auth.uid])
+        ) &&
+        request.resource.data.poll.votes[request.auth.uid] is int &&
+        request.resource.data.poll.votes[request.auth.uid] >= 0 &&
+        request.resource.data.poll.votes[request.auth.uid] < resource.data.poll.options.size();
+    }
+
+    // --- Users ---
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        request.auth.uid == uid &&
+        request.resource.data.isAdmin == false;
+      allow update: if (request.auth.uid == uid &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin'])) ||
+        isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // --- Factions ---
+    match /factions/{factionId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        request.resource.data.ownerUids is list &&
+        request.auth.uid in request.resource.data.ownerUids;
+      allow update: if isAdmin() ||
+        (isFactionOwner(factionId) && ownerUpdatingProfile()) ||
+        (isFactionOwner(factionId) && ownerSubmittingHtml()) ||
+        (isAdmin() && adminApprovingHtml());
+      allow delete: if isAdmin();
+    }
+
+    // --- Characters ---
+    match /characters/{characterId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        isFactionOwner(request.resource.data.factionId);
+      allow update: if isSignedIn() &&
+        isFactionOwner(request.resource.data.factionId);
+      allow delete: if isSignedIn() &&
+        (isFactionOwner(resource.data.factionId) || isAdmin());
+    }
+
+    // --- Faction membership ---
+    match /faction_members/{memberId} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin() ||
+        (isSignedIn() && isFactionOwner(request.resource.data.factionId));
+      allow delete: if isAdmin() ||
+        (isSignedIn() && isFactionOwner(resource.data.factionId));
+    }
+
+    // --- Posts ---
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        isFactionMember(request.resource.data.factionId) &&
+        request.resource.data.type in ['announcement', 'build', 'lore', 'debate', 'event', 'wiki'];
+      allow update: if isSignedIn() && (
+        (isFactionOwner(resource.data.factionId) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['factionId', 'characterId'])) ||
+        isAdmin() ||
+        (validPollVote() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['poll', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() &&
+        (isFactionOwner(resource.data.factionId) || isAdmin());
+
+      match /replies/{replyId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() &&
+          isFactionMember(request.resource.data.factionId) &&
+          request.resource.data.stance in ['for', 'against', 'neutral'];
+        allow update, delete: if isSignedIn() &&
+          (isFactionOwner(resource.data.factionId) || isAdmin());
+      }
+
+      match /reactions/{uid} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() &&
+          request.auth.uid == uid &&
+          request.resource.data.type in ['agrees', 'disputes', 'witnessed'];
+        allow update: if isSignedIn() &&
+          request.auth.uid == uid &&
+          request.resource.data.type in ['agrees', 'disputes', 'witnessed'];
+        allow delete: if request.auth.uid == uid || isAdmin();
+      }
+    }
+
+    // --- Wiki ---
+    match /wiki/{factionId} {
+      allow read: if isSignedIn();
+      allow write: if isFactionOwner(factionId) || isAdmin();
+
+      match /wiki_sections/{sectionId} {
+        allow read: if isSignedIn();
+        allow write: if isFactionOwner(factionId) || isAdmin();
+      }
+    }
+  }
+}

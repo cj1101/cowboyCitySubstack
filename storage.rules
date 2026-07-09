@@ -1,0 +1,68 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function memberDocId(uid, factionId) {
+      return uid + '_' + factionId;
+    }
+
+    function isFactionOwner(factionId) {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/faction_members/$(memberDocId(request.auth.uid, factionId))) &&
+        firestore.get(/databases/(default)/documents/faction_members/$(memberDocId(request.auth.uid, factionId))).data.role == 'owner';
+    }
+
+    function isFactionMember(factionId) {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/faction_members/$(memberDocId(request.auth.uid, factionId)));
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    function isValidImage(maxBytes) {
+      return request.resource.size < maxBytes &&
+        request.resource.contentType.matches('image/.*');
+    }
+
+    // Faction banners and sigils — owners or admins upload
+    match /factions/{factionId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() &&
+        (isFactionOwner(factionId) || isAdmin()) &&
+        isValidImage(10 * 1024 * 1024);
+      allow delete: if isSignedIn() &&
+        (isFactionOwner(factionId) || isAdmin());
+    }
+
+    // Build carousel images on posts — any signed-in member may upload
+    match /posts/{postId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidImage(10 * 1024 * 1024);
+      allow delete: if isSignedIn() && (isAdmin());
+    }
+
+    // Character avatars — faction owners upload
+    match /characters/{characterId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() &&
+        isValidImage(5 * 1024 * 1024) &&
+        firestore.exists(/databases/(default)/documents/characters/$(characterId)) &&
+        isFactionOwner(
+          firestore.get(/databases/(default)/documents/characters/$(characterId)).data.factionId
+        );
+      allow delete: if isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/characters/$(characterId)) &&
+        (isFactionOwner(
+          firestore.get(/databases/(default)/documents/characters/$(characterId)).data.factionId
+        ) || isAdmin());
+    }
+  }
+}
