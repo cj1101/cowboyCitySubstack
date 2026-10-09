@@ -1,12 +1,14 @@
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
   type DocumentData,
@@ -26,6 +28,7 @@ import type {
 } from "@/lib/types";
 
 const POSTS_COLLECTION = "posts";
+const DRAFTS_COLLECTION = "drafts";
 const FACTIONS_COLLECTION = "factions";
 const CHARACTERS_COLLECTION = "characters";
 const FACTION_MEMBERS_COLLECTION = "faction_members";
@@ -82,7 +85,7 @@ export async function createPost(
   const cityIds = input.cityIds?.length
     ? Array.from(new Set([input.factionId, ...input.cityIds]))
     : [input.factionId];
-  const ref = await addDoc(collection(db, POSTS_COLLECTION), {
+  const ref = await addDoc(collection(db, postCollectionFor(input.status)), {
     type: input.type,
     factionId: input.factionId,
     characterId: input.characterId ?? "",
@@ -110,9 +113,19 @@ export async function createPost(
 
 export async function getPost(postId: string): Promise<Post | null> {
   const db = getClientDb();
-  const snap = await getDoc(doc(db, POSTS_COLLECTION, postId));
-  if (!snap.exists()) return null;
-  return docToPost(snap.id, snap.data());
+  const published = await getDoc(doc(db, POSTS_COLLECTION, postId));
+  if (published.exists()) return docToPost(published.id, published.data());
+  const draft = await getDoc(doc(db, DRAFTS_COLLECTION, postId));
+  if (!draft.exists()) return null;
+  return docToPost(draft.id, draft.data());
+}
+
+function isPrivateStatus(status: PostStatus | undefined): boolean {
+  return status === "draft" || status === "scheduled";
+}
+
+function postCollectionFor(status: PostStatus | undefined): string {
+  return isPrivateStatus(status) ? DRAFTS_COLLECTION : POSTS_COLLECTION;
 }
 
 async function fetchPostQuery(constraints: QueryConstraint[]): Promise<Post[]> {
@@ -131,12 +144,10 @@ export async function getPosts(options?: {
     const [tagged, primary] = await Promise.all([
       fetchPostQuery([
         where("cityIds", "array-contains", cityId),
-        where("status", "==", "published"),
         orderBy("createdAt", "desc"),
       ]),
       fetchPostQuery([
         where("factionId", "==", cityId),
-        where("status", "==", "published"),
         orderBy("createdAt", "desc"),
       ]),
     ]);
@@ -147,11 +158,10 @@ export async function getPosts(options?: {
       (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
     );
   } else {
-    posts = await fetchPostQuery([
-      where("status", "==", "published"),
-      orderBy("createdAt", "desc"),
-    ]);
+    posts = await fetchPostQuery([orderBy("createdAt", "desc")]);
   }
+
+  posts = posts.filter((post) => !isPrivateStatus(post.status));
 
   const pinned = posts.filter((p) => p.pinned && p.type === "announcement");
   const rest = posts.filter((p) => !(p.pinned && p.type === "announcement"));
@@ -163,12 +173,19 @@ export async function getPosts(options?: {
   return [...pinned, ...rest];
 }
 
+async function locatePost(postId: string) {
+  const db = getClientDb();
+  const published = doc(db, POSTS_COLLECTION, postId);
+  const snap = await getDoc(published);
+  if (snap.exists()) return published;
+  return doc(db, DRAFTS_COLLECTION, postId);
+}
+
 export async function updatePostImages(
   postId: string,
   images: string[]
 ): Promise<void> {
-  const db = getClientDb();
-  await updateDoc(doc(db, POSTS_COLLECTION, postId), {
+  await updateDoc(await locatePost(postId), {
     images,
     media: images.map((url) => ({ url, type: "image" })),
     updatedAt: serverTimestamp(),
@@ -179,8 +196,7 @@ export async function updatePostMedia(
   postId: string,
   media: PostMedia[]
 ): Promise<void> {
-  const db = getClientDb();
-  await updateDoc(doc(db, POSTS_COLLECTION, postId), {
+  await updateDoc(await locatePost(postId), {
     media,
     images: media.filter((item) => item.type === "image").map((item) => item.url),
     updatedAt: serverTimestamp(),
@@ -191,25 +207,49 @@ export async function getMyPostsByStatus(
   authorUid: string,
   status: PostStatus
 ): Promise<Post[]> {
-  return fetchPostQuery([
+  const db = getClientDb();
+  if (status === "published") {
+    return (await fetchPostQuery([
+      where("authorUid", "==", authorUid),
+      orderBy("createdAt", "desc"),
+    ])).filter((post) => !isPrivateStatus(post.status));
+  }
+  const snap = await getDocs(query(
+    collection(db, DRAFTS_COLLECTION),
     where("authorUid", "==", authorUid),
     where("status", "==", status),
     orderBy("createdAt", "desc"),
-  ]);
+  ));
+  return snap.docs.map((d) => docToPost(d.id, d.data()));
+}
+
+export async function publishStoredPost(postId: string): Promise<void> {
+  const db = getClientDb();
+  const draftRef = doc(db, DRAFTS_COLLECTION, postId);
+  const draft = await getDoc(draftRef);
+  if (draft.exists()) {
+    await setDoc(doc(db, POSTS_COLLECTION, postId), {
+      ...draft.data(),
+      status: "published",
+      updatedAt: serverTimestamp(),
+    });
+    await deleteDoc(draftRef);
+    return;
+  }
+  await updateDoc(doc(db, POSTS_COLLECTION, postId), {
+    status: "published",
+    updatedAt: serverTimestamp(),
+  });
 }
 
 export async function publishDueScheduledPosts(authorUid: string): Promise<number> {
   const scheduled = await getMyPostsByStatus(authorUid, "scheduled");
-  const db = getClientDb();
   const now = Date.now();
   let published = 0;
   for (const post of scheduled) {
     const at = post.publishAt?.toMillis?.() ?? Number.POSITIVE_INFINITY;
     if (at <= now) {
-      await updateDoc(doc(db, POSTS_COLLECTION, post.id), {
-        status: "published",
-        updatedAt: serverTimestamp(),
-      });
+      await publishStoredPost(post.id);
       published += 1;
     }
   }
@@ -217,11 +257,11 @@ export async function publishDueScheduledPosts(authorUid: string): Promise<numbe
 }
 
 export async function getSettlementPosts(): Promise<Post[]> {
-  return fetchPostQuery([
-    where("status", "==", "published"),
+  const posts = await fetchPostQuery([
     where("settlementYear", ">", 0),
     orderBy("settlementYear", "desc"),
   ]);
+  return posts.filter((post) => !isPrivateStatus(post.status));
 }
 
 export async function getReferencingPosts(postId: string): Promise<Post[]> {
@@ -229,11 +269,10 @@ export async function getReferencingPosts(postId: string): Promise<Post[]> {
   const snap = await getDocs(
     query(
       collection(db, POSTS_COLLECTION),
-      where("referencedPostIds", "array-contains", postId),
-      where("status", "==", "published")
+      where("referencedPostIds", "array-contains", postId)
     )
   );
-  return snap.docs.map((d) => docToPost(d.id, d.data()));
+  return snap.docs.map((d) => docToPost(d.id, d.data())).filter((post) => !isPrivateStatus(post.status));
 }
 
 export async function getAllFactions(): Promise<Faction[]> {

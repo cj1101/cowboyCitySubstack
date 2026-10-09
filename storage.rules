@@ -18,7 +18,7 @@ service firebase.storage {
     }
 
     function isRootAdmin() {
-      return authEmail() in ['charles@realm.test', 'sheriff@cowboycity.example'];
+      return authEmail() in ['charlie@suarezhouse.net', 'cjtheswimmer1101@gmail.com'];
     }
 
     function isConfigAdmin() {

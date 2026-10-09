@@ -5,7 +5,7 @@ The primary host is **Vercel**. Firebase Auth, Firestore, and Storage stay on th
 ## 1. Firebase, before the first visit
 
 1. Firebase Console → Authentication → Sign-in method → enable **Email/Password**.
-2. Edit `rootAdminEmails()` in `firestore.rules` and the matching list in `storage.rules` (`isRootAdmin`). Use the real sheriff emails. Deploy:
+2. Root sheriffs are `charlie@suarezhouse.net` and `cjtheswimmer1101@gmail.com` in both `rootAdminEmails()` (`firestore.rules`) and `isRootAdmin()` (`storage.rules`). Deploy:
 
    ```bash
    npm install -g firebase-tools

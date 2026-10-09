@@ -20,7 +20,7 @@ export async function buildRealmExport(uid: string): Promise<{ json: string; zip
   const cityPosts = [];
   for (const city of cities) {
     const snap = await getDocs(
-      query(collection(db, "posts"), where("cityIds", "array-contains", city.id), where("status", "==", "published"))
+      query(collection(db, "posts"), where("cityIds", "array-contains", city.id))
     );
     for (const docSnap of snap.docs) {
       if (seen.has(docSnap.id)) continue;

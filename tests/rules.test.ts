@@ -12,7 +12,10 @@ import {
   doc,
   getDoc,
   getDocs,
+  orderBy,
+  query,
   setDoc,
+  Timestamp,
   updateDoc,
 } from "firebase/firestore";
 import { ref, uploadString } from "firebase/storage";
@@ -48,6 +51,7 @@ async function main() {
     pinned: false,
     status: "published",
     authorUid: "friend",
+    createdAt: Timestamp.fromDate(new Date("2024-06-01T00:00:00Z")),
   };
 
   await env.clearFirestore();
@@ -71,7 +75,7 @@ async function main() {
 
   await env.clearFirestore();
   await seedUser(env, "charles", {
-    email: "charles@realm.test",
+    email: "charlie@suarezhouse.net",
     status: "pending",
     isAdmin: false,
   });
@@ -80,7 +84,7 @@ async function main() {
     status: "pending",
     isAdmin: false,
   });
-  const charles = env.authenticatedContext("charles", { email: "charles@realm.test" });
+  const charles = env.authenticatedContext("charles", { email: "charlie@suarezhouse.net" });
   await assertSucceeds(
     updateDoc(doc(charles.firestore(), "users", "charles"), { status: "approved", isAdmin: true })
   );
@@ -102,19 +106,29 @@ async function main() {
   });
   await env.withSecurityRulesDisabled(async (context) => {
     await setDoc(doc(context.firestore(), "posts", "live"), postBody);
-    await setDoc(doc(context.firestore(), "posts", "secret"), {
+    await setDoc(doc(context.firestore(), "drafts", "secret"), {
       ...postBody,
       status: "draft",
       authorUid: "other",
       title: "Draft",
     });
+    const legacy = { ...postBody, title: "Legacy harbor" };
+    delete (legacy as { status?: string }).status;
+    await setDoc(doc(context.firestore(), "posts", "legacy"), legacy);
   });
   const friend = env.authenticatedContext("friend", { email: "friend@realm.test" });
+  const other = env.authenticatedContext("other", { email: "other@realm.test" });
   await assertSucceeds(getDoc(doc(friend.firestore(), "posts", "live")));
-  await assertFails(getDoc(doc(friend.firestore(), "posts", "secret")));
+  await assertSucceeds(getDoc(doc(other.firestore(), "drafts", "secret")));
+  await assertFails(getDoc(doc(friend.firestore(), "drafts", "secret")));
+  const legacySnap = await assertSucceeds(getDoc(doc(friend.firestore(), "posts", "legacy")));
+  assert.equal(legacySnap.data()?.status, undefined);
+  const listed = await assertSucceeds(
+    getDocs(query(collection(friend.firestore(), "posts"), orderBy("createdAt", "desc")))
+  );
+  assert.deepEqual(listed.docs.map((d) => d.id).sort(), ["legacy", "live"]);
   console.log("ok published vs draft");
 
-  const other = env.authenticatedContext("other", { email: "other@realm.test" });
   await assertSucceeds(
     setDoc(doc(friend.firestore(), "factions", "city1"), {
       name: "Cascadia",
@@ -139,6 +153,22 @@ async function main() {
     })
   );
   await assertSucceeds(
+    setDoc(doc(friend.firestore(), "factions", "city1", "pins", "harbor"), {
+      title: "Harbor",
+      nx: 0.42,
+      ny: 0.18,
+      x: 120,
+      z: -40,
+    })
+  );
+  await assertFails(
+    setDoc(doc(other.firestore(), "factions", "city1", "pins", "stolen"), {
+      title: "Stolen",
+      nx: 0.1,
+      ny: 0.1,
+    })
+  );
+  await assertSucceeds(
     updateDoc(doc(friend.firestore(), "factions", "city1"), { lore: "Dark water and cedar." })
   );
   await assertFails(updateDoc(doc(other.firestore(), "factions", "city1"), { lore: "Stolen." }));
@@ -146,21 +176,29 @@ async function main() {
     setDoc(doc(friend.firestore(), "posts", "note"), {
       ...postBody,
       title: "Mine",
-      status: "draft",
+      status: "published",
     })
   );
   await assertSucceeds(
     updateDoc(doc(friend.firestore(), "posts", "note"), { body: "Revised note" })
   );
   await assertFails(updateDoc(doc(other.firestore(), "posts", "note"), { body: "Hijacked" }));
+  await assertSucceeds(
+    setDoc(doc(friend.firestore(), "drafts", "note"), {
+      ...postBody,
+      title: "Mine",
+      status: "draft",
+    })
+  );
+  await assertFails(getDoc(doc(other.firestore(), "drafts", "note")));
   console.log("ok city ownership");
 
   await seedUser(env, "charles", {
-    email: "charles@realm.test",
+    email: "charlie@suarezhouse.net",
     status: "approved",
     isAdmin: true,
   });
-  const sheriff = env.authenticatedContext("charles", { email: "charles@realm.test" });
+  const sheriff = env.authenticatedContext("charles", { email: "charlie@suarezhouse.net" });
   await assertSucceeds(getDoc(doc(friend.firestore(), "conversations", "missing-thread")));
   await assertSucceeds(
     setDoc(doc(friend.firestore(), "conversations", "dm1"), {

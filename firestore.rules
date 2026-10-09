@@ -19,10 +19,9 @@ service cloud.firestore {
       return isSignedIn() && exists(userPath());
     }
 
-    // Root sheriffs. Replace these with real emails, then deploy rules.
-    // Additional emails can be stored on config/admins { emails: string[] }.
+    // Root sheriffs. Additional emails can live on config/admins { emails: string[] }.
     function rootAdminEmails() {
-      return ['charles@realm.test', 'sheriff@cowboycity.example'];
+      return ['charlie@suarezhouse.net', 'cjtheswimmer1101@gmail.com'];
     }
 
     function authEmail() {
@@ -121,7 +120,7 @@ service cloud.firestore {
         isFactionMember(request.resource.data.factionId) &&
         request.resource.data.authorUid == request.auth.uid &&
         request.resource.data.type in ['announcement', 'build', 'lore', 'debate', 'event', 'wiki'] &&
-        request.resource.data.status in ['published', 'draft', 'scheduled'] &&
+        request.resource.data.status == 'published' &&
         request.resource.data.title is string &&
         request.resource.data.title.size() > 0 &&
         request.resource.data.title.size() <= 300 &&
@@ -134,8 +133,7 @@ service cloud.firestore {
         request.resource.data.referencedPostIds is list &&
         request.resource.data.referencedPostIds.size() <= 20 &&
         request.resource.data.spoiler is bool &&
-        (request.resource.data.pinned == false || isAdmin()) &&
-        (request.resource.data.status != 'scheduled' || request.resource.data.publishAt is timestamp);
+        (request.resource.data.pinned == false || isAdmin());
     }
 
     function preservesPostIdentity() {
@@ -275,10 +273,9 @@ service cloud.firestore {
     }
 
     match /posts/{postId} {
-      allow read: if isAdmin() ||
-        (isApproved() && resource.data.status == 'published') ||
-        (isApproved() && resource.data.authorUid == request.auth.uid) ||
-        (isApproved() && isFactionOwner(resource.data.factionId));
+      // Missing status is a legacy published post. Drafts live in /drafts so this
+      // collection can be listed without a status filter.
+      allow read: if isAdmin() || isApproved();
       allow create: if validNewPost();
       allow update: if (isApproved() || isAdmin()) && (
         (isAdmin() && preservesPostIdentity()) ||
@@ -310,6 +307,23 @@ service cloud.firestore {
           request.resource.data.type in ['agrees', 'disputes', 'witnessed'];
         allow delete: if isApproved() && (request.auth.uid == uid || isAdmin());
       }
+    }
+
+    match /drafts/{postId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
+        (isApproved() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId));
+      allow create: if isApproved() &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.status in ['draft', 'scheduled'] &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 300 &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 200000;
+      allow update, delete: if isAdmin() ||
+        (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
+        (isApproved() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId));
     }
 
     match /wiki/{factionId} {

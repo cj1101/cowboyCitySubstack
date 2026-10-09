@@ -2,10 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
-import { getClientDb } from "@/lib/firebase";
-import { getMyPostsByStatus } from "@/lib/firestore/posts";
+import { getMyPostsByStatus, publishStoredPost } from "@/lib/firestore/posts";
 import type { Post } from "@/lib/types";
 
 export default function DraftsPage() {
@@ -30,7 +28,7 @@ export default function DraftsPage() {
   if (!user) return null;
 
   const publishNow = async (postId: string) => {
-    await updateDoc(doc(getClientDb(), "posts", postId), { status: "published", updatedAt: serverTimestamp() });
+    await publishStoredPost(postId);
     load();
   };
 

@@ -52,7 +52,7 @@ Root sheriffs are email addresses hardcoded in the rules, not an environment var
 - `firestore.rules` → `rootAdminEmails()`
 - `storage.rules` → the same list inside `isRootAdmin()`
 
-The placeholders are `charles@realm.test` and `sheriff@cowboycity.example`. Replace both lists with the real sheriff emails, keep them identical, and deploy the rules. A root sheriff signs up like anyone else. On the next page load the client asks Firestore to mark that account approved and `isAdmin: true`. The rules allow it only when the Auth email is on the list.
+The lists are `charlie@suarezhouse.net` and `cjtheswimmer1101@gmail.com`. Keep both files identical, then deploy the rules. A root sheriff signs up like anyone else. On the next page load the client asks Firestore to mark that account approved and `isAdmin: true`. The rules allow it only when the Auth email is on the list.
 
 From `/sheriff` a sheriff can:
 

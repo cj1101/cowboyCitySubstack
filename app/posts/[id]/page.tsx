@@ -55,37 +55,50 @@ export default function PostDetailPage() {
     }
 
     const db = getClientDb();
-    const postRef = doc(db, "posts", postId);
+    let unsubscribe = () => {};
 
-    const unsubscribe = onSnapshot(
-      postRef,
-      async (snapshot) => {
-        if (!snapshot.exists()) {
-          setError("Post not found.");
-          setPost(null);
+    const watch = (collectionName: "posts" | "drafts") => {
+      unsubscribe();
+      unsubscribe = onSnapshot(
+        doc(db, collectionName, postId),
+        async (snapshot) => {
+          if (!snapshot.exists()) {
+            if (collectionName === "posts") {
+              watch("drafts");
+              return;
+            }
+            setError("Post not found.");
+            setPost(null);
+            setLoading(false);
+            return;
+          }
+
+          const data = snapshot.data();
+          const fetched = {
+            id: snapshot.id,
+            ...data,
+            status: data.status ?? "published",
+          } as Post;
+          setPost(fetched);
+          setError(null);
+
+          const [f, c] = await Promise.all([
+            getFaction(fetched.factionId),
+            getCharacter(fetched.characterId),
+          ]);
+          setFaction(f);
+          setCharacter(c);
           setLoading(false);
-          return;
+        },
+        () => {
+          setError("Could not load this post.");
+          setLoading(false);
         }
+      );
+    };
 
-        const fetched = { id: snapshot.id, ...snapshot.data() } as Post;
-        setPost(fetched);
-        setError(null);
-
-        const [f, c] = await Promise.all([
-          getFaction(fetched.factionId),
-          getCharacter(fetched.characterId),
-        ]);
-        setFaction(f);
-        setCharacter(c);
-        setLoading(false);
-      },
-      () => {
-        setError("Could not load this post.");
-        setLoading(false);
-      }
-    );
-
-    return unsubscribe;
+    watch("posts");
+    return () => unsubscribe();
   }, [postId, user, authLoading]);
 
   useEffect(() => {
