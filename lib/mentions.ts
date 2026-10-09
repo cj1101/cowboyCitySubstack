@@ -147,18 +147,23 @@ export async function getRecentPosts(max = 200): Promise<PostSummary[]> {
     limit(max)
   );
   const snapshot = await getDocs(postsQuery);
-  return snapshot.docs.map((docSnap) => {
-    const data = docSnap.data();
-    return {
-      id: docSnap.id,
-      title: (data.title as string) ?? "Untitled",
-      type: (data.type as string) ?? "lore",
-      factionId: (data.factionId as string) ?? "",
-      body: (data.body as string) ?? "",
-      mentions: data.mentions as Mentions | undefined,
-      createdAt: data.createdAt as PostSummary["createdAt"],
-    };
-  });
+  return snapshot.docs
+    .filter((docSnap) => {
+      const status = docSnap.data().status;
+      return status !== "draft" && status !== "scheduled";
+    })
+    .map((docSnap) => {
+      const data = docSnap.data();
+      return {
+        id: docSnap.id,
+        title: (data.title as string) ?? "Untitled",
+        type: (data.type as string) ?? "lore",
+        factionId: (data.factionId as string) ?? "",
+        body: (data.body as string) ?? "",
+        mentions: data.mentions as Mentions | undefined,
+        createdAt: data.createdAt as PostSummary["createdAt"],
+      };
+    });
 }
 
 export async function searchMentionTargets(

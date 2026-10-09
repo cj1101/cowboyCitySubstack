@@ -72,7 +72,7 @@ export default function FactionEditPage() {
         }
         const owner = await isFactionOwner(f.id, user!.uid);
         if (!owner) {
-          router.replace(`/factions/${slug}`);
+          router.replace(`/cities/${slug}`);
           return;
         }
         setFaction(f);
@@ -110,13 +110,15 @@ export default function FactionEditPage() {
       slug: data.slug,
       colors: data.colors,
       bio: data.bio,
+      description: data.bio,
+      lore: data.lore,
       bannerUrl,
       sigilUrl,
     });
 
     await refreshFactionContext();
     if (data.slug !== slug) {
-      router.replace(`/factions/${data.slug}/edit`);
+      router.replace(`/cities/${data.slug}/edit`);
     } else {
       await loadFaction();
     }
@@ -193,7 +195,7 @@ export default function FactionEditPage() {
       <div className="wood-texture min-h-[calc(100vh-4rem)] flex items-center justify-center p-8">
         <div className="glass-panel p-10 text-center">
           <p className="text-red-400 mb-4">{error || "Faction not found"}</p>
-          <Link href="/factions" className="btn btn-secondary">Back to Factions</Link>
+          <Link href="/cities" className="btn btn-secondary">Back to Factions</Link>
         </div>
       </div>
     );
@@ -203,7 +205,7 @@ export default function FactionEditPage() {
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-6 md:p-10">
       <div className="max-w-2xl mx-auto space-y-10">
         <div>
-          <Link href={`/factions/${faction.slug}`} className="text-accent-gold hover:text-accent-gold-hover text-sm">
+          <Link href={`/cities/${faction.slug}`} className="text-accent-gold hover:text-accent-gold-hover text-sm">
             ← View Profile
           </Link>
           <h1 className="text-3xl font-bold text-accent-gold mt-2">Edit {faction.name}</h1>
@@ -217,6 +219,7 @@ export default function FactionEditPage() {
               slug: faction.slug,
               colors: faction.colors,
               bio: faction.bio,
+              lore: faction.lore,
               bannerUrl: faction.bannerUrl,
               sigilUrl: faction.sigilUrl,
             }}

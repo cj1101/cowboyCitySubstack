@@ -3,36 +3,75 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // --- Helpers ---
     function isSignedIn() {
       return request.auth != null;
     }
 
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
     function userDoc() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return get(userPath());
+    }
+
+    function hasUser() {
+      return isSignedIn() && exists(userPath());
+    }
+
+    // Root sheriffs. Additional emails can live on config/admins { emails: string[] }.
+    function rootAdminEmails() {
+      return ['charlie@suarezhouse.net', 'cjtheswimmer1101@gmail.com'];
+    }
+
+    function authEmail() {
+      return isSignedIn() && request.auth.token.email is string
+        ? request.auth.token.email.lower()
+        : '';
+    }
+
+    function isRootAdmin() {
+      return authEmail() in rootAdminEmails();
+    }
+
+    function isConfigAdmin() {
+      return authEmail() != '' &&
+        exists(/databases/$(database)/documents/config/admins) &&
+        authEmail() in get(/databases/$(database)/documents/config/admins).data.emails;
+    }
+
+    function isAllowlisted() {
+      return isRootAdmin() || isConfigAdmin();
     }
 
     function isAdmin() {
-      return isSignedIn() && userDoc().data.isAdmin == true;
+      return isAllowlisted() || (hasUser() && userDoc().data.isAdmin == true);
+    }
+
+    function isApproved() {
+      return isAllowlisted() || (hasUser() && userDoc().data.status == 'approved');
     }
 
     function memberDocId(uid, factionId) {
       return uid + '_' + factionId;
     }
 
-    function factionMemberDoc(uid, factionId) {
-      return get(/databases/$(database)/documents/faction_members/$(memberDocId(uid, factionId)));
+    function factionMemberPath(uid, factionId) {
+      return /databases/$(database)/documents/faction_members/$(memberDocId(uid, factionId));
     }
 
     function isFactionOwner(factionId) {
       return isSignedIn() &&
-        exists(/databases/$(database)/documents/faction_members/$(memberDocId(request.auth.uid, factionId))) &&
-        factionMemberDoc(request.auth.uid, factionId).data.role == 'owner';
+        exists(factionMemberPath(request.auth.uid, factionId)) &&
+        get(factionMemberPath(request.auth.uid, factionId)).data.role == 'owner';
     }
 
     function isFactionMember(factionId) {
-      return isSignedIn() &&
-        exists(/databases/$(database)/documents/faction_members/$(memberDocId(request.auth.uid, factionId)));
+      return isSignedIn() && exists(factionMemberPath(request.auth.uid, factionId));
+    }
+
+    function validStatus(status) {
+      return status in ['pending', 'approved', 'denied', 'suspended', 'removed'];
     }
 
     function ownerSubmittingHtml() {
@@ -47,6 +86,14 @@ service cloud.firestore {
     function ownerUpdatingProfile() {
       return !request.resource.data.diff(resource.data).affectedKeys()
           .hasAny(['liveHtml', 'pendingHtml', 'htmlStatus', 'htmlSubmittedAt', 'htmlReviewedAt', 'ownerUids']);
+    }
+
+    function ownerManagingCoOwners(factionId) {
+      return isFactionOwner(factionId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUids']) &&
+        request.auth.uid in request.resource.data.ownerUids &&
+        request.resource.data.ownerUids.size() >= 1 &&
+        request.resource.data.ownerUids.size() <= 12;
     }
 
     function adminApprovingHtml() {
@@ -68,97 +115,313 @@ service cloud.firestore {
         request.resource.data.poll.votes[request.auth.uid] < resource.data.poll.options.size();
     }
 
-    // --- Users ---
-    match /users/{uid} {
+    function validNewPost() {
+      return isApproved() &&
+        isFactionMember(request.resource.data.factionId) &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.type in ['announcement', 'build', 'lore', 'debate', 'event', 'wiki'] &&
+        request.resource.data.status == 'published' &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 300 &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 200000 &&
+        request.resource.data.cityIds is list &&
+        request.resource.data.cityIds.size() >= 1 &&
+        request.resource.data.cityIds.size() <= 12 &&
+        request.resource.data.factionId in request.resource.data.cityIds &&
+        request.resource.data.referencedPostIds is list &&
+        request.resource.data.referencedPostIds.size() <= 20 &&
+        request.resource.data.spoiler is bool &&
+        (request.resource.data.pinned == false || isAdmin());
+    }
+
+    function preservesPostIdentity() {
+      return request.resource.data.factionId == resource.data.factionId &&
+        request.resource.data.authorUid == resource.data.authorUid &&
+        request.resource.data.pinned == resource.data.pinned;
+    }
+
+    function bootstrappingOwnMembership(memberId) {
+      return isApproved() &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.role == 'owner' &&
+        request.resource.data.factionId is string &&
+        memberId == request.auth.uid + '_' + request.resource.data.factionId &&
+        exists(/databases/$(database)/documents/factions/$(request.resource.data.factionId)) &&
+        get(/databases/$(database)/documents/factions/$(request.resource.data.factionId)).data.ownerUids.hasAny([request.auth.uid]);
+    }
+
+    function keepsIdentity() {
+      return request.resource.data.email == resource.data.email &&
+        request.resource.data.isAdmin == resource.data.isAdmin &&
+        request.resource.data.status == resource.data.status;
+    }
+
+    function selfPromoteAllowlisted(uid) {
+      return request.auth.uid == uid &&
+        isAllowlisted() &&
+        request.resource.data.isAdmin == true &&
+        request.resource.data.status == 'approved' &&
+        request.resource.data.email == resource.data.email;
+    }
+
+    function acceptOwnInvite(uid) {
+      return request.auth.uid == uid &&
+        resource.data.status == 'pending' &&
+        request.resource.data.status == 'approved' &&
+        request.resource.data.isAdmin == resource.data.isAdmin &&
+        request.resource.data.email == resource.data.email &&
+        authEmail() != '' &&
+        exists(/databases/$(database)/documents/invites/$(authEmail())) &&
+        get(/databases/$(database)/documents/invites/$(authEmail())).data.status != 'revoked';
+    }
+
+    match /config/{docId} {
       allow read: if isSignedIn();
+      allow write: if docId == 'admins' && isAdmin() &&
+        request.resource.data.emails is list &&
+        request.resource.data.emails.size() <= 50;
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isApproved() || isAdmin());
       allow create: if isSignedIn() &&
         request.auth.uid == uid &&
-        request.resource.data.isAdmin == false;
-      allow update: if (request.auth.uid == uid &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin'])) ||
-        isAdmin();
-      allow delete: if isAdmin();
-    }
-
-    // --- Factions ---
-    match /factions/{factionId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() &&
-        request.resource.data.ownerUids is list &&
-        request.auth.uid in request.resource.data.ownerUids;
-      allow update: if isAdmin() ||
-        (isFactionOwner(factionId) && ownerUpdatingProfile()) ||
-        (isFactionOwner(factionId) && ownerSubmittingHtml()) ||
-        (isAdmin() && adminApprovingHtml());
-      allow delete: if isAdmin();
-    }
-
-    // --- Characters ---
-    match /characters/{characterId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() &&
-        isFactionOwner(request.resource.data.factionId);
-      allow update: if isSignedIn() &&
-        isFactionOwner(request.resource.data.factionId);
-      allow delete: if isSignedIn() &&
-        (isFactionOwner(resource.data.factionId) || isAdmin());
-    }
-
-    // --- Faction membership ---
-    match /faction_members/{memberId} {
-      allow read: if isSignedIn();
-      allow create, update: if isAdmin() ||
-        (isSignedIn() && isFactionOwner(request.resource.data.factionId));
-      allow delete: if isAdmin() ||
-        (isSignedIn() && isFactionOwner(resource.data.factionId));
-    }
-
-    // --- Posts ---
-    match /posts/{postId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() &&
-        isFactionMember(request.resource.data.factionId) &&
-        request.resource.data.type in ['announcement', 'build', 'lore', 'debate', 'event', 'wiki'];
+        request.resource.data.isAdmin == false &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.email is string &&
+        request.resource.data.email.lower() == authEmail();
       allow update: if isSignedIn() && (
-        (isFactionOwner(resource.data.factionId) &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['factionId', 'characterId'])) ||
-        isAdmin() ||
+        (isAdmin() && request.auth.uid != uid && validStatus(request.resource.data.status)) ||
+        selfPromoteAllowlisted(uid) ||
+        acceptOwnInvite(uid) ||
+        (request.auth.uid == uid && keepsIdentity())
+      );
+      allow delete: if isAdmin() && request.auth.uid != uid;
+
+      match /reads/{conversationId} {
+        allow read, write: if isApproved() && request.auth.uid == uid;
+      }
+    }
+
+    match /invites/{inviteId} {
+      allow read: if isAdmin() ||
+        (authEmail() != '' && inviteId == authEmail());
+      allow create: if isAdmin() &&
+        request.resource.data.email is string &&
+        request.resource.data.email.size() > 3 &&
+        request.resource.data.email.size() < 200 &&
+        inviteId == request.resource.data.email.lower();
+      allow update: if isAdmin() ||
+        (authEmail() != '' &&
+          inviteId == authEmail() &&
+          resource.data.status != 'revoked' &&
+          request.resource.data.email == resource.data.email &&
+          request.resource.data.status == 'accepted' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedUid']));
+      allow delete: if isAdmin();
+    }
+
+    match /factions/{factionId} {
+      allow read: if isApproved();
+      allow create: if isApproved() &&
+        request.resource.data.ownerUids is list &&
+        request.resource.data.ownerUids.size() >= 1 &&
+        request.resource.data.ownerUids.size() <= 12 &&
+        request.auth.uid in request.resource.data.ownerUids &&
+        request.resource.data.name is string &&
+        request.resource.data.slug is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 80;
+      allow update: if isAdmin() || (
+        isApproved() &&
+        isFactionOwner(factionId) &&
+        (ownerUpdatingProfile() || ownerSubmittingHtml() || ownerManagingCoOwners(factionId))
+      );
+      allow delete: if isAdmin();
+
+      match /pins/{pinId} {
+        allow read: if isApproved();
+        allow create, update: if isApproved() &&
+          (isAdmin() || isFactionOwner(factionId)) &&
+          request.resource.data.title is string &&
+          request.resource.data.title.size() > 0 &&
+          request.resource.data.title.size() <= 200 &&
+          request.resource.data.nx is number &&
+          request.resource.data.ny is number;
+        allow delete: if isApproved() && (isAdmin() || isFactionOwner(factionId));
+      }
+    }
+
+    match /characters/{characterId} {
+      allow read: if isApproved();
+      allow create: if isApproved() && isFactionOwner(request.resource.data.factionId);
+      allow update: if isApproved() && isFactionOwner(request.resource.data.factionId);
+      allow delete: if isApproved() && (isFactionOwner(resource.data.factionId) || isAdmin());
+    }
+
+    match /faction_members/{memberId} {
+      allow read: if isApproved();
+      allow create: if isAdmin() ||
+        (isApproved() && isFactionOwner(request.resource.data.factionId)) ||
+        bootstrappingOwnMembership(memberId);
+      allow update: if isAdmin() ||
+        (isApproved() && isFactionOwner(request.resource.data.factionId));
+      allow delete: if isAdmin() ||
+        (isApproved() && isFactionOwner(resource.data.factionId));
+    }
+
+    match /posts/{postId} {
+      // Missing status is a legacy published post. Drafts live in /drafts so this
+      // collection can be listed without a status filter.
+      allow read: if isAdmin() || isApproved();
+      allow create: if validNewPost();
+      allow update: if (isApproved() || isAdmin()) && (
+        (isAdmin() && preservesPostIdentity()) ||
+        ((resource.data.authorUid == request.auth.uid || isFactionOwner(resource.data.factionId)) &&
+          preservesPostIdentity()) ||
         (validPollVote() &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['poll', 'updatedAt']))
       );
-      allow delete: if isSignedIn() &&
-        (isFactionOwner(resource.data.factionId) || isAdmin());
+      allow delete: if (isApproved() || isAdmin()) &&
+        (isAdmin() || isFactionOwner(resource.data.factionId) || resource.data.authorUid == request.auth.uid);
 
       match /replies/{replyId} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn() &&
+        allow read: if isApproved();
+        allow create: if isApproved() &&
           isFactionMember(request.resource.data.factionId) &&
-          request.resource.data.stance in ['for', 'against', 'neutral'];
-        allow update, delete: if isSignedIn() &&
-          (isFactionOwner(resource.data.factionId) || isAdmin());
+          request.resource.data.stance in ['for', 'against', 'neutral'] &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() > 0 &&
+          request.resource.data.body.size() <= 8000 &&
+          request.resource.data.authorUid == request.auth.uid;
+        allow update, delete: if isApproved() &&
+          (isFactionOwner(resource.data.factionId) || isAdmin() || resource.data.authorUid == request.auth.uid);
       }
 
       match /reactions/{uid} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn() &&
+        allow read: if isApproved();
+        allow create, update: if isApproved() &&
           request.auth.uid == uid &&
           request.resource.data.type in ['agrees', 'disputes', 'witnessed'];
-        allow update: if isSignedIn() &&
-          request.auth.uid == uid &&
-          request.resource.data.type in ['agrees', 'disputes', 'witnessed'];
-        allow delete: if request.auth.uid == uid || isAdmin();
+        allow delete: if isApproved() && (request.auth.uid == uid || isAdmin());
       }
     }
 
-    // --- Wiki ---
+    match /drafts/{postId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
+        (isApproved() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId));
+      allow create: if isApproved() &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.status in ['draft', 'scheduled'] &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 300 &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 200000;
+      allow update, delete: if isAdmin() ||
+        (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
+        (isApproved() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId));
+    }
+
     match /wiki/{factionId} {
-      allow read: if isSignedIn();
-      allow write: if isFactionOwner(factionId) || isAdmin();
+      allow read: if isApproved();
+      allow write: if isApproved() && (isFactionOwner(factionId) || isAdmin());
 
       match /wiki_sections/{sectionId} {
-        allow read: if isSignedIn();
-        allow write: if isFactionOwner(factionId) || isAdmin();
+        allow read: if isApproved();
+        allow write: if isApproved() && (isFactionOwner(factionId) || isAdmin());
       }
+    }
+
+    match /wiki_entries/{entryId} {
+      allow read: if isApproved();
+      allow create, update: if isApproved() &&
+        isFactionOwner(request.resource.data.cityId) &&
+        request.resource.data.kind in ['character', 'place', 'faction', 'law', 'species', 'team'] &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 160 &&
+        request.resource.data.slug is string &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 200000;
+      allow delete: if isApproved() && (isAdmin() || isFactionOwner(resource.data.cityId));
+    }
+
+    match /follows/{followId} {
+      allow read: if isApproved();
+      allow create: if isApproved() &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.cityId is string &&
+        followId == request.auth.uid + '_' + request.resource.data.cityId;
+      allow delete: if isApproved() && resource.data.uid == request.auth.uid;
+    }
+
+    match /eras/{eraId} {
+      allow read: if isApproved();
+      allow create, update: if isApproved() &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 80;
+      allow delete: if isAdmin();
+    }
+
+    match /realm_map/{docId} {
+      allow read: if isApproved();
+      allow write: if isAdmin();
+
+      match /pins/{pinId} {
+        allow read: if isApproved();
+        allow create, update: if isAdmin() &&
+          request.resource.data.title is string &&
+          request.resource.data.title.size() > 0 &&
+          request.resource.data.nx is number &&
+          request.resource.data.ny is number;
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /conversations/{conversationId} {
+      allow get: if resource == null ||
+        (isApproved() && request.auth.uid in resource.data.participantUids);
+      allow list: if isApproved() && request.auth.uid in resource.data.participantUids;
+      allow create: if isApproved() &&
+        request.resource.data.participantUids is list &&
+        request.resource.data.participantUids.size() >= 2 &&
+        request.resource.data.participantUids.size() <= 8 &&
+        request.auth.uid in request.resource.data.participantUids;
+      allow update: if isApproved() &&
+        request.auth.uid in resource.data.participantUids &&
+        request.resource.data.participantUids == resource.data.participantUids;
+
+      match /messages/{messageId} {
+        allow read: if isApproved() &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantUids;
+        allow create: if isApproved() &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantUids &&
+          request.resource.data.senderUid == request.auth.uid &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() > 0 &&
+          request.resource.data.body.size() <= 5000;
+        allow update, delete: if false;
+      }
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.recipientUid == request.auth.uid;
+      allow create: if isApproved() &&
+        request.resource.data.recipientUid is string &&
+        request.resource.data.read == false &&
+        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval'] &&
+        request.resource.data.summary is string &&
+        request.resource.data.summary.size() <= 500 &&
+        request.resource.data.href is string;
+      allow update: if isSignedIn() &&
+        resource.data.recipientUid == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read == true;
     }
   }
 }

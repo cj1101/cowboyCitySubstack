@@ -55,15 +55,15 @@ export function DebateThread({ post, canCreatePoll = false }: DebateThreadProps)
         if (next[key]) continue;
 
         const [factionSnap, characterSnap] = await Promise.all([
-          getDoc(doc(db, "factions", reply.factionId)),
-          getDoc(doc(db, "characters", reply.characterId)),
+          reply.factionId ? getDoc(doc(db, "factions", reply.factionId)) : Promise.resolve(null),
+          reply.characterId ? getDoc(doc(db, "characters", reply.characterId)) : Promise.resolve(null),
         ]);
 
         next[key] = {
-          factionName: factionSnap.exists()
+          factionName: factionSnap?.exists()
             ? (factionSnap.data().name as string)
             : reply.factionId,
-          characterName: characterSnap.exists()
+          characterName: characterSnap?.exists()
             ? (characterSnap.data().name as string)
             : reply.characterId,
         };

@@ -7,6 +7,41 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function userDoc() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid));
+    }
+
+    function authEmail() {
+      return isSignedIn() && request.auth.token.email is string
+        ? request.auth.token.email.lower()
+        : '';
+    }
+
+    function isRootAdmin() {
+      return authEmail() in ['charlie@suarezhouse.net', 'cjtheswimmer1101@gmail.com'];
+    }
+
+    function isConfigAdmin() {
+      return authEmail() != '' &&
+        firestore.exists(/databases/(default)/documents/config/admins) &&
+        authEmail() in firestore.get(/databases/(default)/documents/config/admins).data.emails;
+    }
+
+    function isAdmin() {
+      return isRootAdmin() || isConfigAdmin() ||
+        (hasUserDoc() && userDoc().data.isAdmin == true);
+    }
+
+    function hasUserDoc() {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/users/$(request.auth.uid));
+    }
+
+    function isApproved() {
+      return isRootAdmin() || isConfigAdmin() ||
+        (hasUserDoc() && userDoc().data.status == 'approved');
+    }
+
     function memberDocId(uid, factionId) {
       return uid + '_' + factionId;
     }
@@ -17,52 +52,68 @@ service firebase.storage {
         firestore.get(/databases/(default)/documents/faction_members/$(memberDocId(request.auth.uid, factionId))).data.role == 'owner';
     }
 
-    function isFactionMember(factionId) {
-      return isSignedIn() &&
-        firestore.exists(/databases/(default)/documents/faction_members/$(memberDocId(request.auth.uid, factionId)));
-    }
-
-    function isAdmin() {
-      return isSignedIn() &&
-        firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.isAdmin == true;
-    }
-
-    function isValidImage(maxBytes) {
+    function isImage(maxBytes) {
       return request.resource.size < maxBytes &&
         request.resource.contentType.matches('image/.*');
     }
 
-    // Faction banners and sigils — owners or admins upload
+    function isVideo(maxBytes) {
+      return request.resource.size < maxBytes &&
+        request.resource.contentType.matches('video/.*');
+    }
+
+    function postDoc(postId) {
+      return firestore.get(/databases/(default)/documents/posts/$(postId));
+    }
+
+    function canWritePostMedia(postId) {
+      return isAdmin() ||
+        !firestore.exists(/databases/(default)/documents/posts/$(postId)) ||
+        postDoc(postId).data.authorUid == request.auth.uid ||
+        isFactionOwner(postDoc(postId).data.factionId);
+    }
+
     match /factions/{factionId}/{fileName} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() &&
+      allow read: if isApproved();
+      allow write: if isApproved() &&
         (isFactionOwner(factionId) || isAdmin()) &&
-        isValidImage(10 * 1024 * 1024);
-      allow delete: if isSignedIn() &&
-        (isFactionOwner(factionId) || isAdmin());
+        isImage(15 * 1024 * 1024);
+      allow delete: if isApproved() && (isFactionOwner(factionId) || isAdmin());
     }
 
-    // Build carousel images on posts — any signed-in member may upload
     match /posts/{postId}/{fileName} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isValidImage(10 * 1024 * 1024);
-      allow delete: if isSignedIn() && (isAdmin());
+      allow read: if isApproved();
+      allow write: if isApproved() &&
+        canWritePostMedia(postId) &&
+        (isImage(8 * 1024 * 1024) || isVideo(80 * 1024 * 1024));
+      allow delete: if isApproved() && (isAdmin() || canWritePostMedia(postId));
     }
 
-    // Character avatars — faction owners upload
     match /characters/{characterId}/{fileName} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() &&
-        isValidImage(5 * 1024 * 1024) &&
+      allow read: if isApproved();
+      allow write: if isApproved() &&
+        isImage(5 * 1024 * 1024) &&
         firestore.exists(/databases/(default)/documents/characters/$(characterId)) &&
         isFactionOwner(
           firestore.get(/databases/(default)/documents/characters/$(characterId)).data.factionId
         );
-      allow delete: if isSignedIn() &&
+      allow delete: if isApproved() &&
         firestore.exists(/databases/(default)/documents/characters/$(characterId)) &&
         (isFactionOwner(
           firestore.get(/databases/(default)/documents/characters/$(characterId)).data.factionId
         ) || isAdmin());
+    }
+
+    match /users/{uid}/{fileName} {
+      allow read: if isApproved() || (isSignedIn() && request.auth.uid == uid);
+      allow write: if isSignedIn() && request.auth.uid == uid && isImage(5 * 1024 * 1024);
+      allow delete: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+    }
+
+    match /realm/{fileName} {
+      allow read: if isApproved();
+      allow write: if isAdmin() && isImage(15 * 1024 * 1024);
+      allow delete: if isAdmin();
     }
   }
 }

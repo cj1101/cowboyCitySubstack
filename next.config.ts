@@ -7,7 +7,17 @@ const nextConfig: NextConfig = {
         protocol: "https",
         hostname: "firebasestorage.googleapis.com",
       },
+      {
+        protocol: "https",
+        hostname: "*.firebasestorage.app",
+      },
     ],
+  },
+  async rewrites() {
+    return [
+      { source: "/cities", destination: "/factions" },
+      { source: "/cities/:path*", destination: "/factions/:path*" },
+    ];
   },
 };
 

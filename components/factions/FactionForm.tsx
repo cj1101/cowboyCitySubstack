@@ -9,6 +9,7 @@ export interface FactionFormData {
   slug: string;
   colors: FactionColors;
   bio: string;
+  lore: string;
   bannerFile: File | null;
   sigilFile: File | null;
 }
@@ -28,6 +29,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
   const [primaryColor, setPrimaryColor] = useState(initial?.colors?.primary ?? DEFAULT_COLORS.primary);
   const [secondaryColor, setSecondaryColor] = useState(initial?.colors?.secondary ?? DEFAULT_COLORS.secondary);
   const [bio, setBio] = useState(initial?.bio ?? "");
+  const [lore, setLore] = useState(initial?.lore ?? "");
   const [bannerFile, setBannerFile] = useState<File | null>(null);
   const [sigilFile, setSigilFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -50,6 +52,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
         slug: slug.trim(),
         colors: { primary: primaryColor, secondary: secondaryColor },
         bio: bio.trim(),
+        lore: lore.trim(),
         bannerFile,
         sigilFile,
       });
@@ -63,7 +66,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div>
-        <label htmlFor="faction-name" className="form-label">Faction Name</label>
+        <label htmlFor="faction-name" className="form-label">City name</label>
         <input
           id="faction-name"
           type="text"
@@ -89,7 +92,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
           className="form-input"
           placeholder="iron-ridge-republic"
         />
-        <p className="text-text-muted text-xs mt-1">/factions/{slug || "your-slug"}</p>
+        <p className="text-text-muted text-xs mt-1">/cities/{slug || "your-slug"}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
@@ -132,14 +135,26 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
       </div>
 
       <div>
-        <label htmlFor="faction-bio" className="form-label">Bio</label>
+        <label htmlFor="faction-bio" className="form-label">Description</label>
         <textarea
           id="faction-bio"
           rows={4}
           value={bio}
           onChange={(e) => setBio(e.target.value)}
           className="form-input resize-y"
-          placeholder="Tell the realm about this faction…"
+          placeholder="A short public description of this city"
+        />
+      </div>
+
+      <div>
+        <label htmlFor="faction-lore" className="form-label">Lore</label>
+        <textarea
+          id="faction-lore"
+          rows={6}
+          value={lore}
+          onChange={(e) => setLore(e.target.value)}
+          className="form-input resize-y"
+          placeholder="The longer history of this city-state"
         />
       </div>
 
@@ -158,7 +173,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
           />
         </div>
         <div>
-          <label htmlFor="sigil-upload" className="form-label">Sigil Image</label>
+          <label htmlFor="sigil-upload" className="form-label">Crest</label>
           {initial?.sigilUrl && !sigilFile && (
             <img src={initial.sigilUrl} alt="Current sigil" className="w-16 h-16 object-cover rounded-full mb-2 border border-accent-gold" />
           )}

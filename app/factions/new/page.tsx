@@ -33,6 +33,8 @@ export default function NewFactionPage() {
       slug: data.slug,
       colors: data.colors,
       bio: data.bio,
+      description: data.bio,
+      lore: data.lore,
     });
 
     let bannerUrl: string | undefined;
@@ -51,7 +53,7 @@ export default function NewFactionPage() {
     }
 
     await refresh();
-    router.push(`/factions/${data.slug}/edit`);
+    router.push(`/cities/${data.slug}/edit`);
   };
 
   if (authLoading) {
@@ -67,13 +69,13 @@ export default function NewFactionPage() {
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-6 md:p-10">
       <div className="max-w-xl mx-auto">
-        <Link href="/factions" className="text-accent-gold hover:text-accent-gold-hover text-sm mb-4 inline-block">
+        <Link href="/cities" className="text-accent-gold hover:text-accent-gold-hover text-sm mb-4 inline-block">
           ← Back to Factions
         </Link>
-        <h1 className="text-3xl font-bold text-accent-gold mb-2">Found a Faction</h1>
-        <p className="text-text-muted mb-8">Establish your city, guild, or power in the realm.</p>
+        <h1 className="text-3xl font-bold text-accent-gold mb-2">Found a city</h1>
+        <p className="text-text-muted mb-8">Each approved person can keep one or more city accounts.</p>
         <div className="glass-panel p-8">
-          <FactionForm onSubmit={handleSubmit} submitLabel="Create Faction" />
+          <FactionForm onSubmit={handleSubmit} submitLabel="Create city" />
         </div>
       </div>
     </div>

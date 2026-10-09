@@ -9,7 +9,9 @@ import {
   getCharactersMap,
   getFactionsMap,
   getPosts,
+  publishDueScheduledPosts,
 } from "@/lib/firestore/posts";
+import { getFollowedCityIds } from "@/lib/firestore/follows";
 import type { Character, Faction, Post } from "@/lib/types";
 
 export function GlobalFeed() {
@@ -21,14 +23,19 @@ export function GlobalFeed() {
     new Map()
   );
   const [factionFilter, setFactionFilter] = useState<string>("");
+  const [followingOnly, setFollowingOnly] = useState(false);
+  const [followed, setFollowed] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!user) return;
     getAllFactions()
       .then(setFactions)
       .catch(() => setFactions([]));
-  }, []);
+    publishDueScheduledPosts(user.uid).catch(() => undefined);
+    getFollowedCityIds(user.uid).then(setFollowed).catch(() => setFollowed([]));
+  }, [user]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -69,7 +76,7 @@ export function GlobalFeed() {
             Cowboy City Lore
           </h1>
           <p className="text-text-muted text-lg mb-8">
-            The realm&apos;s chronicle — factions, lore, debates, and wiki in one place.
+            A private chronicle of the realm&apos;s city-states. Ask to join, then a sheriff lets you in.
           </p>
           <div className="flex gap-4 justify-center flex-wrap">
             <Link href="/login" className="btn">
@@ -93,7 +100,7 @@ export function GlobalFeed() {
           <div>
             <h1 className="text-3xl font-bold text-accent-gold">Realm Feed</h1>
             <p className="text-text-muted text-sm mt-1">
-              Chronological lore from all factions
+              Newest posts first, from every city
             </p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
@@ -101,15 +108,19 @@ export function GlobalFeed() {
               value={factionFilter}
               onChange={(e) => setFactionFilter(e.target.value)}
               className="form-input py-2 text-sm w-auto min-w-[160px]"
-              aria-label="Filter by faction"
+              aria-label="Filter by city"
             >
-              <option value="">All factions</option>
+              <option value="">All cities</option>
               {factions.map((f) => (
                 <option key={f.id} value={f.id}>
                   {f.name}
                 </option>
               ))}
             </select>
+            <label className="text-sm flex items-center gap-2">
+              <input type="checkbox" checked={followingOnly} onChange={(e) => setFollowingOnly(e.target.checked)} />
+              Following
+            </label>
             <Link href="/posts/new" className="btn text-sm px-5 py-2">
               New Post
             </Link>
@@ -141,12 +152,15 @@ export function GlobalFeed() {
 
         {!loading && !error && posts.length > 0 && (
           <div className="flex flex-col gap-5">
-            {posts.map((post) => (
+            {posts
+              .filter((post) => !followingOnly || (post.cityIds ?? [post.factionId]).some((id) => followed.includes(id)))
+              .map((post) => (
               <PostCard
                 key={post.id}
                 post={post}
                 faction={factionsMap.get(post.factionId)}
                 character={charactersMap.get(post.characterId)}
+                tagged={factions.filter((city) => (post.cityIds ?? []).includes(city.id))}
               />
             ))}
           </div>

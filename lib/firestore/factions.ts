@@ -28,7 +28,10 @@ function docToFaction(id: string, data: Record<string, unknown>): Faction {
     colors: data.colors as Faction["colors"],
     bannerUrl: data.bannerUrl as string | undefined,
     sigilUrl: data.sigilUrl as string | undefined,
-    bio: data.bio as string | undefined,
+    bio: (data.description as string | undefined) ?? (data.bio as string | undefined),
+    description: (data.description as string | undefined) ?? (data.bio as string | undefined),
+    lore: data.lore as string | undefined,
+    mapImageUrl: data.mapImageUrl as string | undefined,
     liveHtml: data.liveHtml as string | undefined,
     pendingHtml: data.pendingHtml as string | undefined,
     htmlStatus: data.htmlStatus as Faction["htmlStatus"],
@@ -71,29 +74,27 @@ export async function createFaction(
   input: FactionInput
 ): Promise<Faction> {
   const db = getClientDb();
-  const batch = writeBatch(db);
-
   const factionRef = doc(collection(db, FACTIONS));
-  const factionData = {
+  const description = input.description ?? input.bio ?? "";
+  await setDoc(factionRef, {
     name: input.name,
     slug: input.slug,
     colors: input.colors,
     bannerUrl: input.bannerUrl ?? null,
     sigilUrl: input.sigilUrl ?? null,
-    bio: input.bio ?? "",
+    bio: description,
+    description,
+    lore: input.lore ?? "",
+    mapImageUrl: input.mapImageUrl ?? null,
     ownerUids: [creatorUid],
     createdAt: serverTimestamp(),
-  };
-  batch.set(factionRef, factionData);
+  });
 
-  const memberRef = doc(db, FACTION_MEMBERS, memberDocId(creatorUid, factionRef.id));
-  batch.set(memberRef, {
+  await setDoc(doc(db, FACTION_MEMBERS, memberDocId(creatorUid, factionRef.id)), {
     uid: creatorUid,
     factionId: factionRef.id,
     role: "owner",
   });
-
-  await batch.commit();
 
   return {
     id: factionRef.id,
@@ -102,7 +103,10 @@ export async function createFaction(
     colors: input.colors,
     bannerUrl: input.bannerUrl,
     sigilUrl: input.sigilUrl,
-    bio: input.bio,
+    bio: description,
+    description,
+    lore: input.lore,
+    mapImageUrl: input.mapImageUrl,
     ownerUids: [creatorUid],
   };
 }
@@ -118,7 +122,13 @@ export async function updateFaction(
   if (input.colors !== undefined) updates.colors = input.colors;
   if (input.bannerUrl !== undefined) updates.bannerUrl = input.bannerUrl;
   if (input.sigilUrl !== undefined) updates.sigilUrl = input.sigilUrl;
-  if (input.bio !== undefined) updates.bio = input.bio;
+  if (input.bio !== undefined || input.description !== undefined) {
+    const description = input.description ?? input.bio ?? "";
+    updates.bio = description;
+    updates.description = description;
+  }
+  if (input.lore !== undefined) updates.lore = input.lore;
+  if (input.mapImageUrl !== undefined) updates.mapImageUrl = input.mapImageUrl;
   await updateDoc(doc(db, FACTIONS, factionId), updates);
 }
 

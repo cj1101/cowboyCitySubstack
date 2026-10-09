@@ -16,6 +16,8 @@ import { WikiTab } from "@/components/wiki/WikiTab";
 
 import { PostCard } from "@/components/posts/PostCard";
 
+import { CityPanel } from "@/components/cities/CityPanel";
+
 import { getFactionBySlug, isFactionOwner } from "@/lib/firestore/factions";
 
 import { getCharactersForFaction } from "@/lib/firestore/characters";
@@ -196,7 +198,7 @@ export default function FactionProfilePageClient() {
 
           <p className="text-red-400 mb-4">{error || "Faction not found"}</p>
 
-          <Link href="/factions" className="btn btn-secondary">
+          <Link href="/cities" className="btn btn-secondary">
 
             Back to Factions
 
@@ -294,9 +296,9 @@ export default function FactionProfilePageClient() {
 
             <div className="flex items-center justify-between flex-wrap gap-4">
 
-              <Link href="/factions" className="text-accent-gold hover:text-accent-gold-hover text-sm">
+              <Link href="/cities" className="text-accent-gold hover:text-accent-gold-hover text-sm">
 
-                ← All Factions
+                ← All cities
 
               </Link>
 
@@ -304,7 +306,7 @@ export default function FactionProfilePageClient() {
 
                 <Link
 
-                  href={`/factions/${faction.slug}`}
+                  href={`/cities/${faction.slug}`}
 
                   className="btn text-sm px-4 py-2 btn-secondary"
 
@@ -316,7 +318,7 @@ export default function FactionProfilePageClient() {
 
                 <Link
 
-                  href={`/factions/${faction.slug}?tab=wiki`}
+                  href={`/cities/${faction.slug}?tab=wiki`}
 
                   className="btn text-sm px-4 py-2"
 
@@ -378,13 +380,13 @@ export default function FactionProfilePageClient() {
 
             <Link
 
-              href="/factions"
+              href="/cities"
 
               className="text-accent-gold hover:text-accent-gold-hover text-sm font-bold"
 
             >
 
-              ← All Factions
+              ← All cities
 
             </Link>
 
@@ -466,13 +468,13 @@ export default function FactionProfilePageClient() {
 
               <Link
 
-                href={`/factions/${faction.slug}/edit`}
+                href={`/cities/${faction.slug}/edit`}
 
                 className="text-text-muted hover:text-accent-gold text-sm mt-1 inline-block"
 
               >
 
-                Edit faction →
+                Edit city →
 
               </Link>
 
@@ -492,9 +494,9 @@ export default function FactionProfilePageClient() {
 
           <div className="flex items-center justify-between flex-wrap gap-4">
 
-            <Link href="/factions" className="text-accent-gold hover:text-accent-gold-hover text-sm">
+            <Link href="/cities" className="text-accent-gold hover:text-accent-gold-hover text-sm">
 
-              ← All Factions
+              ← All cities
 
             </Link>
 
@@ -502,7 +504,7 @@ export default function FactionProfilePageClient() {
 
               <Link
 
-                href={`/factions/${faction.slug}`}
+                href={`/cities/${faction.slug}`}
 
                 className="btn text-sm px-4 py-2"
 
@@ -514,7 +516,7 @@ export default function FactionProfilePageClient() {
 
               <Link
 
-                href={`/factions/${faction.slug}?tab=wiki`}
+                href={`/cities/${faction.slug}?tab=wiki`}
 
                 className="btn text-sm px-4 py-2 btn-secondary"
 
@@ -654,7 +656,11 @@ export default function FactionProfilePageClient() {
 
           <section className="glass-panel p-6">
 
-            <h2 className="text-xl font-bold text-accent-gold mb-4">Faction Feed</h2>
+            <CityPanel faction={faction} isOwner={isOwner} />
+
+
+
+          <h2 className="text-xl font-bold text-accent-gold mb-4">City feed</h2>
 
             {feedLoading ? (
 

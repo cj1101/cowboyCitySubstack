@@ -1,7 +1,10 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDocs,
+  serverTimestamp,
+  setDoc,
   updateDoc,
   writeBatch,
 } from "firebase/firestore";
@@ -12,6 +15,7 @@ export interface AdminUser {
   email: string;
   displayName: string;
   isAdmin: boolean;
+  status: string;
   createdAt?: unknown;
 }
 
@@ -25,6 +29,7 @@ export async function getAllUsers(): Promise<AdminUser[]> {
       email: data.email ?? "",
       displayName: data.displayName ?? "",
       isAdmin: data.isAdmin === true,
+      status: data.status ?? "pending",
       createdAt: data.createdAt,
     };
   });
@@ -33,6 +38,25 @@ export async function getAllUsers(): Promise<AdminUser[]> {
 export async function setUserAdmin(uid: string, isAdmin: boolean): Promise<void> {
   const db = getClientDb();
   await updateDoc(doc(db, "users", uid), { isAdmin });
+}
+
+export async function setUserStatus(uid: string, status: string): Promise<void> {
+  const db = getClientDb();
+  await updateDoc(doc(db, "users", uid), { status });
+}
+
+export async function removeUserRecord(uid: string): Promise<void> {
+  await deleteDoc(doc(getClientDb(), "users", uid));
+}
+
+export async function inviteEmail(email: string, invitedBy: string): Promise<void> {
+  const normalized = email.trim().toLowerCase();
+  await setDoc(doc(getClientDb(), "invites", normalized), {
+    email: normalized,
+    invitedBy,
+    status: "pending",
+    createdAt: serverTimestamp(),
+  });
 }
 
 export async function deletePost(postId: string): Promise<void> {

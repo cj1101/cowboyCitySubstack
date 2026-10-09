@@ -43,7 +43,7 @@ export default function SheriffDashboardPage() {
             Sheriff&apos;s Dashboard
           </h1>
           <p className="text-text-muted mt-1">
-            Moderate posts, approve faction page designs, and manage realm accounts.
+            Approve members, invite friends, and moderate the realm. Root sheriffs are the emails listed in firestore.rules.
           </p>
         </header>
 
@@ -68,7 +68,7 @@ export default function SheriffDashboardPage() {
         <section className="glass-panel p-6 md:p-8">
           <h2 className="text-xl font-bold text-accent-gold mb-4">User Management</h2>
           <p className="text-text-muted text-sm mb-6">
-            Grant or revoke Sheriff (admin) privileges.
+            Approve, deny, suspend, or remove people. An email invite is approved automatically when that person signs up. Root sheriff emails are hardcoded in firestore.rules and storage.rules.
           </p>
           <UserManagement currentUid={user.uid} />
         </section>

@@ -65,7 +65,7 @@ export function FactionManagement() {
             <tr key={faction.id} className="border-b border-primary-brown/50">
               <td className="py-3 pr-4">
                 <Link
-                  href={`/factions/${faction.slug}`}
+                  href={`/cities/${faction.slug}`}
                   className="text-accent-gold hover:underline"
                 >
                   {faction.name}
@@ -82,7 +82,7 @@ export function FactionManagement() {
               </td>
               <td className="py-3 flex flex-wrap gap-2">
                 <Link
-                  href={`/factions/${faction.slug}/edit`}
+                  href={`/cities/${faction.slug}/edit`}
                   className="btn btn-secondary text-xs px-3 py-1"
                 >
                   Edit

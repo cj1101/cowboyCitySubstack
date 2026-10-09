@@ -6,7 +6,7 @@ import { buildLoreGraph, type LoreGraphEdge } from "@/lib/mentions";
 
 function targetHref(edge: LoreGraphEdge): string {
   if (edge.targetType === "faction") {
-    return `/factions/${edge.targetSlug ?? edge.targetId}`;
+    return `/cities/${edge.targetSlug ?? edge.targetId}`;
   }
   if (edge.targetType === "post") {
     return `/posts/${edge.targetId}`;

@@ -3,6 +3,8 @@
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect } from "react";
+import { StatTable } from "@/lib/editor/statTable";
+import { RichText } from "@/components/wiki/RichText";
 
 interface TipTapEditorProps {
   content: string;
@@ -18,7 +20,7 @@ export function TipTapEditor({
   editable = true,
 }: TipTapEditorProps) {
   const editor = useEditor({
-    extensions: [StarterKit],
+    extensions: [StarterKit, StatTable],
     content,
     editable,
     immediatelyRender: false,
@@ -95,6 +97,18 @@ export function TipTapEditor({
             label="Quote"
             title="Blockquote"
           />
+          <ToolbarButton
+            active={false}
+            onClick={() => {
+              const columns = window.prompt("Column names separated by |", "GDP|Population");
+              if (!columns) return;
+              const rows = window.prompt("One row per line. Cells separated by |", "Cowboy City|900|12000");
+              if (rows == null) return;
+              editor.chain().focus().insertContent({ type: "statTable", attrs: { columns, rows } }).run();
+            }}
+            label="Stat table"
+            title="Insert a stat table"
+          />
         </div>
       )}
       <EditorContent editor={editor} />
@@ -137,10 +151,5 @@ function ToolbarButton({
 }
 
 export function TipTapContent({ html }: { html: string }) {
-  return (
-    <div
-      className="prose prose-invert max-w-none text-text-light [&_a]:text-accent-gold [&_blockquote]:border-accent-gold/40"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
+  return <RichText html={html} />;
 }

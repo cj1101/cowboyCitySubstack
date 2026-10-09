@@ -61,7 +61,7 @@ export default function SignupPage() {
           Join the Realm
         </h1>
         <p className="text-text-muted text-center mb-8">
-          Create your account to chronicle lore in Cowboy City.
+          Request a membership. You can sign in right away, and a sheriff approves you before you can post or read the chronicle.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-5">

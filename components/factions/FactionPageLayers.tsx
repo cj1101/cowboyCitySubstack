@@ -65,20 +65,20 @@ export function FactionPageLayers({
             <h2 className="feed-title mb-0">The Feed</h2>
             <div className="flex gap-2 items-center">
               <Link
-                href={`/factions/${faction.slug}`}
+                href={`/cities/${faction.slug}`}
                 className={`btn text-xs px-3 py-1.5 ${activeTab === "profile" ? "" : "btn-secondary"}`}
               >
                 Profile
               </Link>
               <Link
-                href={`/factions/${faction.slug}?tab=wiki`}
+                href={`/cities/${faction.slug}?tab=wiki`}
                 className={`btn text-xs px-3 py-1.5 ${activeTab === "wiki" ? "" : "btn-secondary"}`}
               >
                 Wiki
               </Link>
               {isOwner && (
                 <Link
-                  href={`/factions/${faction.slug}/edit`}
+                  href={`/cities/${faction.slug}/edit`}
                   className="btn btn-secondary text-xs px-3 py-1.5"
                 >
                   Edit Page

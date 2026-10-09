@@ -16,13 +16,17 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, onSnapshot, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { getClientAuth, getClientDb } from "@/lib/firebase";
+import type { MembershipStatus } from "@/lib/types";
 
 export interface UserProfile {
   email: string;
   displayName: string;
   isAdmin: boolean;
+  status: MembershipStatus;
+  bio?: string;
+  avatarUrl?: string;
   createdAt?: unknown;
 }
 
@@ -33,9 +37,45 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, displayName: string) => Promise<void>;
   logout: () => Promise<void>;
+  claimAccess: () => Promise<void>;
+  refreshProfile: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+function toProfile(data: Record<string, unknown>): UserProfile {
+  const status = (data.status as MembershipStatus) || "pending";
+  return {
+    email: (data.email as string) || "",
+    displayName: (data.displayName as string) || "",
+    isAdmin: data.isAdmin === true,
+    status,
+    bio: (data.bio as string) || "",
+    avatarUrl: (data.avatarUrl as string) || "",
+    createdAt: data.createdAt,
+  };
+}
+
+async function claimMembership(uid: string, email: string): Promise<void> {
+  const db = getClientDb();
+  const userRef = doc(db, "users", uid);
+  try {
+    await updateDoc(userRef, { isAdmin: true, status: "approved" });
+    return;
+  } catch {
+    // Not on the rules allowlist. Fall through to invites.
+  }
+
+  const inviteId = email.trim().toLowerCase();
+  const inviteRef = doc(db, "invites", inviteId);
+  const inviteSnap = await getDoc(inviteRef);
+  if (!inviteSnap.exists()) return;
+  const inviteStatus = inviteSnap.data().status;
+  if (inviteStatus === "revoked" || inviteStatus === "accepted") return;
+
+  await updateDoc(userRef, { status: "approved" });
+  await updateDoc(inviteRef, { status: "accepted", acceptedUid: uid });
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -44,61 +84,81 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const auth = getClientAuth();
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    let unsubProfile: (() => void) | undefined;
+
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      unsubProfile?.();
       setUser(firebaseUser);
 
-      if (firebaseUser) {
-        try {
-          const db = getClientDb();
-          const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
-          if (userDoc.exists()) {
-            setProfile(userDoc.data() as UserProfile);
-          } else {
-            setProfile(null);
-          }
-        } catch {
-          setProfile(null);
-        }
-      } else {
+      if (!firebaseUser) {
         setProfile(null);
+        setLoading(false);
+        return;
       }
 
-      setLoading(false);
+      const db = getClientDb();
+      unsubProfile = onSnapshot(
+        doc(db, "users", firebaseUser.uid),
+        (snap) => {
+          setProfile(snap.exists() ? toProfile(snap.data()) : null);
+          setLoading(false);
+        },
+        () => {
+          setProfile(null);
+          setLoading(false);
+        }
+      );
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubProfile?.();
+      unsubscribe();
+    };
   }, []);
+
+  useEffect(() => {
+    if (!user || !profile || profile.status !== "pending") return;
+    claimMembership(user.uid, profile.email || user.email || "").catch(() => {
+      // Still pending, denied, or suspended.
+    });
+  }, [user, profile]);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const auth = getClientAuth();
-    await signInWithEmailAndPassword(auth, email, password);
+    await signInWithEmailAndPassword(getClientAuth(), email, password);
   }, []);
 
-  const signUp = useCallback(
-    async (email: string, password: string, displayName: string) => {
-      const auth = getClientAuth();
-      const db = getClientDb();
-      const credential = await createUserWithEmailAndPassword(auth, email, password);
-
-      await setDoc(doc(db, "users", credential.user.uid), {
-        email,
-        displayName,
-        isAdmin: false,
-        createdAt: serverTimestamp(),
-      });
-    },
-    []
-  );
+  const signUp = useCallback(async (email: string, password: string, displayName: string) => {
+    const credential = await createUserWithEmailAndPassword(getClientAuth(), email, password);
+    await setDoc(doc(getClientDb(), "users", credential.user.uid), {
+      email: email.trim(),
+      displayName: displayName.trim(),
+      bio: "",
+      avatarUrl: "",
+      isAdmin: false,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    });
+  }, []);
 
   const logout = useCallback(async () => {
-    const auth = getClientAuth();
-    await signOut(auth);
+    await signOut(getClientAuth());
     setProfile(null);
   }, []);
 
+  const claimAccess = useCallback(async () => {
+    if (!user) return;
+    await claimMembership(user.uid, profile?.email || user.email || "");
+  }, [user, profile?.email]);
+
+  const refreshProfile = useCallback(async () => {
+    if (!user) return;
+    const snap = await getDoc(doc(getClientDb(), "users", user.uid));
+    setProfile(snap.exists() ? toProfile(snap.data()) : null);
+  }, [user]);
+
   const value = useMemo(
-    () => ({ user, profile, loading, signIn, signUp, logout }),
-    [user, profile, loading, signIn, signUp, logout]
+    () => ({ user, profile, loading, signIn, signUp, logout, claimAccess, refreshProfile }),
+    [user, profile, loading, signIn, signUp, logout, claimAccess, refreshProfile]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
