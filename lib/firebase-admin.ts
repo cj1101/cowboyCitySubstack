@@ -6,6 +6,11 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 
 function loadServiceAccount(): Record<string, string> {
+  const inlineJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (inlineJson) {
+    return JSON.parse(inlineJson) as Record<string, string>;
+  }
+
   const accountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
   if (accountPath) {
     const absolutePath = resolve(process.cwd(), accountPath);
@@ -21,13 +26,28 @@ function loadServiceAccount(): Record<string, string> {
   }
 
   throw new Error(
-    "Missing Firebase Admin credentials. Set FIREBASE_SERVICE_ACCOUNT_PATH or FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY in .env.local"
+    "Missing Firebase Admin credentials. Set FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_SERVICE_ACCOUNT_PATH, or FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY."
+  );
+}
+
+function usingEmulators(): boolean {
+  return Boolean(
+    process.env.FIRESTORE_EMULATOR_HOST || process.env.FIREBASE_AUTH_EMULATOR_HOST
   );
 }
 
 function getAdminApp(): App {
   if (getApps().length > 0) {
     return getApps()[0]!;
+  }
+
+  const projectId =
+    process.env.FIREBASE_PROJECT_ID ||
+    process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ||
+    "cowboycityrealm";
+
+  if (usingEmulators()) {
+    return initializeApp({ projectId, storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET });
   }
 
   const serviceAccount = loadServiceAccount();

@@ -1,46 +1,70 @@
-# Cowboy City Lore Platform
+# Cowboy City Lore
 
-A private lore social network for the Cowboy City Minecraft realm — factions, characters, debates, wiki, and a chronological feed. Built with Next.js 15, Firebase, and Tailwind CSS.
+A private multimedia chronicle for Charles and his friends. Cities such as Cascadia, Cowboy City, Evan City, Coronado Springs, Turtle Shores, Kelpington, Chess City, and Wythria post updates about their Minecraft realm. The worlds stay independent and aware of each other. Realm-wide bodies such as the UR and the ICTC tribunal live in the lore, not in a separate permissions system.
 
-The original PHP + Firebase prototype lives in [`legacy/`](legacy/) for reference during migration.
+Built with Next.js 15, React 19, TypeScript, Tailwind 4, TipTap, and Firebase Auth, Firestore, and Storage on the `cowboycityrealm` project. Deployed on Vercel.
 
-## Prerequisites
+The original PHP prototype is in [`legacy/`](legacy/) for reference.
 
-- **Node.js** 20+ and npm
-- **Firebase project** — reuses the existing `cowboycityrealm` project
-- **Firebase Admin service account** JSON (for migration script and server-side operations)
-- **Git** (optional, for version control)
-- **IONOS server** with Node.js 20+ at **suarezhouse.net** (see [DEPLOY.md](DEPLOY.md))
+## What members can do
 
-## Environment Variables
+- Request to join. They cannot post or read members-only posts, cities, maps, wiki, or messages until a sheriff approves them.
+- Keep a personal profile, then found one or more city accounts (banner, crest, description, lore, and a feed). Co-owners still work.
+- Publish chronological posts with rich text, photo and video galleries, content warnings, drafts, and scheduled posts.
+- Reference other posts, tag cities so the post shows on each city feed, and use `@mentions`.
+- Comment in or out of character, react, follow cities, and get in-app notices.
+- Message one person or a small group. Only participants can read a thread.
+- Record Settlement Years (for example Year 391) and eras. `/timeline` interleaves every city.
+- Upload a city map or an optional realm map and drop pins.
+- Keep a per-city wiki (characters, places, factions, laws, species, teams) with `[[wiki links]]`, hover previews, and stat tables.
+- Search posts, wiki entries, and cities, and export your cities and posts as JSON or a zip.
 
-1. Copy the example file:
+There is no canon, rumor, or retcon status.
 
-   ```bash
-   cp .env.example .env.local
-   ```
+## Environment variables
 
-2. Fill in values from your Firebase console (Project Settings → General → Your apps):
+Copy the example file and fill in the web app config from Firebase Console → Project settings → Your apps:
 
-   | Variable | Description |
-   |----------|-------------|
-   | `NEXT_PUBLIC_FIREBASE_API_KEY` | Web API key |
-   | `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | e.g. `cowboycityrealm.firebaseapp.com` |
-   | `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | e.g. `cowboycityrealm` |
-   | `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | e.g. `cowboycityrealm.firebasestorage.app` |
-   | `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | Messaging sender ID |
-   | `NEXT_PUBLIC_FIREBASE_APP_ID` | Web app ID |
-   | `NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID` | Analytics ID (optional) |
+```bash
+cp .env.example .env.local
+```
 
-3. For server-side Firebase Admin (migration script), either:
-   - Set `FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json`, or
-   - Set `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, and `FIREBASE_PRIVATE_KEY`
+| Variable | Required on Vercel |
+|----------|--------------------|
+| `NEXT_PUBLIC_FIREBASE_API_KEY` | Yes |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | Yes |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | Yes |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | Yes |
+| `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | Yes |
+| `NEXT_PUBLIC_FIREBASE_APP_ID` | Yes |
+| `NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID` | Optional |
 
-   **Never commit** `.env.local` or service account JSON files.
+The site does **not** use a Firebase Admin service account. Approvals, invites, messages, and notices are written by the browser and enforced by `firestore.rules` and `storage.rules`.
 
-See [`.env.example`](.env.example) for all variables.
+`npm run migrate` is optional and still accepts a service account if you need to import the old PHP data. Do not put that key in Vercel.
 
-## Local Dev
+For local emulator work only, set `NEXT_PUBLIC_USE_FIREBASE_EMULATORS=true`. Leave it unset in production.
+
+## Sheriffs
+
+Root sheriffs are email addresses hardcoded in the rules, not an environment variable:
+
+- `firestore.rules` → `rootAdminEmails()`
+- `storage.rules` → the same list inside `isRootAdmin()`
+
+The placeholders are `charles@realm.test` and `sheriff@cowboycity.example`. Replace both lists with the real sheriff emails, keep them identical, and deploy the rules. A root sheriff signs up like anyone else. On the next page load the client asks Firestore to mark that account approved and `isAdmin: true`. The rules allow it only when the Auth email is on the list.
+
+From `/sheriff` a sheriff can:
+
+- approve, deny, suspend, or remove a person
+- invite an email (that address is approved automatically when it signs up)
+- grant or revoke the sheriff flag on another approved person
+
+Extra emails can also be stored on the Firestore document `config/admins` as `{ emails: ["friend@example.com"] }`. Rules read that list. Only an existing sheriff can write it.
+
+Root allowlisted emails can always restore their own access. Suspend still works for sheriffs who are not on that list.
+
+## Local development
 
 ```bash
 npm install
@@ -49,82 +73,72 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-### Firebase Auth setup
-
-In the Firebase Console:
-
-1. Enable **Email/Password** sign-in under Authentication → Sign-in method.
-2. Create a Firestore database if not already present.
-3. Deploy rules: `firebase deploy --only firestore:rules,storage`
-
-### First Sheriff (admin)
-
-After signing up, set `isAdmin: true` on your user document in Firestore (`users/{uid}`). Then open `/sheriff` for moderation and HTML approvals.
-
-## Production on IONOS
-
-The app deploys to **suarezhouse.net** on an IONOS VPS with Node.js:
+### Emulators
 
 ```bash
-npm run build
-npm start
+npm run emulators
 ```
 
-Use **PM2** on the server so `npm start` survives reboots. nginx reverse-proxies HTTPS to port 3000.
-
-Full step-by-step (FileZilla upload, nginx, Firebase, checklist): **[DEPLOY.md](DEPLOY.md)**
-
-> **Note:** This is a Next.js app — FTP-only shared hosting will not work. The server must run Node.js.
-
-## Switching Computers
-
-1. Clone or copy this repo to the new machine.
-2. Run `npm install`.
-3. Copy these files securely (USB, password manager, encrypted share — **not** git):
-   - `.env.local`
-   - `firebase-service-account.json` (if using path-based Admin auth)
-4. On the new host (or IONOS server):
-   ```bash
-   npm run build
-   npm start
-   ```
-5. Configure nginx + PM2 on the server (see DEPLOY.md).
-6. Deploy Firebase rules if you changed them: `firebase deploy --only firestore:rules,storage`
-
-If migrating from the old PHP app, run the one-time migration on a machine with Admin credentials:
+In another terminal, with `NEXT_PUBLIC_USE_FIREBASE_EMULATORS=true` in `.env.local`:
 
 ```bash
-npm run migrate
+npm run dev
 ```
 
-## Project Structure
+Rules tests (Firestore and Storage emulators):
+
+```bash
+npm run test:rules
+```
+
+Enable Email/Password in Firebase Authentication before using production. Deploy rules and indexes when they change:
+
+```bash
+firebase login
+firebase use cowboycityrealm
+firebase deploy --only firestore,storage
+```
+
+`firebase deploy --only firestore` publishes `firestore.rules` and `firestore.indexes.json`. Storage rules deploy with the `storage` target.
+
+## Production on Vercel
+
+1. Import this GitHub repo in Vercel. Framework preset: Next.js. Root directory: the repo root.
+2. Add the seven `NEXT_PUBLIC_FIREBASE_*` variables. Redeploy after changing them so they are baked into the client bundle.
+3. In Firebase Console → Authentication → Settings → Authorized domains, add the Vercel domain (for example `your-project.vercel.app`) and any custom domain.
+4. Put the real sheriff emails in `firestore.rules` and `storage.rules`, then `firebase deploy --only firestore,storage`.
+5. Open the site, sign up with a root sheriff email, and approve everyone else from `/sheriff`.
+
+Step-by-step notes are in [DEPLOY.md](DEPLOY.md). An IONOS VPS with Node, PM2, and nginx remains an alternative there. It is not required.
+
+## Project structure
 
 ```
 app/                  # Next.js App Router pages
-components/           # React components (auth, factions, sheriff, …)
-lib/                  # Firebase client + admin SDK, Firestore helpers
-scripts/              # One-time migration (migrate-legacy-data.ts)
-legacy/               # Original PHP prototype (reference only)
+components/           # React components
+lib/                  # Firebase client, Firestore helpers
 firestore.rules       # Firestore security rules
-storage.rules         # Storage security rules
-firebase.json         # Firebase deploy config
-DEPLOY.md             # Production + IONOS (suarezhouse.net) runbook
-IMPLEMENTATION_CHECKLIST.md  # Feature tracking
-SMOKE_TEST.md             # End-to-end smoke test checklist
+firestore.indexes.json
+storage.rules
+firebase.json
+scripts/              # Optional legacy migration (Admin SDK)
+tests/rules.test.ts   # Emulator tests for approval, DMs, city ownership
+legacy/               # Original PHP prototype
 ```
+
+City pages are served at `/cities/...`. The older `/factions/...` URLs rewrite to the same screens. Firestore still stores cities in the `factions` collection so existing co-ownership and data keep working.
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Development server (Turbopack) |
+| `npm run dev` | Development server |
 | `npm run build` | Production build |
-| `npm start` | Run production server |
-| `npm run migrate` | Migrate legacy Firestore schema (one-time) |
-
-## Current Status
-
-**v1 complete.** All phases (0–7) shipped. See [`IMPLEMENTATION_CHECKLIST.md`](IMPLEMENTATION_CHECKLIST.md) and run [`SMOKE_TEST.md`](SMOKE_TEST.md) before production cutover.
+| `npm run lint` | ESLint |
+| `npm run typecheck` | TypeScript |
+| `npm run test:rules` | Security rules emulator tests |
+| `npm run emulators` | Auth, Firestore, and Storage emulators |
+| `npm run migrate` | Optional legacy import (needs a service account) |
 
 ## License
 

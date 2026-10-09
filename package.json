@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "migrate": "tsx scripts/migrate-legacy-data.ts"
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx scripts/migrate-legacy-data.ts",
+    "emulators": "firebase emulators:start --only auth,firestore,storage --project cowboycityrealm",
+    "test:rules": "firebase emulators:exec --only firestore,storage --project cowboycityrealm \"tsx tests/rules.test.ts\""
   },
   "dependencies": {
     "@tiptap/pm": "^3.27.1",
@@ -21,12 +24,14 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
+    "@firebase/rules-unit-testing": "^4.0.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "^15.3.0",
+    "firebase-tools": "^15.33.0",
     "tailwindcss": "^4",
     "tsx": "^4.19.0",
     "typescript": "^5"

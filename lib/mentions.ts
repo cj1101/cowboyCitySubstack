@@ -143,6 +143,7 @@ export async function getRecentPosts(max = 200): Promise<PostSummary[]> {
   const db = getClientDb();
   const postsQuery = query(
     collection(db, "posts"),
+    where("status", "==", "published"),
     orderBy("createdAt", "desc"),
     limit(max)
   );

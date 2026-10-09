@@ -5,8 +5,9 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { collection, doc, onSnapshot, query, where, getDocs } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
-import { TipTapContent } from "@/components/editor/TipTapEditor";
-import { BuildCarousel } from "@/components/posts/BuildCarousel";
+import { MediaCarousel } from "@/components/posts/MediaCarousel";
+import { CommentSection } from "@/components/posts/CommentSection";
+import { RichText } from "@/components/wiki/RichText";
 import { PostTypeBadge } from "@/components/posts/PostTypeBadge";
 import { DebateThread } from "@/components/debates/DebateThread";
 import { ReactionBar } from "@/components/reactions/ReactionBar";
@@ -14,6 +15,8 @@ import { getClientDb } from "@/lib/firebase";
 import {
   getCharacter,
   getFaction,
+  getPost,
+  getReferencingPosts,
 } from "@/lib/firestore/posts";
 import type { Character, Faction, Post } from "@/lib/types";
 import type { Timestamp } from "firebase/firestore";
@@ -40,6 +43,9 @@ export default function PostDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [canCreatePoll, setCanCreatePoll] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const [referenced, setReferenced] = useState<Post[]>([]);
+  const [backlinks, setBacklinks] = useState<Post[]>([]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -103,6 +109,19 @@ export default function PostDetailPage() {
     checkPollPermission().catch(() => setCanCreatePoll(false));
   }, [user, post]);
 
+  useEffect(() => {
+    if (!post) return;
+    Promise.all([
+      Promise.all((post.referencedPostIds ?? []).map((id) => getPost(id))),
+      getReferencingPosts(post.id),
+    ])
+      .then(([refs, incoming]) => {
+        setReferenced(refs.filter((item): item is Post => Boolean(item)));
+        setBacklinks(incoming);
+      })
+      .catch(() => undefined);
+  }, [post]);
+
   if (authLoading || loading) {
     return <div className="text-center py-16 text-text-muted">Loading…</div>;
   }
@@ -130,6 +149,10 @@ export default function PostDetailPage() {
   }
 
   const factionColor = faction?.colors?.primary ?? "#d4af37";
+  const hidden = Boolean(post.spoiler || post.contentWarning) && !revealed;
+  const media = post.media?.length
+    ? post.media
+    : (post.images ?? []).map((url) => ({ url, type: "image" as const }));
 
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] py-8 px-4">
@@ -162,30 +185,64 @@ export default function PostDetailPage() {
           </h1>
 
           <p className="text-accent-gold mb-6">
-            {character?.name ?? "Unknown character"}
+            {character?.name ?? faction?.name ?? "City"}
             {character?.title && (
               <span className="text-text-muted"> · {character.title}</span>
             )}
             <span className="text-text-muted"> · </span>
-            {faction?.name ?? "Unknown faction"}
+            {faction ? <Link href={`/cities/${faction.slug}`}>{faction.name}</Link> : "Unknown city"}
+            {post.settlementYear ? <span className="text-text-muted"> · Year {post.settlementYear}</span> : null}
+            {post.era ? <span className="text-text-muted"> · {post.era}</span> : null}
           </p>
 
-          {post.type === "build" && post.images && post.images.length > 0 && (
+          {hidden && (
+            <button type="button" className="btn mb-6" onClick={() => setRevealed(true)}>
+              {post.contentWarning ? `Content warning: ${post.contentWarning}. Show post` : "Show spoiler"}
+            </button>
+          )}
+
+          <div className={hidden ? "blur-xl select-none pointer-events-none" : ""}>
+          {media.length > 0 && (
             <div className="mb-8">
-              <BuildCarousel images={post.images} title={post.title} />
+              <MediaCarousel media={media} title={post.title} />
             </div>
           )}
 
           {post.body && (
             <div className="mb-8">
-              <TipTapContent html={post.body} />
+              <RichText html={post.body} />
+            </div>
+          )}
+          </div>
+
+          {referenced.length > 0 && (
+            <div className="mb-6 space-y-2">
+              <h2 className="text-accent-gold font-bold">References</h2>
+              {referenced.map((item) => (
+                <Link key={item.id} href={`/posts/${item.id}`} className="block border border-accent-gold/30 rounded p-3 hover:border-accent-gold">
+                  {item.title}
+                </Link>
+              ))}
+            </div>
+          )}
+
+          {backlinks.length > 0 && (
+            <div className="mb-6 space-y-2">
+              <h2 className="text-accent-gold font-bold">Referenced by</h2>
+              {backlinks.map((item) => (
+                <Link key={item.id} href={`/posts/${item.id}`} className="block text-sm hover:text-accent-gold">
+                  {item.title}
+                </Link>
+              ))}
             </div>
           )}
 
           <ReactionBar postId={post.id} />
 
-          {post.type === "debate" && (
+          {post.type === "debate" ? (
             <DebateThread post={post} canCreatePoll={canCreatePoll} />
+          ) : (
+            <CommentSection postId={post.id} postFactionId={post.factionId} />
           )}
 
           {post.type === "event" && (

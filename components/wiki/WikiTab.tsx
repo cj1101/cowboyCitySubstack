@@ -29,7 +29,7 @@ export function WikiTab({
           </p>
         </div>
         {canEdit && (
-          <Link href={`/factions/${factionSlug}/wiki?edit=1`} className="btn btn-secondary text-sm">
+          <Link href={`/cities/${factionSlug}/wiki?edit=1`} className="btn btn-secondary text-sm">
             Edit Wiki
           </Link>
         )}

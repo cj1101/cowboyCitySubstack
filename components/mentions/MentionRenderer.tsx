@@ -15,7 +15,7 @@ function renderMentionLink(type: string, id: string, key: string) {
     return (
       <Link
         key={key}
-        href={`/factions/${id}`}
+        href={`/cities/${id}`}
         className="text-accent-gold hover:text-accent-gold-hover underline"
       >
         {label}

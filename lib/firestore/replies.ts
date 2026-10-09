@@ -9,6 +9,8 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { notify } from "@/lib/firestore/notifications";
+import { getPost } from "@/lib/firestore/posts";
 import type { Reply, Stance } from "@/lib/types";
 
 function repliesRef(postId: string) {
@@ -49,13 +51,32 @@ export interface CreateReplyInput {
   characterId: string;
   body: string;
   stance: Stance;
+  authorUid: string;
+  authorName?: string;
+  inCharacter?: boolean;
 }
 
 export async function createReply(input: CreateReplyInput): Promise<string> {
   const { postId, ...data } = input;
   const ref = await addDoc(repliesRef(postId), {
     ...data,
+    characterId: data.characterId || "",
+    inCharacter: data.inCharacter !== false,
     createdAt: serverTimestamp(),
   });
+  try {
+    const post = await getPost(postId);
+    if (post?.authorUid) {
+      await notify({
+        recipientUid: post.authorUid,
+        actorUid: input.authorUid,
+        type: "reply",
+        summary: `${input.authorName || "Someone"} replied to “${post.title}”`,
+        href: `/posts/${postId}`,
+      });
+    }
+  } catch {
+    // The reply itself succeeded.
+  }
   return ref.id;
 }

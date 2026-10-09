@@ -6,6 +6,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { WikiEditor } from "@/components/wiki/WikiEditor";
 import { WikiViewer } from "@/components/wiki/WikiViewer";
+import { WikiEntryManager } from "@/components/wiki/WikiEntryManager";
 import { getWikiSections, type WikiSection } from "@/lib/firestore/wiki";
 import { getFactionBySlug, isFactionOwner } from "@/lib/mentions";
 
@@ -70,7 +71,7 @@ export default function FactionWikiPageClient() {
       <div className="wood-texture min-h-[calc(100vh-4rem)] p-8">
         <div className="max-w-4xl mx-auto glass-panel p-8 text-center">
           <p className="text-danger mb-4">{error ?? "Faction not found."}</p>
-          <Link href="/factions" className="btn btn-secondary">
+          <Link href="/cities" className="btn btn-secondary">
             Back to Factions
           </Link>
         </div>
@@ -86,7 +87,7 @@ export default function FactionWikiPageClient() {
         <div className="flex items-center justify-between flex-wrap gap-4">
           <div>
             <Link
-              href={`/factions/${slug}`}
+              href={`/cities/${slug}`}
               className="text-text-muted text-sm hover:text-accent-gold transition-colors"
             >
               ← Back to {factionName}
@@ -94,12 +95,12 @@ export default function FactionWikiPageClient() {
             <h1 className="text-3xl font-bold text-accent-gold mt-2">{factionName} Wiki</h1>
           </div>
           {canEdit && !showEditor && (
-            <Link href={`/factions/${slug}/wiki?edit=1`} className="btn">
+            <Link href={`/cities/${slug}/wiki?edit=1`} className="btn">
               Edit Wiki
             </Link>
           )}
           {showEditor && (
-            <Link href={`/factions/${slug}/wiki`} className="btn btn-secondary">
+            <Link href={`/cities/${slug}/wiki`} className="btn btn-secondary">
               View Mode
             </Link>
           )}
@@ -114,6 +115,7 @@ export default function FactionWikiPageClient() {
         ) : (
           <WikiViewer sections={sections} />
         )}
+        <WikiEntryManager cityId={factionId} citySlug={slug} canEdit={canEdit} />
       </div>
     </div>
   );

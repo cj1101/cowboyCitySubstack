@@ -22,12 +22,14 @@ interface CharacterOption {
 interface ReplyFormProps {
   postId: string;
   postFactionId: string;
+  showStance?: boolean;
 }
 
-export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
-  const { user } = useAuth();
+export function ReplyForm({ postId, postFactionId, showStance = true }: ReplyFormProps) {
+  const { user, profile } = useAuth();
   const [body, setBody] = useState("");
   const [stance, setStance] = useState<Stance>("neutral");
+  const [inCharacter, setInCharacter] = useState(true);
   const [factionId, setFactionId] = useState(postFactionId);
   const [characterId, setCharacterId] = useState("");
   const [factions, setFactions] = useState<FactionOption[]>([]);
@@ -98,7 +100,7 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !body.trim() || !characterId || !factionId) return;
+    if (!user || !body.trim() || !factionId) return;
 
     setSubmitting(true);
     setError(null);
@@ -108,9 +110,12 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
       await createReply({
         postId,
         factionId,
-        characterId,
+        characterId: inCharacter ? characterId : "",
         body: body.trim(),
         stance,
+        authorUid: user.uid,
+        authorName: inCharacter ? undefined : profile?.displayName || user.email || "Member",
+        inCharacter,
       });
       setBody("");
       setStance("neutral");
@@ -133,7 +138,7 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
   if (factions.length === 0) {
     return (
       <p className="text-text-muted text-sm mt-6">
-        You need faction membership to reply. Join a faction to participate.
+        You need a city membership to reply. Found or join a city first.
       </p>
     );
   }
@@ -145,7 +150,7 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
       {factions.length > 1 && (
         <div>
           <label className="form-label" htmlFor="reply-faction">
-            Post as faction
+            Comment as city
           </label>
           <select
             id="reply-faction"
@@ -182,7 +187,12 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
         </div>
       )}
 
-      <div>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={inCharacter} onChange={(e) => setInCharacter(e.target.checked)} />
+        In character, as this city
+      </label>
+
+      {showStance && <div>
         <label className="form-label">Stance</label>
         <div className="flex gap-2 flex-wrap">
           {STANCE_OPTIONS.map((opt) => (
@@ -200,7 +210,7 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
             </button>
           ))}
         </div>
-      </div>
+      </div>}
 
       <div>
         <label className="form-label" htmlFor="reply-body">
@@ -222,7 +232,7 @@ export function ReplyForm({ postId, postFactionId }: ReplyFormProps) {
 
       <button
         type="submit"
-        disabled={submitting || !characterId || characters.length === 0}
+        disabled={submitting || (inCharacter && characters.length > 0 && !characterId)}
         className="btn text-sm px-5 py-2"
       >
         {submitting ? "Posting…" : "Post Reply"}

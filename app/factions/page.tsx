@@ -41,11 +41,11 @@ export default function FactionsPage() {
       <div className="max-w-6xl mx-auto">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
           <div>
-            <h1 className="text-3xl md:text-4xl font-bold text-accent-gold">Factions of the Realm</h1>
-            <p className="text-text-muted mt-2">Cities, guilds, and powers across Cowboy City.</p>
+            <h1 className="text-3xl md:text-4xl font-bold text-accent-gold">Cities of the Realm</h1>
+            <p className="text-text-muted mt-2">Cascadia, Cowboy City, Evan City, and the rest of the chronicle.</p>
           </div>
-          <Link href="/factions/new" className="btn text-sm px-6 py-2.5 shrink-0 self-start">
-            Found a Faction
+          <Link href="/cities/new" className="btn text-sm px-6 py-2.5 shrink-0 self-start">
+            Found a city
           </Link>
         </div>
 
@@ -54,7 +54,7 @@ export default function FactionsPage() {
         {factions.length === 0 ? (
           <div className="glass-panel p-10 text-center">
             <p className="text-text-muted text-lg mb-4">No factions have been founded yet.</p>
-            <Link href="/factions/new" className="btn">
+            <Link href="/cities/new" className="btn">
               Be the First
             </Link>
           </div>

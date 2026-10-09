@@ -90,7 +90,7 @@ export function SheriffQueue() {
               <h3 className="text-lg font-bold text-accent-gold">{faction.name}</h3>
               <p className="text-text-muted text-sm">
                 Slug:{" "}
-                <Link href={`/factions/${faction.slug}`} className="text-accent-gold hover:underline">
+                <Link href={`/cities/${faction.slug}`} className="text-accent-gold hover:underline">
                   {faction.slug}
                 </Link>
               </p>

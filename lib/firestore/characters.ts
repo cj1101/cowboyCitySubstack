@@ -38,6 +38,7 @@ export async function getActiveCharactersForFaction(factionId: string): Promise<
 }
 
 export async function getCharacterById(id: string): Promise<Character | null> {
+  if (!id) return null;
   const db = getClientDb();
   const snap = await getDoc(doc(db, CHARACTERS, id));
   if (!snap.exists()) return null;

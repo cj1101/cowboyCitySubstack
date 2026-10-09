@@ -2,20 +2,57 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
+import { canUseRealm } from "@/lib/types";
+import { getClientDb } from "@/lib/firebase";
+import { notificationsQuery, toNotification } from "@/lib/firestore/notifications";
+import { subscribeConversations } from "@/lib/firestore/messages";
 
 const NAV_LINKS = [
-  { href: "/factions", label: "Factions" },
+  { href: "/cities", label: "Cities" },
   { href: "/timeline", label: "Timeline" },
+  { href: "/maps", label: "Maps" },
   { href: "/lore-graph", label: "Lore Graph" },
+  { href: "/search", label: "Search" },
 ] as const;
 
 export function NavBar() {
   const { user, profile, loading, logout } = useAuth();
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [notes, setNotes] = useState(0);
+  const [dms, setDms] = useState(0);
+  const member = canUseRealm(profile);
+
+  useEffect(() => {
+    if (!user || !member) return;
+    const unsubNotes = onSnapshot(notificationsQuery(user.uid), (snap) => {
+      setNotes(snap.docs.map((d) => toNotification(d.id, d.data())).filter((item) => !item.read).length);
+    });
+    let reads: Record<string, number> = {};
+    const unsubReads = onSnapshot(collection(getClientDb(), "users", user.uid, "reads"), (snap) => {
+      reads = {};
+      snap.docs.forEach((d) => {
+        reads[d.id] = d.data().lastReadAt?.toMillis?.() ?? 0;
+      });
+    });
+    const unsubDms = subscribeConversations(user.uid, (conversations) => {
+      setDms(
+        conversations.filter((conversation) => {
+          const at = conversation.lastMessageAt?.toMillis?.() ?? 0;
+          return at > (reads[conversation.id] ?? 0) && conversation.lastSenderUid !== user.uid;
+        }).length
+      );
+    });
+    return () => {
+      unsubNotes();
+      unsubReads();
+      unsubDms();
+    };
+  }, [user, member]);
 
   const handleLogout = async () => {
     setMenuOpen(false);
@@ -42,7 +79,7 @@ export function NavBar() {
           >
             Cowboy City Lore
           </Link>
-          {user && (
+          {user && member && (
             <div className="hidden md:flex items-center gap-4">
               {NAV_LINKS.map((link) => (
                 <Link
@@ -71,10 +108,20 @@ export function NavBar() {
               <div className="hidden sm:block">
                 <FactionSwitcher />
               </div>
+              {member && (
+                <>
+                  <Link href="/messages" className="text-sm text-text-muted hover:text-accent-gold">
+                    Mail{dms > 0 ? ` (${dms})` : ""}
+                  </Link>
+                  <Link href="/notifications" className="text-sm text-text-muted hover:text-accent-gold">
+                    Notices{notes > 0 ? ` (${notes})` : ""}
+                  </Link>
+                </>
+              )}
               {profile?.displayName && (
-                <span className="text-text-muted text-sm hidden xl:inline max-w-[120px] truncate">
+                <Link href="/settings" className="text-text-muted text-sm hidden xl:inline max-w-[120px] truncate hover:text-accent-gold">
                   {profile.displayName}
-                </span>
+                </Link>
               )}
               <button
                 type="button"
@@ -106,7 +153,7 @@ export function NavBar() {
         </div>
       </nav>
 
-      {user && menuOpen && (
+      {user && member && menuOpen && (
         <div className="mobile-nav-drawer md:hidden">
           <div className="space-y-1">
             {NAV_LINKS.map((link) => (

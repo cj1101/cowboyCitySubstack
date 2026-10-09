@@ -242,6 +242,23 @@ body {
     @apply flex justify-end gap-4 pt-4 border-t border-accent-gold/30;
   }
 
+  .stat-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0;
+  }
+
+  .stat-table th,
+  .stat-table td {
+    border: 1px solid #d4af37;
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+  }
+
+  .stat-table th {
+    color: #d4af37;
+  }
+
   .editor-textarea {
     min-height: 400px;
     font-family: "Courier New", monospace;

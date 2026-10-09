@@ -10,7 +10,7 @@ export function FactionCard({ faction }: FactionCardProps) {
 
   return (
     <Link
-      href={`/factions/${faction.slug}`}
+      href={`/cities/${faction.slug}`}
       className="glass-panel overflow-hidden block transition-transform hover:-translate-y-1"
     >
       <div
