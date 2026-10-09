@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
 
 export default function SignupPage() {
@@ -14,11 +14,12 @@ export default function SignupPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const redirected = useRef(false);
 
   useEffect(() => {
-    if (!loading && user) {
-      router.replace("/");
-    }
+    if (loading || !user || redirected.current) return;
+    redirected.current = true;
+    router.replace("/");
   }, [user, loading, router]);
 
   const handleSubmit = async (e: FormEvent) => {

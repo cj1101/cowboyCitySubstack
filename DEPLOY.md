@@ -38,15 +38,15 @@ The primary host is **Vercel**. Firebase Auth, Firestore, and Storage stay on th
 
 ## 3. First sheriff
 
-1. Open the Vercel URL and sign up with an email that is in `rootAdminEmails()`.
-2. The app asks Firestore to mark that account approved and `isAdmin: true`. Rules allow it only for those emails.
-3. Open `/sheriff`. Approve friends, or invite their email so signup approves them automatically.
+1. Open the Vercel URL and create an account. Every new account is a member. There is no waiting room.
+2. Sign up with an email in `rootAdminEmails()` if you want `/sheriff`. The app asks Firestore once to set `isAdmin: true`. The July rules reject that write. The new rules allow it. A refusal does not reload the page.
+3. Open `/sheriff` to suspend or remove members after the new rules are deployed.
 
 ## 4. Checks
 
-- A new account sees the waiting screen and cannot open the feed.
-- After approval they can found two cities, post, and message.
-- Storage uploads fail for anyone who is not approved.
+- A new account lands on the feed. It does not see "Waiting for the Sheriff".
+- A suspended or removed account sees a single blocked screen and can still open settings.
+- Storage uploads fail for suspended and removed accounts.
 
 Optional legacy import (Admin SDK, not used by the website):
 

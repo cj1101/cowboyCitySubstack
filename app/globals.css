@@ -19,10 +19,14 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  background-color: #2a1a0f;
+  color: var(--color-text-light);
+}
+
 body {
   font-family: var(--font-serif);
-  background-color: var(--color-darker-brown);
-  color: var(--color-text-light);
   line-height: 1.6;
   min-height: 100vh;
 }

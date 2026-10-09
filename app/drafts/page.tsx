@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { getMyPostsByStatus, publishStoredPost } from "@/lib/firestore/posts";
+import { ScreenStatus } from "@/components/layout/ScreenStatus";
 import type { Post } from "@/lib/types";
 
 export default function DraftsPage() {
@@ -25,7 +26,7 @@ export default function DraftsPage() {
     load();
   }, [user]);
 
-  if (!user) return null;
+  if (!user) return <ScreenStatus>Sign in to see drafts.</ScreenStatus>;
 
   const publishNow = async (postId: string) => {
     await publishStoredPost(postId);

@@ -64,14 +64,25 @@ async function main() {
     await setDoc(doc(context.firestore(), "posts", "p1"), postBody);
   });
   const pending = env.authenticatedContext("friend", { email: "friend@realm.test" });
-  await assertFails(getDoc(doc(pending.firestore(), "posts", "p1")));
+  await assertSucceeds(getDoc(doc(pending.firestore(), "posts", "p1")));
   await assertFails(
     updateDoc(doc(pending.firestore(), "users", "friend"), { status: "approved", isAdmin: true })
   );
   await assertSucceeds(
+    updateDoc(doc(pending.firestore(), "users", "friend"), { status: "approved" })
+  );
+  await assertSucceeds(
     updateDoc(doc(pending.firestore(), "users", "friend"), { displayName: "Friend" })
   );
-  console.log("ok approval gate");
+  const newbie = env.authenticatedContext("newbie", { email: "new@realm.test" });
+  await assertSucceeds(
+    setDoc(doc(newbie.firestore(), "users", "newbie"), {
+      email: "new@realm.test",
+      isAdmin: false,
+      status: "approved",
+    })
+  );
+  console.log("ok open membership");
 
   await env.clearFirestore();
   await seedUser(env, "charles", {
@@ -91,6 +102,21 @@ async function main() {
   await assertSucceeds(
     updateDoc(doc(charles.firestore(), "users", "friend"), { status: "approved" })
   );
+  await env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "posts", "p1"), postBody);
+  });
+  const friendReader = env.authenticatedContext("friend", { email: "friend@realm.test" });
+  await assertSucceeds(
+    updateDoc(doc(charles.firestore(), "users", "friend"), { status: "suspended" })
+  );
+  await assertFails(getDoc(doc(friendReader.firestore(), "posts", "p1")));
+  await assertFails(
+    updateDoc(doc(friendReader.firestore(), "users", "friend"), { status: "approved" })
+  );
+  await assertSucceeds(
+    updateDoc(doc(charles.firestore(), "users", "friend"), { status: "removed" })
+  );
+  await assertFails(getDoc(doc(friendReader.firestore(), "posts", "p1")));
   console.log("ok root allowlist");
 
   await env.clearFirestore();
@@ -225,8 +251,19 @@ async function main() {
     isAdmin: false,
   });
   const pendingStorage = env.authenticatedContext("friend", { email: "friend@realm.test" });
-  await assertFails(
+  await assertSucceeds(
     uploadString(ref(pendingStorage.storage(), "posts/p1/a.jpg"), "hello", "raw", {
+      contentType: "image/jpeg",
+    })
+  );
+  await seedUser(env, "friend", {
+    email: "friend@realm.test",
+    status: "suspended",
+    isAdmin: false,
+  });
+  const suspendedStorage = env.authenticatedContext("friend", { email: "friend@realm.test" });
+  await assertFails(
+    uploadString(ref(suspendedStorage.storage(), "posts/p1/b.jpg"), "hello", "raw", {
       contentType: "image/jpeg",
     })
   );

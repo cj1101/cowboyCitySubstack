@@ -5,6 +5,7 @@ import Link from "next/link";
 import { onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { markAllNotificationsRead, markNotificationRead, notificationsQuery, toNotification } from "@/lib/firestore/notifications";
+import { ScreenStatus } from "@/components/layout/ScreenStatus";
 import type { AppNotification } from "@/lib/types";
 
 export default function NotificationsPage() {
@@ -18,7 +19,7 @@ export default function NotificationsPage() {
     });
   }, [user]);
 
-  if (!user) return null;
+  if (!user) return <ScreenStatus>Sign in to read notices.</ScreenStatus>;
 
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-6">

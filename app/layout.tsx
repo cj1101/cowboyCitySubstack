@@ -16,8 +16,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className="antialiased">
+    <html lang="en" style={{ backgroundColor: "#2a1a0f" }}>
+      <body className="antialiased" style={{ backgroundColor: "#2a1a0f", color: "#f5e6d3" }}>
         <AuthProvider>
           <FactionProvider>
             <NavBar />

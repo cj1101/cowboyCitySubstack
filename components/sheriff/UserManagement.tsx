@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getAllUsers, inviteEmail, removeUserRecord, setUserAdmin, setUserStatus } from "@/lib/firestore/admin";
+import { getAllUsers, inviteEmail, setUserAdmin, setUserStatus } from "@/lib/firestore/admin";
 import { notify } from "@/lib/firestore/notifications";
 import type { AdminUser } from "@/lib/firestore/admin";
+import { REQUIRE_APPROVAL } from "@/lib/membership";
 
 interface UserManagementProps {
   currentUid: string;
@@ -57,14 +58,20 @@ export function UserManagement({ currentUid }: UserManagementProps) {
     setUpdatingUid(user.uid);
     try {
       await setUserStatus(user.uid, status);
-      if (status === "approved" || status === "denied" || status === "suspended") {
+      if (status === "suspended" || status === "removed" || status === "approved" || status === "denied") {
         await notify({
           recipientUid: user.uid,
           type: "approval",
-          summary: status === "approved" ? "The Sheriff approved your membership." : `Membership ${status}.`,
+          summary: status === "suspended"
+            ? "The Sheriff suspended your membership."
+            : status === "removed"
+              ? "The Sheriff removed your membership."
+              : status === "approved"
+                ? "The Sheriff approved your membership."
+                : `Membership ${status}.`,
           href: status === "approved" ? "/" : "/settings",
           actorUid: currentUid,
-        });
+        }).catch(() => undefined);
       }
       setUsers((prev) => prev.map((item) => (item.uid === user.uid ? { ...item, status } : item)));
     } catch (err) {
@@ -80,6 +87,7 @@ export function UserManagement({ currentUid }: UserManagementProps) {
 
   return (
     <div className="space-y-6">
+      {REQUIRE_APPROVAL && (
       <form
         className="flex flex-wrap gap-2"
         onSubmit={async (event) => {
@@ -92,6 +100,7 @@ export function UserManagement({ currentUid }: UserManagementProps) {
         <input className="form-input flex-1 min-w-[200px]" type="email" required placeholder="friend@example.com" value={invite} onChange={(e) => setInvite(e.target.value)} />
         <button className="btn text-sm px-4 py-2" type="submit">Invite by email</button>
       </form>
+      )}
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
@@ -142,13 +151,16 @@ export function UserManagement({ currentUid }: UserManagementProps) {
                 </button>
                 {user.uid !== currentUid && (
                   <span className="inline-flex flex-wrap gap-1 ml-2">
-                    <button type="button" className="btn text-xs px-2 py-1" onClick={() => setStatus(user, "approved")}>Approve</button>
-                    <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => setStatus(user, "denied")}>Deny</button>
-                    <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => setStatus(user, "suspended")}>Suspend</button>
-                    <button type="button" className="btn btn-danger text-xs px-2 py-1" onClick={async () => {
+                    {REQUIRE_APPROVAL && (
+                      <>
+                        <button type="button" className="btn text-xs px-2 py-1" onClick={() => setStatus(user, "approved")}>Approve</button>
+                        <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => setStatus(user, "denied")}>Deny</button>
+                      </>
+                    )}
+                    <button type="button" className="btn btn-secondary text-xs px-2 py-1" disabled={updatingUid === user.uid} onClick={() => setStatus(user, "suspended")}>Suspend</button>
+                    <button type="button" className="btn btn-danger text-xs px-2 py-1" disabled={updatingUid === user.uid} onClick={() => {
                       if (!confirm(`Remove ${user.displayName || user.email}?`)) return;
-                      await removeUserRecord(user.uid);
-                      setUsers((prev) => prev.filter((item) => item.uid !== user.uid));
+                      setStatus(user, "removed");
                     }}>Remove</button>
                   </span>
                 )}

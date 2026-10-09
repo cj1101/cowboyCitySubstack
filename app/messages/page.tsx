@@ -11,6 +11,8 @@ import {
   subscribeMessages,
 } from "@/lib/firestore/messages";
 import { getClientDb } from "@/lib/firebase";
+import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { isBlockedStatus } from "@/lib/membership";
 import type { Conversation, DirectMessage } from "@/lib/types";
 
 export default function MessagesPage() {
@@ -30,7 +32,7 @@ export default function MessagesPage() {
 
   useEffect(() => {
     if (!user) return;
-    getAllUsers().then((users) => setPeople(users.filter((person) => person.status === "approved" && person.uid !== user.uid))).catch(() => setPeople([]));
+    getAllUsers().then((users) => setPeople(users.filter((person) => !isBlockedStatus(person.status) && person.uid !== user.uid))).catch(() => setPeople([]));
     const unsub = subscribeConversations(user.uid, setConversations);
     const readsUnsub = onSnapshot(collection(getClientDb(), "users", user.uid, "reads"), (snap) => {
       const next: Record<string, number> = {};
@@ -59,7 +61,7 @@ export default function MessagesPage() {
     return map;
   }, [people, user]);
 
-  if (!user) return null;
+  if (!user) return <ScreenStatus>Sign in to read messages.</ScreenStatus>;
 
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-4">
