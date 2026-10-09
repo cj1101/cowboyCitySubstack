@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
-import { canUseRealm } from "@/lib/types";
+import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
 import { notificationsQuery, toNotification } from "@/lib/firestore/notifications";
 import { subscribeConversations } from "@/lib/firestore/messages";
@@ -25,7 +25,8 @@ export function NavBar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [notes, setNotes] = useState(0);
   const [dms, setDms] = useState(0);
-  const member = canUseRealm(profile);
+  const member = !!user && canUseRealm(profile);
+  const sheriff = isSheriff(profile, user?.email);
 
   useEffect(() => {
     if (!user || !member) return;
@@ -90,7 +91,7 @@ export function NavBar() {
                   {link.label}
                 </Link>
               ))}
-              {profile?.isAdmin && (
+              {sheriff && (
                 <Link
                   href="/sheriff"
                   className="text-accent-gold text-sm hover:text-accent-gold-hover font-bold whitespace-nowrap"
@@ -166,7 +167,7 @@ export function NavBar() {
                 {link.label}
               </Link>
             ))}
-            {profile?.isAdmin && (
+            {sheriff && (
               <Link
                 href="/sheriff"
                 className="mobile-nav-link text-accent-gold font-bold"

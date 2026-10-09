@@ -264,9 +264,4 @@ export interface AppNotification {
   createdAt?: Timestamp;
 }
 
-export function canUseRealm(profile: {
-  status?: MembershipStatus | string;
-  isAdmin?: boolean;
-} | null): boolean {
-  return profile?.status === "approved";
-}
+export { canUseRealm } from "@/lib/membership";

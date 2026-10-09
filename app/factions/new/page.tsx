@@ -9,6 +9,7 @@ import { FactionForm } from "@/components/factions/FactionForm";
 import { createFaction, isSlugTaken } from "@/lib/firestore/factions";
 import { uploadFactionImage } from "@/lib/firestore/storage";
 import type { FactionFormData } from "@/components/factions/FactionForm";
+import { ScreenStatus } from "@/components/layout/ScreenStatus";
 
 export default function NewFactionPage() {
   const { user, loading: authLoading } = useAuth();
@@ -64,7 +65,7 @@ export default function NewFactionPage() {
     );
   }
 
-  if (!user) return null;
+  if (!user) return <ScreenStatus>Sign in to found a city.</ScreenStatus>;
 
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-6 md:p-10">

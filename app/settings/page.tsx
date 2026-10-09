@@ -8,6 +8,7 @@ import { useAuth } from "@/components/auth/AuthProvider";
 import { getClientDb } from "@/lib/firebase";
 import { uploadUserAvatar } from "@/lib/storage/uploads";
 import { buildRealmExport, downloadBlob } from "@/lib/export/realm";
+import { ScreenStatus } from "@/components/layout/ScreenStatus";
 
 export default function SettingsPage() {
   const { user, profile, loading } = useAuth();
@@ -26,7 +27,7 @@ export default function SettingsPage() {
     setBio(profile?.bio || "");
   }, [profile]);
 
-  if (!user) return null;
+  if (!user) return <ScreenStatus>Sign in to edit your profile.</ScreenStatus>;
 
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-6">

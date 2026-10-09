@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { isSheriff } from "@/lib/membership";
+import { ScreenStatus } from "@/components/layout/ScreenStatus";
 import { SheriffQueue } from "@/components/sheriff/SheriffQueue";
 import { PostModeration } from "@/components/sheriff/PostModeration";
 import { UserManagement } from "@/components/sheriff/UserManagement";
@@ -12,24 +14,32 @@ import { FactionManagement } from "@/components/sheriff/FactionManagement";
 export default function SheriffDashboardPage() {
   const { user, profile, loading } = useAuth();
   const router = useRouter();
+  const redirected = useRef(false);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || redirected.current) return;
     if (!user) {
+      redirected.current = true;
       router.replace("/login");
       return;
     }
-    if (!profile?.isAdmin) {
+    if (!profile) return;
+    if (!isSheriff(profile, user.email)) {
+      redirected.current = true;
       router.replace("/");
     }
   }, [user, profile, loading, router]);
 
-  if (loading || !user || !profile?.isAdmin) {
-    return (
-      <div className="wood-texture min-h-[calc(100vh-4rem)] flex items-center justify-center">
-        <p className="text-text-muted text-lg">Loading Sheriff&apos;s office…</p>
-      </div>
-    );
+  if (loading || !user) {
+    return <ScreenStatus>Loading Sheriff&apos;s office…</ScreenStatus>;
+  }
+
+  if (!profile) {
+    return <ScreenStatus>No membership record for this account.</ScreenStatus>;
+  }
+
+  if (!isSheriff(profile, user.email)) {
+    return <ScreenStatus>Sending you back to the feed…</ScreenStatus>;
   }
 
   return (
@@ -43,8 +53,13 @@ export default function SheriffDashboardPage() {
             Sheriff&apos;s Dashboard
           </h1>
           <p className="text-text-muted mt-1">
-            Approve members, invite friends, and moderate the realm. Root sheriffs are the emails listed in firestore.rules.
+            Suspend or remove members. Root sheriffs are the two emails listed in firestore.rules.
           </p>
+          {!profile.isAdmin && (
+            <p className="text-sm text-text-muted mt-3">
+              This email is a root sheriff, but Firestore has not stored the admin flag yet. Suspend and remove will fail until the new rules are deployed.
+            </p>
+          )}
         </header>
 
         <section className="glass-panel p-6 md:p-8">
@@ -68,7 +83,7 @@ export default function SheriffDashboardPage() {
         <section className="glass-panel p-6 md:p-8">
           <h2 className="text-xl font-bold text-accent-gold mb-4">User Management</h2>
           <p className="text-text-muted text-sm mb-6">
-            Approve, deny, suspend, or remove people. An email invite is approved automatically when that person signs up. Root sheriff emails are hardcoded in firestore.rules and storage.rules.
+            Suspend or remove people. Root sheriff emails are hardcoded in firestore.rules and storage.rules.
           </p>
           <UserManagement currentUid={user.uid} />
         </section>

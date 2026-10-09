@@ -8,7 +8,7 @@ The original PHP prototype is in [`legacy/`](legacy/) for reference.
 
 ## What members can do
 
-- Request to join. They cannot post or read members-only posts, cities, maps, wiki, or messages until a sheriff approves them.
+- Create an account and use the realm immediately. A sheriff can still suspend or remove an account from `/sheriff`. Approval can be turned back on with `REQUIRE_APPROVAL` in `lib/membership.ts`.
 - Keep a personal profile, then found one or more city accounts (banner, crest, description, lore, and a feed). Co-owners still work.
 - Publish chronological posts with rich text, photo and video galleries, content warnings, drafts, and scheduled posts.
 - Reference other posts, tag cities so the post shows on each city feed, and use `@mentions`.
@@ -39,7 +39,7 @@ cp .env.example .env.local
 | `NEXT_PUBLIC_FIREBASE_APP_ID` | Yes |
 | `NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID` | Optional |
 
-The site does **not** use a Firebase Admin service account. Approvals, invites, messages, and notices are written by the browser and enforced by `firestore.rules` and `storage.rules`.
+The site does **not** use a Firebase Admin service account. Sheriff actions, messages, and notices are written by the browser and enforced by `firestore.rules` and `storage.rules`. Membership is signed-in and not suspended.
 
 `npm run migrate` is optional and still accepts a service account if you need to import the old PHP data. Do not put that key in Vercel.
 
@@ -52,13 +52,14 @@ Root sheriffs are email addresses hardcoded in the rules, not an environment var
 - `firestore.rules` → `rootAdminEmails()`
 - `storage.rules` → the same list inside `isRootAdmin()`
 
-The lists are `charlie@suarezhouse.net` and `cjtheswimmer1101@gmail.com`. Keep both files identical, then deploy the rules. A root sheriff signs up like anyone else. On the next page load the client asks Firestore to mark that account approved and `isAdmin: true`. The rules allow it only when the Auth email is on the list.
+The lists are `charlie@suarezhouse.net` and `cjtheswimmer1101@gmail.com`. Keep both files identical, then deploy the rules. A root sheriff signs up like anyone else. The client asks Firestore once to set `isAdmin: true`. The rules allow it only when the Auth email is on the list. If that write is refused, the page stays put. It does not retry.
 
 From `/sheriff` a sheriff can:
 
-- approve, deny, suspend, or remove a person
-- invite an email (that address is approved automatically when it signs up)
-- grant or revoke the sheriff flag on another approved person
+- suspend or remove a person
+- grant or revoke the sheriff flag on another person
+
+Approve, deny, and email invites stay in the code behind `REQUIRE_APPROVAL` (currently false).
 
 Extra emails can also be stored on the Firestore document `config/admins` as `{ emails: ["friend@example.com"] }`. Rules read that list. Only an existing sheriff can write it.
 
@@ -106,8 +107,8 @@ firebase deploy --only firestore,storage
 1. Import this GitHub repo in Vercel. Framework preset: Next.js. Root directory: the repo root.
 2. Add the seven `NEXT_PUBLIC_FIREBASE_*` variables. Redeploy after changing them so they are baked into the client bundle.
 3. In Firebase Console → Authentication → Settings → Authorized domains, add the Vercel domain (for example `your-project.vercel.app`) and any custom domain.
-4. Put the real sheriff emails in `firestore.rules` and `storage.rules`, then `firebase deploy --only firestore,storage`.
-5. Open the site, sign up with a root sheriff email, and approve everyone else from `/sheriff`.
+4. `firebase deploy --only firestore,storage` when you can sign in to the Firebase CLI. Until that deploy, the site still has to live with the July rules. See the pull request for what those rules block.
+5. Open the site and sign up. A root sheriff email can open `/sheriff` to suspend or remove members once the new rules are deployed.
 
 Step-by-step notes are in [DEPLOY.md](DEPLOY.md). An IONOS VPS with Node, PM2, and nginx remains an alternative there. It is not required.
 

@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -18,6 +19,11 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, onSnapshot, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { getClientAuth, getClientDb } from "@/lib/firebase";
+import {
+  isBlockedStatus,
+  isRootSheriffEmail,
+  REQUIRE_APPROVAL,
+} from "@/lib/membership";
 import type { MembershipStatus } from "@/lib/types";
 
 export interface UserProfile {
@@ -38,6 +44,7 @@ interface AuthContextValue {
   signUp: (email: string, password: string, displayName: string) => Promise<void>;
   logout: () => Promise<void>;
   claimAccess: () => Promise<void>;
+  claimFailed: boolean;
   refreshProfile: () => Promise<void>;
 }
 
@@ -56,55 +63,93 @@ function toProfile(data: Record<string, unknown>): UserProfile {
   };
 }
 
-async function claimMembership(uid: string, email: string): Promise<void> {
-  const db = getClientDb();
-  const userRef = doc(db, "users", uid);
-  try {
-    await updateDoc(userRef, { isAdmin: true, status: "approved" });
-    return;
-  } catch {
-    // Not on the rules allowlist. Fall through to invites.
+function sameProfile(current: UserProfile | null, next: UserProfile | null): boolean {
+  if (!current || !next) return current === next;
+  return current.email === next.email &&
+    current.displayName === next.displayName &&
+    current.isAdmin === next.isAdmin &&
+    current.status === next.status &&
+    current.bio === next.bio &&
+    current.avatarUrl === next.avatarUrl;
+}
+
+async function settleMembership(uid: string, email: string, profile: UserProfile): Promise<boolean> {
+  const userRef = doc(getClientDb(), "users", uid);
+  const root = isRootSheriffEmail(email);
+
+  if (root && (!profile.isAdmin || isBlockedStatus(profile.status))) {
+    try {
+      await updateDoc(userRef, { isAdmin: true, status: "approved" });
+      return true;
+    } catch {
+      // The July rules reject any write that changes isAdmin. Do not retry.
+    }
   }
 
-  const inviteId = email.trim().toLowerCase();
-  const inviteRef = doc(db, "invites", inviteId);
-  const inviteSnap = await getDoc(inviteRef);
-  if (!inviteSnap.exists()) return;
-  const inviteStatus = inviteSnap.data().status;
-  if (inviteStatus === "revoked" || inviteStatus === "accepted") return;
+  if (profile.status === "pending") {
+    try {
+      await updateDoc(userRef, { status: "approved" });
+      if (!REQUIRE_APPROVAL) return true;
+    } catch {
+      if (!REQUIRE_APPROVAL) return false;
+    }
+  }
 
-  await updateDoc(userRef, { status: "approved" });
-  await updateDoc(inviteRef, { status: "accepted", acceptedUid: uid });
+  if (!REQUIRE_APPROVAL) return !isBlockedStatus(profile.status);
+
+  try {
+    const inviteRef = doc(getClientDb(), "invites", email.trim().toLowerCase());
+    const inviteSnap = await getDoc(inviteRef);
+    if (!inviteSnap.exists()) return false;
+    const inviteStatus = inviteSnap.data().status;
+    if (inviteStatus === "revoked" || inviteStatus === "accepted") return false;
+    await updateDoc(userRef, { status: "approved" });
+    await updateDoc(inviteRef, { status: "accepted", acceptedUid: uid });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [claimFailed, setClaimFailed] = useState(false);
+  const settled = useRef(new Set<string>());
 
   useEffect(() => {
     const auth = getClientAuth();
     let unsubProfile: (() => void) | undefined;
+    let subscribedUid: string | null = null;
 
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      unsubProfile?.();
-      setUser(firebaseUser);
-
       if (!firebaseUser) {
+        subscribedUid = null;
+        unsubProfile?.();
+        unsubProfile = undefined;
+        setUser(null);
         setProfile(null);
         setLoading(false);
         return;
       }
 
-      const db = getClientDb();
+      setUser((current) => (current?.uid === firebaseUser.uid ? current : firebaseUser));
+      if (subscribedUid === firebaseUser.uid && unsubProfile) {
+        setLoading(false);
+        return;
+      }
+
+      unsubProfile?.();
+      subscribedUid = firebaseUser.uid;
       unsubProfile = onSnapshot(
-        doc(db, "users", firebaseUser.uid),
+        doc(getClientDb(), "users", firebaseUser.uid),
         (snap) => {
-          setProfile(snap.exists() ? toProfile(snap.data()) : null);
+          const next = snap.exists() ? toProfile(snap.data()) : null;
+          setProfile((current) => (sameProfile(current, next) ? current : next));
           setLoading(false);
         },
         () => {
-          setProfile(null);
           setLoading(false);
         }
       );
@@ -117,9 +162,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!user || !profile || profile.status !== "pending") return;
-    claimMembership(user.uid, profile.email || user.email || "").catch(() => {
-      // Still pending, denied, or suspended.
+    if (!user || !profile) return;
+    if (settled.current.has(user.uid)) return;
+    const email = profile.email || user.email || "";
+    const root = isRootSheriffEmail(email);
+    const needsStatus = profile.status === "pending";
+    const needsAdmin = root && !profile.isAdmin;
+    const needsRestore = root && isBlockedStatus(profile.status);
+    if (!needsStatus && !needsAdmin && !needsRestore) return;
+    settled.current.add(user.uid);
+    settleMembership(user.uid, email, profile).then((ok) => {
+      if (!ok && REQUIRE_APPROVAL) setClaimFailed(true);
+    }).catch(() => {
+      if (REQUIRE_APPROVAL) setClaimFailed(true);
     });
   }, [user, profile]);
 
@@ -135,7 +190,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       bio: "",
       avatarUrl: "",
       isAdmin: false,
-      status: "pending",
+      status: REQUIRE_APPROVAL ? "pending" : "approved",
       createdAt: serverTimestamp(),
     });
   }, []);
@@ -146,9 +201,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const claimAccess = useCallback(async () => {
-    if (!user) return;
-    await claimMembership(user.uid, profile?.email || user.email || "");
-  }, [user, profile?.email]);
+    if (!user || !profile) return;
+    settled.current.delete(user.uid);
+    setClaimFailed(false);
+    const ok = await settleMembership(user.uid, profile.email || user.email || "", profile);
+    settled.current.add(user.uid);
+    if (!ok && REQUIRE_APPROVAL) setClaimFailed(true);
+  }, [user, profile]);
 
   const refreshProfile = useCallback(async () => {
     if (!user) return;
@@ -157,8 +216,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   const value = useMemo(
-    () => ({ user, profile, loading, signIn, signUp, logout, claimAccess, refreshProfile }),
-    [user, profile, loading, signIn, signUp, logout, claimAccess, refreshProfile]
+    () => ({ user, profile, loading, signIn, signUp, logout, claimAccess, claimFailed, refreshProfile }),
+    [user, profile, loading, signIn, signUp, logout, claimAccess, claimFailed, refreshProfile]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
