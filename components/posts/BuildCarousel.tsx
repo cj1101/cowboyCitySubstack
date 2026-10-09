@@ -22,7 +22,7 @@ export function BuildCarousel({ images, title }: BuildCarouselProps) {
   if (images.length === 0) return null;
 
   return (
-    <div className="relative w-full rounded-lg overflow-hidden border border-accent-gold/40 bg-darker-brown">
+    <div className="relative w-full rounded-lg overflow-hidden border border-primary-brown bg-darker-brown">
       <div className="relative aspect-video w-full">
         <Image
           src={images[index]}
@@ -39,7 +39,7 @@ export function BuildCarousel({ images, title }: BuildCarouselProps) {
           <button
             type="button"
             onClick={goPrev}
-            className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-glass-bg/90 border border-accent-gold text-accent-gold font-bold hover:bg-accent-gold hover:text-darker-brown transition-colors"
+            className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 border border-primary-brown text-accent-gold font-bold hover:bg-accent-yellow hover:text-on-yellow transition-colors"
             aria-label="Previous image"
           >
             ‹
@@ -47,7 +47,7 @@ export function BuildCarousel({ images, title }: BuildCarouselProps) {
           <button
             type="button"
             onClick={goNext}
-            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-glass-bg/90 border border-accent-gold text-accent-gold font-bold hover:bg-accent-gold hover:text-darker-brown transition-colors"
+            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 border border-primary-brown text-accent-gold font-bold hover:bg-accent-yellow hover:text-on-yellow transition-colors"
             aria-label="Next image"
           >
             ›
@@ -65,7 +65,7 @@ export function BuildCarousel({ images, title }: BuildCarouselProps) {
               />
             ))}
           </div>
-          <span className="absolute top-3 right-3 text-xs bg-glass-bg/90 px-2 py-1 rounded border border-accent-gold/30 text-text-muted">
+          <span className="absolute top-3 right-3 text-xs bg-glass-bg/90 px-2 py-1 rounded border border-primary-brown text-text-muted">
             {index + 1} / {images.length}
           </span>
         </>

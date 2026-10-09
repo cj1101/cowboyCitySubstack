@@ -27,7 +27,7 @@ export function TipTapEditor({
     editorProps: {
       attributes: {
         class:
-          "prose prose-invert max-w-none min-h-[200px] px-4 py-3 focus:outline-none text-text-light",
+          "prose max-w-none min-h-[200px] px-4 py-3 focus:outline-none text-text-light",
       },
     },
     onUpdate: ({ editor: ed }) => {
@@ -43,16 +43,16 @@ export function TipTapEditor({
 
   if (!editor) {
     return (
-      <div className="rounded border border-accent-gold/40 bg-darker-brown/80 min-h-[200px] flex items-center justify-center text-text-muted">
+      <div className="rounded border border-primary-brown bg-darker-brown/80 min-h-[200px] flex items-center justify-center text-text-muted">
         Loading editor…
       </div>
     );
   }
 
   return (
-    <div className="rounded border border-accent-gold/40 bg-darker-brown/80 overflow-hidden">
+    <div className="rounded border border-primary-brown bg-darker-brown/80 overflow-hidden">
       {editable && (
-        <div className="flex flex-wrap gap-1 p-2 border-b border-accent-gold/20 bg-glass-bg/50">
+        <div className="flex flex-wrap gap-1 p-2 border-b border-primary-brown bg-glass-bg/50">
           <ToolbarButton
             active={editor.isActive("bold")}
             onClick={() => editor.chain().focus().toggleBold().run()}
@@ -141,7 +141,7 @@ function ToolbarButton({
       onClick={onClick}
       className={`px-2.5 py-1 rounded text-sm transition-colors ${
         active
-          ? "bg-accent-gold text-darker-brown"
+          ? "bg-accent-yellow text-on-yellow"
           : "text-text-muted hover:text-accent-gold hover:bg-primary-brown/50"
       } ${className}`}
     >

@@ -74,7 +74,7 @@ export default function SettingsPage() {
           <button className="btn" disabled={busy} type="submit">Save profile</button>
           {message && <p className="text-sm text-accent-gold">{message}</p>}
         </form>
-        <div className="border-t border-accent-gold/30 pt-4 space-y-3">
+        <div className="border-t border-primary-brown pt-4 space-y-3">
           <h2 className="text-xl font-bold text-accent-gold">Export</h2>
           <p className="text-sm text-text-muted">Download the cities you belong to, their wiki entries, and your posts.</p>
           <div className="flex flex-wrap gap-2">

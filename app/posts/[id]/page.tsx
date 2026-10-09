@@ -161,7 +161,7 @@ export default function PostDetailPage() {
     );
   }
 
-  const factionColor = faction?.colors?.primary ?? "#d4af37";
+  const factionColor = faction?.colors?.primary ?? "#169C9C";
   const hidden = Boolean(post.spoiler || post.contentWarning) && !revealed;
   const media = post.media?.length
     ? post.media
@@ -232,7 +232,7 @@ export default function PostDetailPage() {
             <div className="mb-6 space-y-2">
               <h2 className="text-accent-gold font-bold">References</h2>
               {referenced.map((item) => (
-                <Link key={item.id} href={`/posts/${item.id}`} className="block border border-accent-gold/30 rounded p-3 hover:border-accent-gold">
+                <Link key={item.id} href={`/posts/${item.id}`} className="block border border-primary-brown rounded p-3 hover:border-accent-gold">
                   {item.title}
                 </Link>
               ))}
@@ -259,13 +259,13 @@ export default function PostDetailPage() {
           )}
 
           {post.type === "event" && (
-            <p className="text-text-muted text-sm italic border-t border-accent-gold/20 pt-4">
+            <p className="text-text-muted text-sm italic border-t border-primary-brown pt-4">
               Realm event
             </p>
           )}
 
           {post.type === "wiki" && (
-            <p className="text-text-muted text-sm italic border-t border-accent-gold/20 pt-4">
+            <p className="text-text-muted text-sm italic border-t border-primary-brown pt-4">
               Wiki entry — full wiki sections on faction pages in Phase 4.
             </p>
           )}

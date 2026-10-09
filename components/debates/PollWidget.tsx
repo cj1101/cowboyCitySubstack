@@ -85,7 +85,7 @@ export function PollWidget({ postId, poll, canCreate = false }: PollWidgetProps)
     if (!canCreate || !user) return null;
 
     return (
-      <div className="mt-6 border-t border-accent-gold/30 pt-6">
+      <div className="mt-6 border-t border-primary-brown pt-6">
         {!showCreateForm ? (
           <button
             type="button"
@@ -156,7 +156,7 @@ export function PollWidget({ postId, poll, canCreate = false }: PollWidgetProps)
   const totalVotes = Object.keys(poll.votes).length;
 
   return (
-    <div className="mt-6 border-t border-accent-gold/30 pt-6">
+    <div className="mt-6 border-t border-primary-brown pt-6">
       <h3 className="text-accent-gold font-bold mb-1">Poll</h3>
       <p className="text-text-light mb-4">{poll.question}</p>
 
@@ -175,7 +175,7 @@ export function PollWidget({ postId, poll, canCreate = false }: PollWidgetProps)
               className={`w-full text-left rounded-lg border-2 p-3 transition-all relative overflow-hidden ${
                 isSelected
                   ? "border-accent-gold bg-accent-gold/10"
-                  : "border-primary-brown hover:border-accent-gold/60 bg-dark-brown/40"
+                  : "border-primary-brown hover:border-accent-gold bg-dark-brown/40"
               } ${!user ? "cursor-default" : "cursor-pointer"}`}
             >
               <div

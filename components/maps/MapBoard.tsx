@@ -60,14 +60,14 @@ export function MapBoard({
             <Link
               key={pin.id}
               href={pin.postId ? `/posts/${pin.postId}` : "#"}
-              className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-gold border border-darker-brown"
+              className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-yellow border border-on-yellow"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
               title={pin.title}
               onClick={(event) => event.stopPropagation()}
             />
           ))}
           {draft && (
-            <span className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-text-light border border-accent-gold" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
+            <span className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-cyan border border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
           )}
         </div>
       ) : (

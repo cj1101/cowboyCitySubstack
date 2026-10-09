@@ -20,7 +20,7 @@ interface FactionFormProps {
   submitLabel?: string;
 }
 
-const DEFAULT_COLORS: FactionColors = { primary: "#5a3e2b", secondary: "#3d2817" };
+const DEFAULT_COLORS: FactionColors = { primary: "#169C9C", secondary: "#FED83D" };
 
 export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }: FactionFormProps) {
   const [name, setName] = useState(initial?.name ?? "");

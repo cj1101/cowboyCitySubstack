@@ -45,7 +45,8 @@ export default function LoginPage() {
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] flex items-center justify-center p-4 sm:p-8">
       <div className="glass-panel p-6 sm:p-10 max-w-md w-full">
-        <h1 className="text-3xl font-bold text-accent-gold text-center mb-2">
+        <p className="text-center text-sm font-bold tracking-wide text-ink mb-3">Cowboy City & The Realm</p>
+        <h1 className="text-3xl font-bold text-ink text-center mb-2">
           Welcome Back, Partner
         </h1>
         <p className="text-text-muted text-center mb-8">

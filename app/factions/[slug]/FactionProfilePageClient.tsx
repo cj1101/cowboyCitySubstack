@@ -214,9 +214,9 @@ export default function FactionProfilePageClient() {
 
 
 
-  const primary = faction.colors?.primary ?? "#5a3e2b";
+  const primary = faction.colors?.primary ?? "#169C9C";
 
-  const secondary = faction.colors?.secondary ?? "#3d2817";
+  const secondary = faction.colors?.secondary ?? "#FED83D";
 
 
 
@@ -264,7 +264,7 @@ export default function FactionProfilePageClient() {
 
                 className="w-20 h-20 md:w-28 md:h-28 rounded-full border-4 border-accent-gold flex items-center justify-center text-3xl font-bold shrink-0"
 
-                style={{ background: primary, color: "#f5e6d3" }}
+                style={{ background: primary, color: "#1c1917" }}
 
               >
 
@@ -446,7 +446,7 @@ export default function FactionProfilePageClient() {
 
               className="w-20 h-20 md:w-28 md:h-28 rounded-full border-4 border-accent-gold flex items-center justify-center text-3xl font-bold shrink-0"
 
-              style={{ background: primary, color: "#f5e6d3" }}
+              style={{ background: primary, color: "#1c1917" }}
 
             >
 
@@ -580,7 +580,7 @@ export default function FactionProfilePageClient() {
 
                         className="w-12 h-12 rounded-full border border-accent-gold flex items-center justify-center font-bold"
 
-                        style={{ background: secondary, color: "#f5e6d3" }}
+                        style={{ background: secondary, color: "#1c1917" }}
 
                       >
 

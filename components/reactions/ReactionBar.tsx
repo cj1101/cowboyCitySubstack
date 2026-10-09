@@ -72,7 +72,7 @@ export function ReactionBar({ postId }: ReactionBarProps) {
   };
 
   return (
-    <div className="flex flex-wrap gap-3 mt-6 pt-4 border-t border-accent-gold/30">
+    <div className="flex flex-wrap gap-3 mt-6 pt-4 border-t border-primary-brown">
       {REACTIONS.map(({ type, label, icon, activeClass }) => {
         const isActive = userReaction === type;
         const count = counts[type];
@@ -86,7 +86,7 @@ export function ReactionBar({ postId }: ReactionBarProps) {
             className={`flex items-center gap-2 px-4 py-2 rounded-lg border-2 text-sm font-bold transition-all ${
               isActive
                 ? activeClass
-                : "border-primary-brown text-text-muted hover:border-accent-gold/50 hover:text-text-light"
+                : "border-primary-brown text-text-muted hover:border-accent-gold hover:text-accent-gold"
             } ${!user ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
             title={user ? `Mark as ${label.toLowerCase()}` : "Sign in to react"}
           >

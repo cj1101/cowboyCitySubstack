@@ -144,7 +144,7 @@ export function ReplyForm({ postId, postFactionId, showStance = true }: ReplyFor
   }
 
   return (
-    <form onSubmit={handleSubmit} className="mt-6 space-y-4 border-t border-accent-gold/30 pt-6">
+    <form onSubmit={handleSubmit} className="mt-6 space-y-4 border-t border-primary-brown pt-6">
       <h3 className="text-accent-gold font-bold">Add Your Reply</h3>
 
       {factions.length > 1 && (
@@ -203,7 +203,7 @@ export function ReplyForm({ postId, postFactionId, showStance = true }: ReplyFor
               className={`px-4 py-2 rounded border-2 text-sm font-bold transition-colors ${
                 stance === opt.value
                   ? "border-accent-gold bg-accent-gold/20 text-accent-gold"
-                  : "border-primary-brown text-text-muted hover:border-accent-gold/50"
+                  : "border-primary-brown text-text-muted hover:border-accent-gold"
               }`}
             >
               {opt.label}

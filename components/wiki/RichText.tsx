@@ -26,7 +26,7 @@ export function RichText({ html }: { html: string }) {
 
   return (
     <div
-      className="prose prose-invert max-w-none text-text-light [&_a]:text-accent-gold [&_blockquote]:border-accent-gold/40 [&_.wiki-link]:underline"
+      className="prose max-w-none text-text-light [&_a]:text-accent-gold [&_blockquote]:border-primary-brown [&_.wiki-link]:underline"
       onMouseOver={async (event) => {
         const target = (event.target as HTMLElement).closest("a.wiki-link");
         if (!target) return;
