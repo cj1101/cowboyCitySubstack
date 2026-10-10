@@ -180,6 +180,11 @@ service cloud.firestore {
       return hasUser() && userDoc().data.get('ownsCity', false) == true;
     }
 
+    function pinCategoryOk() {
+      return !request.resource.data.keys().hasAny(['category']) ||
+        request.resource.data.category in ['capital', 'outpost', 'landmark', 'other'];
+    }
+
     function claimCityOwner(uid) {
       return request.auth.uid == uid &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownsCity', 'proofCityId']) &&
@@ -291,7 +296,8 @@ service cloud.firestore {
           request.resource.data.title.size() > 0 &&
           request.resource.data.title.size() <= 200 &&
           request.resource.data.nx is number &&
-          request.resource.data.ny is number;
+          request.resource.data.ny is number &&
+          pinCategoryOk();
         allow delete: if isMember() && (isAdmin() || isFactionOwner(factionId));
       }
     }
@@ -410,6 +416,30 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    function borderPointOk(point) {
+      return point is map &&
+        point.keys().hasOnly(['nx', 'ny']) &&
+        point.nx is number &&
+        point.ny is number &&
+        point.nx >= 0 &&
+        point.nx <= 1 &&
+        point.ny >= 0 &&
+        point.ny <= 1;
+    }
+
+    function validCityBorder(cityId) {
+      return request.resource.data.keys().hasOnly(['cityId', 'points', 'updatedAt']) &&
+        request.resource.data.cityId == cityId &&
+        request.resource.data.updatedAt is timestamp &&
+        request.resource.data.points is list &&
+        request.resource.data.points.size() >= 3 &&
+        request.resource.data.points.size() <= 64 &&
+        borderPointOk(request.resource.data.points[0]) &&
+        borderPointOk(request.resource.data.points[1]) &&
+        borderPointOk(request.resource.data.points[2]) &&
+        borderPointOk(request.resource.data.points[request.resource.data.points.size() - 1]);
+    }
+
     match /realm_map/{docId} {
       allow read: if isMember();
       allow write: if isAdmin();
@@ -420,8 +450,17 @@ service cloud.firestore {
           request.resource.data.title is string &&
           request.resource.data.title.size() > 0 &&
           request.resource.data.nx is number &&
-          request.resource.data.ny is number;
+          request.resource.data.ny is number &&
+          pinCategoryOk();
         allow delete: if isAdmin();
+      }
+
+      // One border document per city. Signed-in readers; only that city's owner or an admin can write.
+      match /borders/{cityId} {
+        allow read: if isSignedIn();
+        allow create, update: if validCityBorder(cityId) &&
+          (isAdmin() || (isMember() && ownsListedCity(cityId)));
+        allow delete: if isAdmin() || (isMember() && ownsListedCity(cityId));
       }
     }
 
