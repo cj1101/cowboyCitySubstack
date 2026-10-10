@@ -5,6 +5,7 @@ import {
   getDoc,
   getDocs,
   getDocsFromServer,
+  limit,
   orderBy,
   query,
   serverTimestamp,
@@ -17,15 +18,20 @@ import { getClientDb } from "@/lib/firebase";
 import { withTimeout } from "@/lib/async";
 import { ensureOwnerMembership, getFactionMembers } from "@/lib/firestore/factions";
 import { notifyMany } from "@/lib/firestore/notifications";
+import { createPost } from "@/lib/firestore/posts";
+import { createThread } from "@/lib/firestore/forum";
+import { searchTokensFrom } from "@/lib/search/tokens";
 import type { Faction } from "@/lib/types";
 import {
   acceptTreaty,
+  breakTreaty,
   colorForTreatyName,
   counterTreaty,
   currentRevision,
   declineTreaty,
   proposeTreaty,
   ratifiedCityIds,
+  renewTreaty,
   responsesForRevision,
   treatyStatus,
   withdrawTreaty,
@@ -56,8 +62,20 @@ export interface StoredTreaty {
   partyOwnerUids: string[];
   color: string;
   lastActionCityId: string;
+  expiresOn: string;
+  renewOn: string;
+  brokenByCityId: string;
+  breakNote: string;
+  searchTokens?: string[];
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+}
+
+export interface TreatyTimelineEvent {
+  id: string;
+  at: number;
+  title: string;
+  detail: string;
 }
 
 export interface TreatyComment {
@@ -80,9 +98,22 @@ function ownersOf(factions: Faction[], cityIds: string[]): string[] {
   return [...new Set(factions.filter((city) => ids.has(city.id)).flatMap((city) => city.ownerUids))];
 }
 
+function millisOf(value: unknown): number | undefined {
+  if (value && typeof value === "object" && "toMillis" in value && typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+  return undefined;
+}
+
 function toRevision(id: string, data: Record<string, unknown>): TreatyRevision {
+  const number = Number(data.number ?? id);
+  const kind = data.kind === "renewal" || data.kind === "counter" || data.kind === "proposal"
+    ? data.kind
+    : number <= 1
+      ? "proposal"
+      : "counter";
   return {
-    number: Number(data.number ?? id),
+    number,
     name: (data.name as string) || "",
     type: (data.type as TreatyType) || "other",
     nature: (data.nature as string) || "",
@@ -92,6 +123,10 @@ function toRevision(id: string, data: Record<string, unknown>): TreatyRevision {
     inviteeCityIds: (data.inviteeCityIds as string[]) || [],
     authorCityId: (data.authorCityId as string) || "",
     note: (data.note as string) || "",
+    expiresOn: (data.expiresOn as string) || "",
+    renewOn: (data.renewOn as string) || "",
+    kind,
+    at: millisOf(data.createdAt),
   };
 }
 
@@ -101,6 +136,7 @@ function toResponse(data: Record<string, unknown>): TreatyResponse {
     revision: Number(data.revision ?? 0),
     decision: data.decision as TreatyResponse["decision"],
     note: (data.note as string) || "",
+    at: millisOf(data.updatedAt) ?? millisOf(data.createdAt),
   };
 }
 
@@ -113,7 +149,7 @@ export function toStoredTreaty(id: string, data: Record<string, unknown>): Store
     terms: (data.terms as string) || "",
     purpose: (data.purpose as string) || "",
     open: data.open === true,
-    status: data.status === "active" ? "active" : "pending",
+    status: data.status === "active" || data.status === "broken" ? data.status : "pending",
     proposerCityId: (data.proposerCityId as string) || "",
     authorUid: (data.authorUid as string) || "",
     currentRevision: Number(data.currentRevision ?? 1),
@@ -123,24 +159,46 @@ export function toStoredTreaty(id: string, data: Record<string, unknown>): Store
     partyOwnerUids: (data.partyOwnerUids as string[]) || [],
     color: (data.color as string) || "#169C9C",
     lastActionCityId: (data.lastActionCityId as string) || "",
+    expiresOn: (data.expiresOn as string) || "",
+    renewOn: (data.renewOn as string) || "",
+    brokenByCityId: (data.brokenByCityId as string) || "",
+    breakNote: (data.breakNote as string) || "",
+    searchTokens: (data.searchTokens as string[]) || [],
     createdAt: data.createdAt as Timestamp | undefined,
     updatedAt: data.updatedAt as Timestamp | undefined,
   };
 }
 
-async function loadRecord(treatyId: string): Promise<TreatyRecord> {
+function dateFields(revision: TreatyRevision): Record<string, string> {
+  const fields: Record<string, string> = {};
+  if (revision.expiresOn) fields.expiresOn = revision.expiresOn;
+  if (revision.renewOn) fields.renewOn = revision.renewOn;
+  return fields;
+}
+
+function tokensFor(revision: TreatyRevision): string[] {
+  return searchTokensFrom({
+    title: `${revision.name} ${revision.type} ${revision.purpose}`,
+    body: `${revision.nature} ${revision.terms}`,
+  });
+}
+
+async function loadTreaty(treatyId: string): Promise<{ stored: StoredTreaty; record: TreatyRecord }> {
   const db = getClientDb();
-  const snap = await getDoc(doc(db, "treaties", treatyId));
-  if (!snap.exists()) throw new Error("That treaty is not available.");
-  const stored = toStoredTreaty(snap.id, snap.data());
-  const [revisions, responses] = await Promise.all([
+  const [snap, revisions, responses] = await Promise.all([
+    getDoc(doc(db, "treaties", treatyId)),
     getDocs(collection(db, "treaties", treatyId, "revisions")),
     getDocs(collection(db, "treaties", treatyId, "responses")),
   ]);
+  if (!snap.exists()) throw new Error("That treaty is not available.");
+  const stored = toStoredTreaty(snap.id, snap.data());
   return {
-    proposerCityId: stored.proposerCityId,
-    revisions: revisions.docs.map((item) => toRevision(item.id, item.data())).sort((a, b) => a.number - b.number),
-    responses: responses.docs.map((item) => toResponse(item.data())),
+    stored,
+    record: {
+      proposerCityId: stored.proposerCityId,
+      revisions: revisions.docs.map((item) => toRevision(item.id, item.data())).sort((a, b) => a.number - b.number),
+      responses: responses.docs.map((item) => toResponse(item.data())),
+    },
   };
 }
 
@@ -166,6 +224,8 @@ function parentPatch(record: TreatyRecord, previous: StoredTreaty, uid: string, 
     partyOwnerUids: partyOwnerUids.length > 0 ? partyOwnerUids : previous.partyOwnerUids,
     color: previous.color,
     lastActionCityId: revision.authorCityId,
+    ...dateFields(revision),
+    searchTokens: tokensFor(revision),
     updatedAt: serverTimestamp(),
   };
 }
@@ -219,6 +279,8 @@ export async function createTreaty(
     partyOwnerUids,
     color: colorForTreatyName(revision.name),
     lastActionCityId: draft.proposerCityId,
+    ...dateFields(revision),
+    searchTokens: tokensFor(revision),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   }));
@@ -239,7 +301,8 @@ export async function createTreaty(
   ]));
   void notifyMany(readerUids, {
     type: "treaty",
-    summary: `${revision.name} is waiting on a response.`,
+    kind: "invite",
+    summary: `You're invited to ratify “${revision.name}”.`,
     href: `/treaties/${ref.id}`,
     actorUid: uid,
   });
@@ -295,19 +358,23 @@ async function persistResponse(
   await setDoc(doc(db, "treaties", treatyId, "responses", `${cityId}_${revision.number}`), {
     cityId,
     revision: revision.number,
-    decision,
+    decision: response?.decision || decision,
     uid,
     note: response?.note || "",
     updatedAt: serverTimestamp(),
   });
+  const kind = decision === "counter" ? "counter" : decision === "accept" ? "ratified" : undefined;
   const summary =
     decision === "counter"
-      ? `${revision.name} has a new revision to ratify.`
+      ? `Counter-proposal on “${revision.name}”.`
       : decision === "accept" && status === "active"
-        ? `${revision.name} is now active.`
-        : `${revision.name}: a city ${decision === "accept" ? "ratified" : decision === "decline" ? "declined" : "withdrew"}.`;
+        ? `“${revision.name}” is ratified and now active.`
+        : decision === "accept"
+          ? `A city ratified “${revision.name}”.`
+          : `${revision.name}: a city ${decision === "decline" ? "declined" : "withdrew"}.`;
   await notifyMany(readerUids, {
     type: "treaty",
+    kind,
     summary,
     href: `/treaties/${treatyId}`,
     actorUid: uid,
@@ -321,11 +388,7 @@ export async function respondToTreaty(
   factions: Faction[],
   action: "accept" | "decline" | "withdraw" | { counter: Parameters<typeof counterTreaty>[2] }
 ): Promise<void> {
-  const db = getClientDb();
-  const snap = await getDoc(doc(db, "treaties", treatyId));
-  if (!snap.exists()) throw new Error("That treaty is not available.");
-  const previous = toStoredTreaty(snap.id, snap.data());
-  const record = await loadRecord(treatyId);
+  const { stored: previous, record } = await loadTreaty(treatyId);
   if (action === "accept") {
     await persistResponse(treatyId, previous, acceptTreaty(record, cityId), cityId, uid, factions, "accept");
     return;
@@ -349,6 +412,140 @@ export async function respondToTreaty(
   );
 }
 
+export function treatyTimeline(record: TreatyRecord, nameOf: (cityId: string) => string): TreatyTimelineEvent[] {
+  const events: TreatyTimelineEvent[] = [];
+  for (const revision of record.revisions) {
+    const verb = revision.kind === "renewal"
+      ? "proposed a renewal"
+      : revision.kind === "counter" || revision.number > 1
+        ? "counter-proposed"
+        : "proposed the treaty";
+    const dates = [
+      revision.expiresOn ? `Expiry ${revision.expiresOn}` : "",
+      revision.renewOn ? `Renewal ${revision.renewOn}` : "",
+    ].filter(Boolean);
+    events.push({
+      id: `revision-${revision.number}`,
+      at: revision.at ?? revision.number,
+      title: `${nameOf(revision.authorCityId)} ${verb}`,
+      detail: [revision.note, ...dates].filter(Boolean).join(" · "),
+    });
+    for (const response of responsesForRevision(record, revision.number)) {
+      if (response.decision === "counter" && response.cityId === revision.authorCityId) continue;
+      const label: Record<TreatyResponse["decision"], string> = {
+        accept: revision.kind === "renewal" ? "ratified the renewal" : "ratified",
+        decline: "declined",
+        withdraw: "withdrew",
+        counter: "answered with a revision",
+        break: "broke the treaty",
+      };
+      events.push({
+        id: `vote-${revision.number}-${response.cityId}-${response.decision}`,
+        at: (response.at ?? revision.at ?? revision.number) + 1,
+        title: `${nameOf(response.cityId)} ${label[response.decision] || response.decision}`,
+        detail: response.note || "",
+      });
+    }
+  }
+  return events.sort((a, b) => a.at - b.at || a.title.localeCompare(b.title));
+}
+
+export async function renewStoredTreaty(
+  treatyId: string,
+  cityId: string,
+  uid: string,
+  factions: Faction[],
+  input: { expiresOn?: string; renewOn?: string; note: string }
+): Promise<void> {
+  await withTimeout(ensureOwnerMembership(uid, cityId), 8000);
+  const { stored, record } = await loadTreaty(treatyId);
+  const next = renewTreaty(record, cityId, input);
+  await persistResponse(treatyId, stored, next, cityId, uid, factions, "counter");
+}
+
+export async function breakStoredTreaty(
+  treatyId: string,
+  cityId: string,
+  uid: string,
+  factions: Faction[],
+  note: string,
+  authorName: string
+): Promise<{ postId: string; threadId: string }> {
+  await withTimeout(ensureOwnerMembership(uid, cityId), 8000);
+  const { stored, record } = await loadTreaty(treatyId);
+  const next = breakTreaty(record, cityId, note);
+  const revision = currentRevision(next);
+  const partyCityIds = ratifiedCityIds(next);
+  const status = treatyStatus(next);
+  const readerUids = [
+    ...new Set([
+      ...stored.readerUids,
+      ...ownersOf(factions, [record.proposerCityId, ...revision.inviteeCityIds, ...partyCityIds, cityId]),
+    ]),
+  ];
+  const partyOwnerUids = ownersOf(factions, partyCityIds);
+  const db = getClientDb();
+  const trimmed = note.trim();
+  await updateDoc(doc(db, "treaties", treatyId), {
+    partyCityIds,
+    status,
+    lastActionCityId: cityId,
+    readerUids,
+    partyOwnerUids: partyOwnerUids.length > 0 ? partyOwnerUids : stored.partyOwnerUids,
+    updatedAt: serverTimestamp(),
+    brokenByCityId: cityId,
+    breakNote: trimmed,
+  });
+  await setDoc(doc(db, "treaties", treatyId, "responses", `${cityId}_${revision.number}`), {
+    cityId,
+    revision: revision.number,
+    decision: "break",
+    uid,
+    note: trimmed,
+    updatedAt: serverTimestamp(),
+  });
+  const cityName = factions.find((city) => city.id === cityId)?.name || "A city";
+  const announcement = {
+    title: `Treaty broken: ${stored.name}`.slice(0, 180),
+    body: `${cityName} has broken the treaty "${stored.name}".\n\n${trimmed}\n\nThe treaty page: /treaties/${treatyId}`,
+  };
+  let postId = "";
+  let threadId = "";
+  try {
+    postId = await createPost({
+      type: "announcement",
+      factionId: cityId,
+      characterId: "",
+      title: announcement.title,
+      body: announcement.body,
+      cityIds: [cityId],
+      referencedPostIds: [],
+      spoiler: false,
+      pinned: false,
+      status: "published",
+    }, uid);
+    threadId = await createThread({
+      title: announcement.title,
+      body: announcement.body,
+      authorUid: uid,
+      authorName: authorName || cityName,
+      cityId,
+      treatyId,
+      files: [],
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "The feed could not be updated.";
+    throw new Error(`The break is recorded and the map will update, but the public announcement failed. ${reason}`);
+  }
+  void notifyMany(readerUids, {
+    type: "treaty",
+    summary: `${cityName} broke ${stored.name}.`,
+    href: `/treaties/${treatyId}`,
+    actorUid: uid,
+  });
+  return { postId, threadId };
+}
+
 export async function getTreatyBundle(treatyId: string): Promise<{
   treaty: StoredTreaty;
   record: TreatyRecord;
@@ -356,16 +553,18 @@ export async function getTreatyBundle(treatyId: string): Promise<{
   wiki: TreatyWikiSection[];
 } | null> {
   const db = getClientDb();
-  const snap = await getDoc(doc(db, "treaties", treatyId));
-  if (!snap.exists()) return null;
-  const [record, comments, wiki] = await Promise.all([
-    loadRecord(treatyId),
-    getDocs(query(collection(db, "treaties", treatyId, "comments"), orderBy("createdAt", "asc"))),
-    getDocs(collection(db, "treaties", treatyId, "wiki_sections")),
+  const [loaded, comments, wiki] = await Promise.all([
+    loadTreaty(treatyId).catch((error: unknown) => {
+      if (error instanceof Error && error.message === "That treaty is not available.") return null;
+      throw error;
+    }),
+    getDocs(query(collection(db, "treaties", treatyId, "comments"), orderBy("createdAt", "asc"), limit(80))),
+    getDocs(query(collection(db, "treaties", treatyId, "wiki_sections"), limit(40))),
   ]);
+  if (!loaded) return null;
   return {
-    treaty: toStoredTreaty(snap.id, snap.data()),
-    record,
+    treaty: loaded.stored,
+    record: loaded.record,
     comments: comments.docs.map((item) => ({
       id: item.id,
       authorUid: (item.data().authorUid as string) || "",

@@ -31,6 +31,10 @@ export function FactionCard({ faction }: FactionCardProps) {
       </div>
       <div className={`p-5 ${faction.sigilUrl ? "pt-10" : "pt-4"}`}>
         <h2 className="text-xl font-bold text-accent-gold">{faction.name}</h2>
+        {faction.motto && <p className="text-sm italic mt-2">{faction.motto}</p>}
+        {faction.population != null && (
+          <p className="text-xs text-text-muted mt-1">Population {faction.population.toLocaleString()}</p>
+        )}
         {faction.bio && (
           <p className="text-text-muted text-sm mt-2 line-clamp-2">{faction.bio}</p>
         )}

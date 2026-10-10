@@ -4,10 +4,13 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  documentId,
   getDocs,
   getDocsFromServer,
+  limit,
   orderBy,
   query,
+  startAfter,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -16,7 +19,10 @@ import {
   type QueryConstraint,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { readCityRecord } from "@/lib/cities/record";
 import { parseMentions } from "@/lib/mentions";
+import { searchTokensFrom } from "@/lib/search/tokens";
+import type { Timestamp } from "firebase/firestore";
 import type {
   Character,
   CreatePostInput,
@@ -106,6 +112,10 @@ export async function createPost(
     era: input.era ?? null,
     contentWarning: input.contentWarning ?? null,
     spoiler: input.spoiler === true,
+    searchTokens: searchTokensFrom({
+      title: `${input.title} ${input.era || ""}`,
+      body: input.body,
+    }),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -134,6 +144,47 @@ async function fetchPostQuery(constraints: QueryConstraint[], fromServer = false
   const read = fromServer ? getDocsFromServer : getDocs;
   const snap = await read(query(collection(db, POSTS_COLLECTION), ...constraints));
   return snap.docs.map((d) => docToPost(d.id, d.data()));
+}
+
+const FEED_PAGE = 15;
+
+export async function getPostsPage(options?: {
+  factionId?: string | null;
+  limitCount?: number;
+  after?: Timestamp | null;
+}): Promise<{ posts: Post[]; hasMore: boolean; cursor: Timestamp | null }> {
+  const pageSize = options?.limitCount ?? FEED_PAGE;
+  const cityId = options?.factionId;
+  const constraints: QueryConstraint[] = [orderBy("createdAt", "desc"), limit(pageSize + 1)];
+  if (options?.after) constraints.push(startAfter(options.after));
+
+  let posts: Post[];
+  if (cityId) {
+    const cityConstraints = [where("cityIds", "array-contains", cityId), ...constraints];
+    const primaryConstraints = [where("factionId", "==", cityId), ...constraints];
+    const [tagged, primary] = await Promise.all([
+      fetchPostQuery(cityConstraints),
+      fetchPostQuery(primaryConstraints),
+    ]);
+    const byId = new Map<string, Post>();
+    for (const post of [...tagged, ...primary]) byId.set(post.id, post);
+    posts = [...byId.values()].sort(
+      (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
+    );
+  } else {
+    posts = await fetchPostQuery(constraints);
+  }
+
+  const hasMore = posts.length > pageSize;
+  const page = posts.slice(0, pageSize).filter((post) => !isPrivateStatus(post.status));
+  const cursor = page.length > 0 ? page[page.length - 1].createdAt ?? null : null;
+  if (!options?.after) {
+    const pinned = await fetchPostQuery([where("pinned", "==", true), limit(5)]).catch(() => [] as Post[]);
+    const announcements = pinned.filter((post) => post.type === "announcement" && !isPrivateStatus(post.status));
+    const seen = new Set(announcements.map((post) => post.id));
+    return { posts: [...announcements, ...page.filter((post) => !seen.has(post.id))], hasMore, cursor };
+  }
+  return { posts: page, hasMore, cursor };
 }
 
 export async function getPosts(options?: {
@@ -277,10 +328,13 @@ export async function getReferencingPosts(postId: string): Promise<Post[]> {
   return snap.docs.map((d) => docToPost(d.id, d.data())).filter((post) => !isPrivateStatus(post.status));
 }
 
+let factionCache: { at: number; items: Faction[] } | null = null;
+
 export async function getAllFactions(): Promise<Faction[]> {
+  if (factionCache && Date.now() - factionCache.at < 20000) return factionCache.items;
   const db = getClientDb();
   const snap = await getDocs(collection(db, FACTIONS_COLLECTION));
-  return snap.docs.map((d) => ({
+  const items = snap.docs.map((d) => ({
     id: d.id,
     name: d.data().name ?? "Unknown",
     slug: d.data().slug ?? d.id,
@@ -291,8 +345,11 @@ export async function getAllFactions(): Promise<Faction[]> {
     description: d.data().description ?? d.data().bio,
     lore: d.data().lore,
     mapImageUrl: d.data().mapImageUrl,
+    ...readCityRecord(d.data()),
     ownerUids: d.data().ownerUids,
   }));
+  factionCache = { at: Date.now(), items };
+  return items;
 }
 
 export async function getFaction(factionId: string): Promise<Faction | null> {
@@ -312,6 +369,7 @@ export async function getFaction(factionId: string): Promise<Faction | null> {
     description: data.description ?? data.bio,
     lore: data.lore,
     mapImageUrl: data.mapImageUrl,
+    ...readCityRecord(data),
     ownerUids: data.ownerUids,
   };
 }
@@ -379,26 +437,56 @@ export async function getUserFactions(uid: string): Promise<Faction[]> {
   return factions.filter((f): f is Faction => f !== null);
 }
 
+async function docsByIds(collectionName: string, ids: string[]) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (unique.length === 0) return [];
+  const db = getClientDb();
+  const chunks: string[][] = [];
+  for (let index = 0; index < unique.length; index += 10) chunks.push(unique.slice(index, index + 10));
+  const snaps = await Promise.all(
+    chunks.map((chunk) => getDocs(query(collection(db, collectionName), where(documentId(), "in", chunk))))
+  );
+  return snaps.flatMap((snap) => snap.docs);
+}
+
 export async function getFactionsMap(
   factionIds: string[]
 ): Promise<Map<string, Faction>> {
-  const unique = [...new Set(factionIds.filter(Boolean))];
-  const factions = await Promise.all(unique.map((id) => getFaction(id)));
   const map = new Map<string, Faction>();
-  factions.forEach((f) => {
-    if (f) map.set(f.id, f);
-  });
+  for (const item of await docsByIds(FACTIONS_COLLECTION, factionIds)) {
+    const data = item.data();
+    map.set(item.id, {
+      id: item.id,
+      name: data.name ?? "Unknown",
+      slug: data.slug ?? item.id,
+      colors: data.colors,
+      bannerUrl: data.bannerUrl,
+      sigilUrl: data.sigilUrl,
+      bio: data.description ?? data.bio,
+      description: data.description ?? data.bio,
+      lore: data.lore,
+      mapImageUrl: data.mapImageUrl,
+      ownerUids: data.ownerUids,
+    });
+  }
   return map;
 }
 
 export async function getCharactersMap(
   characterIds: string[]
 ): Promise<Map<string, Character>> {
-  const unique = [...new Set(characterIds.filter(Boolean))];
-  const characters = await Promise.all(unique.map((id) => getCharacter(id)));
   const map = new Map<string, Character>();
-  characters.forEach((c) => {
-    if (c) map.set(c.id, c);
-  });
+  for (const item of await docsByIds(CHARACTERS_COLLECTION, characterIds)) {
+    const data = item.data();
+    if (data.isActive === false) continue;
+    map.set(item.id, {
+      id: item.id,
+      factionId: data.factionId,
+      name: data.name ?? "Unknown",
+      title: data.title,
+      avatarUrl: data.avatarUrl,
+      isActive: data.isActive ?? true,
+    });
+  }
   return map;
 }

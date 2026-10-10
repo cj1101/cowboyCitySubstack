@@ -5,6 +5,7 @@ import { doc, getDoc } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
 import { subscribeReplies } from "@/lib/firestore/replies";
 import { ReplyForm } from "@/components/debates/ReplyForm";
+import { PersonName } from "@/components/profile/PersonName";
 import type { Reply } from "@/lib/types";
 
 export function CommentSection({ postId, postFactionId }: { postId: string; postFactionId: string }) {
@@ -48,7 +49,11 @@ export function CommentSection({ postId, postFactionId }: { postId: string; post
         {replies.map((reply) => (
           <article key={reply.id} className="border border-primary-brown rounded p-3">
             <p className="text-accent-gold text-sm font-bold">
-              {names[reply.id] || "Citizen"}
+              {reply.inCharacter === false && reply.authorUid ? (
+                <PersonName uid={reply.authorUid} name={reply.authorName || "Member"} />
+              ) : (
+                names[reply.id] || "Citizen"
+              )}
               {reply.inCharacter === false ? <span className="text-text-muted font-normal"> · out of character</span> : null}
             </p>
             <p className="text-text-light whitespace-pre-wrap mt-1">{reply.body}</p>

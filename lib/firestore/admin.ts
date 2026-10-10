@@ -16,6 +16,9 @@ export interface AdminUser {
   displayName: string;
   isAdmin: boolean;
   status: string;
+  avatarUrl?: string;
+  minecraftUsername?: string;
+  ownsCity?: boolean;
   createdAt?: unknown;
 }
 
@@ -30,6 +33,9 @@ export async function getAllUsers(): Promise<AdminUser[]> {
       displayName: data.displayName ?? "",
       isAdmin: data.isAdmin === true,
       status: data.status ?? "pending",
+      avatarUrl: data.avatarUrl ?? "",
+      minecraftUsername: data.minecraftUsername ?? "",
+      ownsCity: data.ownsCity === true,
       createdAt: data.createdAt,
     };
   });

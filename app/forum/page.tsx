@@ -7,6 +7,7 @@ import { getAllFactions } from "@/lib/firestore/factions";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
 import { actionError, withTimeout } from "@/lib/async";
 import { LoadNotice } from "@/components/ui/LoadNotice";
+import { PersonName } from "@/components/profile/PersonName";
 import type { Faction } from "@/lib/types";
 
 export default function ForumPage() {
@@ -72,10 +73,13 @@ export default function ForumPage() {
         {!error && visible.map((thread) => (
           <article key={thread.id} className="glass-panel p-5">
             <Link href={`/forum/${thread.id}`} className="text-xl font-bold text-accent-gold">{thread.title}</Link>
-            <p className="text-sm text-text-muted mt-1">
-              {thread.authorName} · {thread.replyCount} {thread.replyCount === 1 ? "reply" : "replies"}
-              {thread.cityId ? ` · ${cities.find((city) => city.id === thread.cityId)?.name || "City"}` : ""}
-              {thread.treatyId ? ` · ${treatyNames[thread.treatyId] || "Treaty"}` : ""}
+            <p className="text-sm text-text-muted mt-1 flex flex-wrap items-center gap-1">
+              <PersonName uid={thread.authorUid} name={thread.authorName} />
+              <span>
+                · {thread.replyCount} {thread.replyCount === 1 ? "reply" : "replies"}
+                {thread.cityId ? ` · ${cities.find((city) => city.id === thread.cityId)?.name || "City"}` : ""}
+                {thread.treatyId ? ` · ${treatyNames[thread.treatyId] || "Treaty"}` : ""}
+              </span>
             </p>
           </article>
         ))}

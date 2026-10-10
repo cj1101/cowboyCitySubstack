@@ -242,17 +242,18 @@ export default function NewPostPage() {
             <CameraRollInput accept="image/*,video/*" label="Choose from camera roll" onFiles={addFiles} />
             <p className="text-xs text-text-muted mt-1">Up to 10 items. Images are compressed. Videos stay under 80 MB and get a thumbnail.</p>
             {files.length > 0 && (
-              <ul className="mt-3 space-y-1 text-sm">
+              <ul className="mt-3 grid grid-cols-3 sm:grid-cols-4 gap-2">
                 {files.map((file, index) => (
-                  <li key={`${file.name}-${index}`} className="flex justify-between gap-2">
-                    <span className="min-w-0 break-all">{file.type.startsWith("video/") || /\.(mp4|webm|mov|m4v)$/i.test(file.name) ? "Video" : "Photo"} · {file.name}</span>
-                    <button type="button" className="text-accent-gold shrink-0 min-h-11" onClick={() => {
+                  <li key={`${file.name}-${index}`} className="space-y-1">
+                    <FilePreview file={file} />
+                    <button type="button" className="text-accent-gold text-sm min-h-11" onClick={() => {
                       setFiles((current) => current.filter((_, i) => i !== index));
                     }}>Remove</button>
                   </li>
                 ))}
               </ul>
             )}
+            <p className="text-xs text-text-muted">Readers swipe between photos on a phone and can open any photo full screen.</p>
           </div>
           <div>
             <label className="form-label" htmlFor="refs">Reference other posts</label>
@@ -312,5 +313,22 @@ export default function NewPostPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+function FilePreview({ file }: { file: File }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    if (!file.type.startsWith("image/")) return;
+    const next = URL.createObjectURL(file);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file]);
+  if (!url) {
+    return <p className="text-xs break-all border border-primary-brown p-2 min-h-16">{file.name}</p>;
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={url} alt="" className="w-full aspect-square object-cover border-2 border-ink" />
   );
 }

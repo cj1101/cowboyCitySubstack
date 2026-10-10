@@ -9,9 +9,30 @@ import {
   serverTimestamp,
   updateDoc,
   where,
+  writeBatch,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
 import type { AppNotification, NotificationType } from "@/lib/types";
+
+const LABELS: Record<NotificationType, string> = {
+  mention: "Mention",
+  reference: "Reference",
+  reply: "Reply",
+  dm: "Message",
+  approval: "Approval",
+  treaty: "Treaty",
+  reaction: "Reaction",
+  comment: "Comment",
+};
+
+export function notificationLabel(item: Pick<AppNotification, "type" | "kind">): string {
+  if (item.type === "treaty") {
+    if (item.kind === "invite") return "Treaty invite";
+    if (item.kind === "counter") return "Counter-proposal";
+    if (item.kind === "ratified") return "Ratification";
+  }
+  return LABELS[item.type] || "Notice";
+}
 
 export async function notify(input: {
   recipientUid: string;
@@ -19,10 +40,11 @@ export async function notify(input: {
   summary: string;
   href: string;
   actorUid?: string;
+  kind?: string;
 }): Promise<void> {
   if (!input.recipientUid || input.recipientUid === input.actorUid) return;
   const db = getClientDb();
-  await addDoc(collection(db, "notifications"), {
+  const payload: Record<string, unknown> = {
     recipientUid: input.recipientUid,
     type: input.type,
     summary: input.summary.slice(0, 500),
@@ -30,7 +52,9 @@ export async function notify(input: {
     read: false,
     actorUid: input.actorUid ?? null,
     createdAt: serverTimestamp(),
-  });
+  };
+  if (input.kind) payload.kind = input.kind.slice(0, 40);
+  await addDoc(collection(db, "notifications"), payload);
 }
 
 export async function notifyMany(
@@ -54,13 +78,14 @@ export async function markNotificationRead(id: string): Promise<void> {
   await updateDoc(doc(getClientDb(), "notifications", id), { read: true });
 }
 
-export async function markAllNotificationsRead(uid: string): Promise<void> {
+export async function markAllNotificationsRead(uid: string): Promise<number> {
   const snap = await getDocs(notificationsQuery(uid));
-  await Promise.all(
-    snap.docs
-      .filter((d) => d.data().read !== true)
-      .map((d) => updateDoc(d.ref, { read: true }))
-  );
+  const unread = snap.docs.filter((d) => d.data().read !== true);
+  if (unread.length === 0) return 0;
+  const batch = writeBatch(getClientDb());
+  unread.forEach((item) => batch.update(item.ref, { read: true }));
+  await batch.commit();
+  return unread.length;
 }
 
 export function toNotification(id: string, data: Record<string, unknown>): AppNotification {
@@ -72,6 +97,7 @@ export function toNotification(id: string, data: Record<string, unknown>): AppNo
     href: (data.href as string) || "/",
     read: data.read === true,
     actorUid: (data.actorUid as string) || undefined,
+    kind: (data.kind as string) || undefined,
     createdAt: data.createdAt as AppNotification["createdAt"],
   };
 }

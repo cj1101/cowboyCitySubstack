@@ -96,6 +96,10 @@ export interface Faction {
   description?: string;
   lore?: string;
   mapImageUrl?: string;
+  motto?: string;
+  population?: number | null;
+  foundedOn?: string | null;
+  gallery?: string[];
   liveHtml?: string;
   pendingHtml?: string;
   htmlStatus?: HtmlStatus;
@@ -114,6 +118,10 @@ export interface FactionInput {
   description?: string;
   lore?: string;
   mapImageUrl?: string;
+  motto?: string | null;
+  population?: number | null;
+  foundedOn?: string | null;
+  gallery?: string[];
 }
 
 export interface Character {
@@ -153,6 +161,31 @@ export interface PostingIdentity {
 export type Stance = "for" | "against" | "neutral";
 
 export type ReactionType = "agrees" | "disputes" | "witnessed";
+
+/** One row per person per emoji. Heart is the like; the rest are reactions. */
+export const EMOJI_REACTIONS = [
+  { id: "heart", label: "Like", glyph: "❤️" },
+  { id: "pickaxe", label: "Pickaxe", glyph: "⛏️" },
+  { id: "diamond", label: "Diamond", glyph: "💎" },
+  { id: "emerald", label: "Emerald", glyph: "💚" },
+  { id: "blaze", label: "Blaze", glyph: "🔥" },
+  { id: "crown", label: "Crown", glyph: "👑" },
+] as const;
+
+export type EmojiReactionId = (typeof EMOJI_REACTIONS)[number]["id"];
+
+export interface EmojiReaction {
+  uid: string;
+  emoji: EmojiReactionId;
+}
+
+export interface PostComment {
+  id: string;
+  authorUid: string;
+  authorName: string;
+  body: string;
+  createdAt?: Timestamp;
+}
 
 export interface Reply {
   id: string;
@@ -218,6 +251,27 @@ export interface WikiEntry {
   updatedAt?: Timestamp;
 }
 
+export const PIN_CATEGORIES = ["capital", "outpost", "landmark", "other"] as const;
+
+export type PinCategory = (typeof PIN_CATEGORIES)[number];
+
+export const PIN_CATEGORY_LABELS: Record<PinCategory, string> = {
+  capital: "Capital",
+  outpost: "Outpost",
+  landmark: "Landmark",
+  other: "Other",
+};
+
+export interface MapPoint {
+  nx: number;
+  ny: number;
+}
+
+export interface CityBorder {
+  cityId: string;
+  points: MapPoint[];
+}
+
 export interface MapPin {
   id: string;
   title: string;
@@ -230,6 +284,7 @@ export interface MapPin {
   wikiEntryIds?: string[];
   cityId?: string | null;
   note?: string;
+  category?: PinCategory;
 }
 
 export interface DirectMessage {
@@ -254,7 +309,12 @@ export type NotificationType =
   | "reply"
   | "dm"
   | "approval"
-  | "treaty";
+  | "treaty"
+  | "reaction"
+  | "comment";
+
+/** Extra detail for type "treaty". Invites, counters, and ratifications stay one notice type. */
+export type TreatyNoticeKind = "invite" | "counter" | "ratified";
 
 export interface AppNotification {
   id: string;
@@ -264,6 +324,7 @@ export interface AppNotification {
   href: string;
   read: boolean;
   actorUid?: string;
+  kind?: string;
   createdAt?: Timestamp;
 }
 

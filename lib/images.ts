@@ -18,6 +18,26 @@ export function firebaseStorageCode(error: unknown): string | null {
   return null;
 }
 
+/** Hosts the Next.js image optimizer may resize. Emulator URLs stay on a plain img. */
+export function shouldOptimizeImage(url: string | null | undefined): boolean {
+  if (!url) return false;
+  if (url.startsWith("/") && !url.startsWith("//")) return true;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname;
+    return (
+      host === "firebasestorage.googleapis.com" ||
+      host === "storage.googleapis.com" ||
+      host === "mc-heads.net" ||
+      host.endsWith(".firebasestorage.app") ||
+      host.endsWith(".appspot.com")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function isDisplayableImageUrl(url: string | null | undefined): boolean {
   if (!url) return false;
   if (url.startsWith("blob:")) return true;

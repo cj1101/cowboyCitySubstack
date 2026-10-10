@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { PostCard } from "@/components/posts/PostCard";
+import { CityHome } from "@/components/cities/CityHome";
 import {
   getCharactersMap,
   getFactionsMap,
@@ -61,6 +62,9 @@ export function FactionPageLayers({
 
       <div className="feed-layer">
         <div className="feed-container">
+          <div className="mb-6">
+            <CityHome faction={faction} isOwner={isOwner} layout="embedded" />
+          </div>
           <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
             <h2 className="feed-title mb-0">The Feed</h2>
             <div className="flex gap-2 items-center">
