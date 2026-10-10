@@ -325,6 +325,11 @@ async function main() {
     ownsCity: true,
     proofCityId: "city1",
   }));
+  await assertSucceeds(updateDoc(doc(treatyFriend.firestore(), "users", "friend"), {
+    displayName: "Friend",
+    bio: "Rides",
+    minecraftName: "Notch",
+  }));
   await assertFails(updateDoc(doc(treatyOther.firestore(), "users", "other"), {
     ownsCity: true,
     proofCityId: "city1",

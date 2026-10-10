@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, updateDoc } from "firebase/firestore";
@@ -21,15 +21,18 @@ export default function SettingsPage() {
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"ok" | "error">("ok");
   const [busy, setBusy] = useState(false);
+  const hydrated = useRef(false);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
 
   useEffect(() => {
-    setDisplayName(profile?.displayName || "");
-    setBio(profile?.bio || "");
-    setMinecraftName(profile?.minecraftName || "");
+    if (!profile || hydrated.current) return;
+    hydrated.current = true;
+    setDisplayName(profile.displayName || "");
+    setBio(profile.bio || "");
+    setMinecraftName(profile.minecraftName || "");
   }, [profile]);
 
   if (!user) return <ScreenStatus>Sign in to edit your profile.</ScreenStatus>;
