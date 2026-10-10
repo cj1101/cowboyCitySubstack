@@ -8,15 +8,26 @@ import type { StoredTreaty } from "@/lib/firestore/treaties";
 
 export function CityTreaties({ cityId }: { cityId: string }) {
   const [treaties, setTreaties] = useState<StoredTreaty[]>([]);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    listActiveTreatiesForCity(cityId).then(setTreaties).catch(() => setTreaties([]));
+    listActiveTreatiesForCity(cityId)
+      .then((items) => {
+        setTreaties(items);
+        setError("");
+      })
+      .catch(() => {
+        setTreaties([]);
+        setError("Could not load treaties.");
+      });
   }, [cityId]);
 
   return (
     <section className="glass-panel p-6">
-      <h2 className="text-xl font-bold text-accent-gold mb-3">Treaties</h2>
-      {treaties.length === 0 ? (
+      <h2 className="text-xl font-bold text-accent-gold mb-3">Active treaties</h2>
+      {error ? (
+        <p className="text-sm font-bold" role="alert">{error}</p>
+      ) : treaties.length === 0 ? (
         <p className="text-text-muted">No active treaties.</p>
       ) : (
         <ul className="space-y-2">

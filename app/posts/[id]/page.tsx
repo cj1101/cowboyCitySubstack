@@ -11,6 +11,7 @@ import { RichText } from "@/components/wiki/RichText";
 import { PostTypeBadge } from "@/components/posts/PostTypeBadge";
 import { DebateThread } from "@/components/debates/DebateThread";
 import { ReactionBar } from "@/components/reactions/ReactionBar";
+import { PersonName } from "@/components/profile/PersonName";
 import { getClientDb } from "@/lib/firebase";
 import {
   getCharacter,
@@ -204,6 +205,9 @@ export default function PostDetailPage() {
             )}
             <span className="text-text-muted"> · </span>
             {faction ? <Link href={`/cities/${faction.slug}`}>{faction.name}</Link> : "Unknown city"}
+            {post.authorUid ? (
+              <span className="text-text-muted"> · <PersonName uid={post.authorUid} name="Member" /></span>
+            ) : null}
             {post.settlementYear ? <span className="text-text-muted"> · Year {post.settlementYear}</span> : null}
             {post.era ? <span className="text-text-muted"> · {post.era}</span> : null}
           </p>

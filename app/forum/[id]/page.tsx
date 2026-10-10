@@ -10,6 +10,7 @@ import { actionError, withTimeout } from "@/lib/async";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 import { CameraRollInput } from "@/components/media/CameraRollInput";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { PersonName } from "@/components/profile/PersonName";
 
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
@@ -75,7 +76,7 @@ export default function ThreadPage() {
         <Link href="/forum" className="text-accent-gold text-sm">← Forum</Link>
         <article className="glass-panel p-6 space-y-3">
           <h1 className="text-3xl font-bold text-accent-gold">{thread.title}</h1>
-          <p className="text-sm text-text-muted">{thread.authorName}</p>
+          <p className="text-sm text-text-muted"><PersonName uid={thread.authorUid} name={thread.authorName} /></p>
           <p className="whitespace-pre-wrap">{thread.body}</p>
           {thread.imageUrls.map((url) => (
             <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-96 max-w-full w-auto" />
@@ -86,7 +87,7 @@ export default function ThreadPage() {
             {reply.quoteExcerpt && (
               <blockquote className="border-l-2 border-accent-gold pl-3 text-sm text-text-muted">{reply.quoteExcerpt}</blockquote>
             )}
-            <p className="text-sm font-bold">{reply.authorName}</p>
+            <p className="text-sm font-bold"><PersonName uid={reply.authorUid} name={reply.authorName} /></p>
             <p className="whitespace-pre-wrap">{reply.body}</p>
             {reply.imageUrls.map((url) => (
               <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-80 max-w-full w-auto" />

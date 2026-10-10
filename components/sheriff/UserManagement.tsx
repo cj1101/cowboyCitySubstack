@@ -5,6 +5,7 @@ import { getAllUsers, inviteEmail, setUserAdmin, setUserStatus } from "@/lib/fir
 import { notify } from "@/lib/firestore/notifications";
 import type { AdminUser } from "@/lib/firestore/admin";
 import { REQUIRE_APPROVAL } from "@/lib/membership";
+import { PersonName } from "@/components/profile/PersonName";
 
 interface UserManagementProps {
   currentUid: string;
@@ -117,7 +118,15 @@ export function UserManagement({ currentUid }: UserManagementProps) {
           {users.map((user) => (
             <tr key={user.uid} className="border-b border-primary-brown/50">
               <td className="py-3 pr-4">
-                {user.displayName || "—"}
+                <PersonName
+                  uid={user.uid}
+                  name={user.displayName || user.email || "Member"}
+                  email={user.email}
+                  minecraftUsername={user.minecraftUsername}
+                  avatarUrl={user.avatarUrl}
+                  isAdmin={user.isAdmin}
+                  ownsCity={user.ownsCity}
+                />
                 {user.uid === currentUid && (
                   <span className="text-text-muted text-xs ml-1">(you)</span>
                 )}

@@ -7,6 +7,7 @@ import type { Character, Faction, Post } from "@/lib/types";
 import { PostTypeBadge } from "./PostTypeBadge";
 import { MediaCarousel } from "./MediaCarousel";
 import { ReactionBar } from "@/components/reactions/ReactionBar";
+import { PersonName } from "@/components/profile/PersonName";
 
 function formatDate(ts: Timestamp | undefined): string {
   if (!ts?.toDate) return "";
@@ -56,6 +57,11 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
             {post.settlementYear ? ` · Year ${post.settlementYear}` : ""}
             {post.era ? ` · ${post.era}` : ""}
           </p>
+          {post.authorUid ? (
+            <p className="text-sm text-text-muted">
+              <PersonName uid={post.authorUid} name="Member" />
+            </p>
+          ) : null}
         </div>
         <div className="ml-auto flex items-center gap-2">
           {post.pinned && <span className="text-xs font-bold text-accent-gold uppercase">Pinned</span>}

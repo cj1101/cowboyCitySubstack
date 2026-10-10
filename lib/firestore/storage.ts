@@ -2,6 +2,7 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { getClientStorage } from "@/lib/firebase";
 import { asUploadError } from "@/lib/images";
 import { compressImage, mediaContentType } from "@/lib/storage/media";
+import { uploadMapImage } from "@/lib/storage/uploads";
 
 async function uploadFile(path: string, file: Blob, contentType: string): Promise<string> {
   try {
@@ -22,6 +23,10 @@ export async function uploadFactionImage(
 ): Promise<string> {
   const prepared = await compressImage(file);
   return uploadFile(`factions/${factionId}/${type}.jpg`, prepared, prepared.type || "image/jpeg");
+}
+
+export async function uploadCityGalleryPhoto(cityId: string, file: File, index: number): Promise<string> {
+  return uploadMapImage(`factions/${cityId}/gallery_${Date.now()}_${index}.jpg`, file);
 }
 
 export async function uploadCharacterAvatar(

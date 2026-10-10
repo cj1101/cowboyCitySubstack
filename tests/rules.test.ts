@@ -198,6 +198,36 @@ async function main() {
   await assertSucceeds(
     updateDoc(doc(friend.firestore(), "factions", "city1"), { lore: "Dark water and cedar." })
   );
+  await assertSucceeds(
+    updateDoc(doc(friend.firestore(), "factions", "city1"), {
+      motto: "Cedar and tide",
+      population: 900,
+      foundedOn: "2019-06-01",
+      gallery: ["https://firebasestorage.googleapis.com/v0/b/cowboycityrealm/o/a.jpg"],
+    })
+  );
+  await assertFails(updateDoc(doc(friend.firestore(), "factions", "city1"), { population: -3 }));
+  await assertFails(
+    updateDoc(doc(friend.firestore(), "factions", "city1"), { motto: "m".repeat(181) })
+  );
+  await assertFails(
+    updateDoc(doc(friend.firestore(), "factions", "city1"), {
+      gallery: Array.from({ length: 25 }, (_, index) => `https://example.com/${index}.jpg`),
+    })
+  );
+  await assertFails(updateDoc(doc(other.firestore(), "factions", "city1"), { population: 1 }));
+  await assertSucceeds(
+    updateDoc(doc(friend.firestore(), "users", "friend"), { minecraftUsername: "Notch" })
+  );
+  await assertSucceeds(
+    updateDoc(doc(friend.firestore(), "users", "friend"), { minecraftUsername: "" })
+  );
+  await assertFails(
+    updateDoc(doc(friend.firestore(), "users", "friend"), { minecraftUsername: "no" })
+  );
+  await assertFails(
+    updateDoc(doc(friend.firestore(), "users", "friend"), { minecraftUsername: "bad name" })
+  );
   await assertFails(updateDoc(doc(other.firestore(), "factions", "city1"), { lore: "Stolen." }));
   await assertSucceeds(
     setDoc(doc(friend.firestore(), "posts", "note"), {

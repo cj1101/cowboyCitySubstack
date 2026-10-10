@@ -23,6 +23,10 @@ const nextConfig: NextConfig = {
         protocol: "https",
         hostname: "*.appspot.com",
       },
+      {
+        protocol: "https",
+        hostname: "mc-heads.net",
+      },
     ],
   },
   async rewrites() {

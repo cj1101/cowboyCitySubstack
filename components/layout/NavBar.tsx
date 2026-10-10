@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { RealmWordmark } from "@/components/brand/RealmWordmark";
+import { PersonName } from "@/components/profile/PersonName";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
 import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
@@ -149,9 +150,17 @@ export function NavBar() {
                     </Link>
                   </>
                 )}
-                {profile?.displayName && (
-                  <Link href="/settings" className="text-text-muted text-sm hidden xl:inline max-w-[120px] truncate hover:text-accent-gold">
-                    {profile.displayName}
+                {(profile?.displayName || profile?.minecraftUsername) && (
+                  <Link href="/settings" className="text-text-muted text-sm hidden xl:inline-flex max-w-[280px] hover:text-accent-gold">
+                    <PersonName
+                      uid={user.uid}
+                      name={profile.displayName || "Member"}
+                      email={profile.email || user.email}
+                      minecraftUsername={profile.minecraftUsername}
+                      avatarUrl={profile.avatarUrl}
+                      isAdmin={profile.isAdmin}
+                      ownsCity={profile.ownsCity}
+                    />
                   </Link>
                 )}
                 <button type="button" onClick={handleLogout} className="btn btn-secondary text-sm px-4 py-2">
@@ -202,7 +211,15 @@ export function NavBar() {
                 New Post
               </Link>
               <Link href="/settings" className="mobile-nav-link" onClick={() => setMenuOpen(false)}>
-                Settings
+                <PersonName
+                  uid={user.uid}
+                  name={profile?.displayName || "Settings"}
+                  email={profile?.email || user.email}
+                  minecraftUsername={profile?.minecraftUsername}
+                  avatarUrl={profile?.avatarUrl}
+                  isAdmin={profile?.isAdmin}
+                  ownsCity={profile?.ownsCity}
+                />
               </Link>
               {sheriff && (
                 <Link href="/sheriff" className="mobile-nav-link text-accent-gold font-bold" onClick={() => setMenuOpen(false)}>

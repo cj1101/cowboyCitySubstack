@@ -16,6 +16,7 @@ import {
   type QueryConstraint,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { readCityRecord } from "@/lib/cities/record";
 import { parseMentions } from "@/lib/mentions";
 import type {
   Character,
@@ -291,6 +292,7 @@ export async function getAllFactions(): Promise<Faction[]> {
     description: d.data().description ?? d.data().bio,
     lore: d.data().lore,
     mapImageUrl: d.data().mapImageUrl,
+    ...readCityRecord(d.data()),
     ownerUids: d.data().ownerUids,
   }));
 }
@@ -312,6 +314,7 @@ export async function getFaction(factionId: string): Promise<Faction | null> {
     description: data.description ?? data.bio,
     lore: data.lore,
     mapImageUrl: data.mapImageUrl,
+    ...readCityRecord(data),
     ownerUids: data.ownerUids,
   };
 }

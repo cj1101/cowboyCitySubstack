@@ -12,6 +12,7 @@ import {
 } from "@/lib/firestore/messages";
 import { getClientDb } from "@/lib/firebase";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { PersonName } from "@/components/profile/PersonName";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 import { actionError, withTimeout } from "@/lib/async";
 import { isBlockedStatus } from "@/lib/membership";
@@ -80,7 +81,15 @@ export default function MessagesPage() {
                   checked={selected.includes(person.uid)}
                   onChange={(e) => setSelected((current) => e.target.checked ? [...current, person.uid].slice(0, 7) : current.filter((id) => id !== person.uid))}
                 />
-                {person.displayName || person.email}
+                <PersonName
+                  uid={person.uid}
+                  name={person.displayName || person.email}
+                  email={person.email}
+                  minecraftUsername={person.minecraftUsername}
+                  avatarUrl={person.avatarUrl}
+                  isAdmin={person.isAdmin}
+                  ownsCity={person.ownsCity}
+                />
               </label>
             ))}
           </div>
@@ -116,7 +125,23 @@ export default function MessagesPage() {
               return (
                 <li key={conversation.id}>
                   <button type="button" className={`w-full text-left text-sm p-2 rounded ${activeId === conversation.id ? "bg-primary-brown" : ""}`} onClick={() => setActiveId(conversation.id)}>
-                    <span className="font-bold">{conversation.participantUids.map((uid) => names.get(uid) || "Member").join(", ")}</span>
+                    <span className="font-bold flex flex-wrap gap-2">
+                      {conversation.participantUids.map((uid) => {
+                        const person = people.find((item) => item.uid === uid);
+                        return (
+                          <PersonName
+                            key={uid}
+                            uid={uid}
+                            name={uid === user.uid ? (names.get(uid) || "You") : (person?.displayName || names.get(uid) || "Member")}
+                            email={person?.email}
+                            minecraftUsername={person?.minecraftUsername}
+                            avatarUrl={person?.avatarUrl}
+                            isAdmin={person?.isAdmin}
+                            ownsCity={person?.ownsCity}
+                          />
+                        );
+                      })}
+                    </span>
                     {unread && <span className="ml-2 text-accent-gold">•</span>}
                     <span className="block text-text-muted truncate">{conversation.lastMessagePreview}</span>
                   </button>
@@ -132,11 +157,25 @@ export default function MessagesPage() {
             </button>
           )}
           <div className="flex-1 space-y-3 overflow-auto min-w-0">
-            {messages.map((message) => (
-              <p key={message.id} className={message.senderUid === user.uid ? "text-right" : ""}>
-                <span className="inline-block max-w-[85%] break-words glass-panel px-3 py-2 text-sm">{message.body}</span>
-              </p>
-            ))}
+            {messages.map((message) => {
+              const person = people.find((item) => item.uid === message.senderUid);
+              return (
+                <div key={message.id} className={message.senderUid === user.uid ? "text-right" : ""}>
+                  <p className="text-xs mb-1">
+                    <PersonName
+                      uid={message.senderUid}
+                      name={names.get(message.senderUid) || "Member"}
+                      email={person?.email}
+                      minecraftUsername={person?.minecraftUsername}
+                      avatarUrl={person?.avatarUrl}
+                      isAdmin={person?.isAdmin}
+                      ownsCity={person?.ownsCity}
+                    />
+                  </p>
+                  <span className="inline-block max-w-[85%] break-words glass-panel px-3 py-2 text-sm">{message.body}</span>
+                </div>
+              );
+            })}
             {activeId && messages.length === 0 && <p className="text-text-muted">No messages yet.</p>}
           </div>
           {activeId && (

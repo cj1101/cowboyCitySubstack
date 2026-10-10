@@ -33,6 +33,8 @@ export interface UserProfile {
   status: MembershipStatus;
   bio?: string;
   avatarUrl?: string;
+  minecraftUsername?: string;
+  ownsCity?: boolean;
   createdAt?: unknown;
 }
 
@@ -59,6 +61,8 @@ function toProfile(data: Record<string, unknown>): UserProfile {
     status,
     bio: (data.bio as string) || "",
     avatarUrl: (data.avatarUrl as string) || "",
+    minecraftUsername: (data.minecraftUsername as string) || "",
+    ownsCity: data.ownsCity === true,
     createdAt: data.createdAt,
   };
 }
@@ -70,7 +74,9 @@ function sameProfile(current: UserProfile | null, next: UserProfile | null): boo
     current.isAdmin === next.isAdmin &&
     current.status === next.status &&
     current.bio === next.bio &&
-    current.avatarUrl === next.avatarUrl;
+    current.avatarUrl === next.avatarUrl &&
+    current.minecraftUsername === next.minecraftUsername &&
+    current.ownsCity === next.ownsCity;
 }
 
 async function settleMembership(uid: string, email: string, profile: UserProfile): Promise<boolean> {
