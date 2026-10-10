@@ -67,7 +67,7 @@ export default function SignupPage() {
           Join the Realm
         </h1>
         <p className="text-text-muted text-center mb-8">
-          Request a membership. You can sign in right away, and a sheriff approves you before you can post or read the chronicle.
+          Create an account and sign in. You can read the chronicle and post right away.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-5">

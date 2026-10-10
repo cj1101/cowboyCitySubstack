@@ -5,6 +5,8 @@ import Link from "next/link";
 import { listThreads, type ForumThread } from "@/lib/firestore/forum";
 import { getAllFactions } from "@/lib/firestore/factions";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
+import { actionError } from "@/lib/async";
+import { LoadNotice } from "@/components/ui/LoadNotice";
 import type { Faction } from "@/lib/types";
 
 export default function ForumPage() {
@@ -13,16 +15,26 @@ export default function ForumPage() {
   const [treatyNames, setTreatyNames] = useState<Record<string, string>>({});
   const [cityFilter, setCityFilter] = useState("");
   const [treatyFilter, setTreatyFilter] = useState("");
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    setError("");
     Promise.all([listThreads(), getAllFactions(), listActiveTreaties()])
       .then(([items, factions, treaties]) => {
+        if (cancelled) return;
         setThreads(items);
         setCities(factions);
         setTreatyNames(Object.fromEntries(treaties.map((treaty) => [treaty.id, treaty.name])));
       })
-      .catch(() => undefined);
-  }, []);
+      .catch((err) => {
+        if (!cancelled) setError(actionError(err, "Could not load the forum."));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt]);
 
   const visible = threads.filter((thread) => {
     if (cityFilter && thread.cityId !== cityFilter) return false;
@@ -50,7 +62,9 @@ export default function ForumPage() {
             {Object.entries(treatyNames).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
           </select>
         </div>
-        {visible.length === 0 ? <p className="text-text-muted">No threads yet.</p> : visible.map((thread) => (
+        <LoadNotice message={error} onRetry={() => setAttempt((value) => value + 1)} />
+        {!error && visible.length === 0 ? <p className="text-text-muted">No threads yet.</p> : null}
+        {!error && visible.map((thread) => (
           <article key={thread.id} className="glass-panel p-5">
             <Link href={`/forum/${thread.id}`} className="text-xl font-bold text-accent-gold">{thread.title}</Link>
             <p className="text-sm text-text-muted mt-1">

@@ -73,6 +73,7 @@ export function RealmMap({
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [formError, setFormError] = useState("");
   const [toolbarH, setToolbarH] = useState(56);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [cityId, setCityId] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -182,8 +183,17 @@ export function RealmMap({
 
   return (
     <div className="relative h-full min-h-0">
-      <div ref={toolbarRef} className="absolute top-2 left-2 right-2 z-30 flex flex-wrap items-center gap-2">
-        <div className="glass-panel px-2 py-2 flex flex-wrap items-center gap-2 max-w-full">
+      <div ref={toolbarRef} className="pointer-events-none absolute top-2 left-2 right-2 z-30">
+        <div className="pointer-events-auto glass-panel px-2 py-2 flex flex-wrap items-center gap-2 w-fit max-w-full">
+          <button
+            type="button"
+            className="btn btn-secondary text-sm min-h-11 px-3 py-2 md:hidden"
+            aria-expanded={toolsOpen}
+            onClick={() => setToolsOpen((value) => !value)}
+          >
+            {toolsOpen ? "Hide tools" : "Map tools"}
+          </button>
+          <div className={`${toolsOpen ? "flex" : "hidden"} md:flex flex-wrap items-center gap-2`}>
           <h1 className="text-accent-gold mr-1">Realm map</h1>
           <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => zoomAt(
             (viewportRef.current?.getBoundingClientRect().left || 0) + frame.w / 2,
@@ -226,6 +236,7 @@ export function RealmMap({
               />
             </label>
           )}
+          </div>
         </div>
       </div>
       {banner && (

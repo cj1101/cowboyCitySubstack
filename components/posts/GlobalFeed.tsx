@@ -27,6 +27,7 @@ export function GlobalFeed() {
   const [followed, setFollowed] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!user) return;
@@ -60,7 +61,7 @@ export function GlobalFeed() {
         setError("Could not load the feed. Check your connection and try again.");
       })
       .finally(() => setLoading(false));
-  }, [user, authLoading, factionFilter]);
+  }, [user, authLoading, factionFilter, attempt]);
 
   if (authLoading) {
     return (
@@ -76,7 +77,7 @@ export function GlobalFeed() {
             Cowboy City & The Realm
           </h1>
           <p className="text-text-muted text-lg mb-8">
-            A private chronicle of the realm&apos;s city-states. Ask to join, then a sheriff lets you in.
+            A private chronicle of the realm&apos;s city-states. Sign in to read the feed and write.
           </p>
           <div className="flex gap-4 justify-center flex-wrap">
             <Link href="/login" className="btn">
@@ -138,7 +139,12 @@ export function GlobalFeed() {
         )}
 
         {error && (
-          <div className="glass-panel p-6 text-danger text-center">{error}</div>
+          <div className="glass-panel p-6 text-center space-y-3" role="alert">
+            <p className="font-bold">{error}</p>
+            <button type="button" className="btn text-sm px-4 py-2 min-h-11" onClick={() => setAttempt((value) => value + 1)}>
+              Retry
+            </button>
+          </div>
         )}
 
         {!loading && !error && posts.length === 0 && (
