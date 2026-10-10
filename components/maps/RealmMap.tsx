@@ -381,9 +381,9 @@ export function RealmMap({
   const drawCity = drawing ? cityById.get(drawing.cityId) : undefined;
 
   return (
-    <div className="relative h-full min-h-0">
-      <div className="pointer-events-none absolute top-2 left-2 right-2 z-30 flex flex-col items-start gap-2">
-        <div className="pointer-events-auto glass-panel px-2 py-2 flex flex-wrap items-center gap-2 max-w-full">
+    <div className="relative flex h-full min-h-0 flex-col">
+      <div className="z-30 flex shrink-0 flex-col items-start gap-2 p-2">
+        <div className="glass-panel flex max-w-full flex-wrap items-center gap-2 px-2 py-2">
           <h1 className="text-accent-gold mr-1">Realm map</h1>
           <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => {
             const center = centerOf();
@@ -447,7 +447,7 @@ export function RealmMap({
             </label>
           )}
         </div>
-        <div className="pointer-events-auto glass-panel px-2 py-2 flex flex-wrap items-center gap-2 max-w-full" role="group" aria-label="Pin categories">
+        <div className="glass-panel flex max-w-full flex-wrap items-center gap-2 px-2 py-2" role="group" aria-label="Pin categories">
           <span className="text-sm font-bold">Pins</span>
           <FilterButton pressed={pinFilter === "all"} label="All" onClick={() => setPinFilter("all")} />
           {PIN_CATEGORIES.map((item) => (
@@ -462,7 +462,7 @@ export function RealmMap({
           ))}
         </div>
         {banner && (
-          <p className={`pointer-events-auto glass-panel px-3 py-2 text-sm font-bold max-w-full ${uploadError || formError ? "" : "text-ink"}`} role={uploadError || formError ? "alert" : "status"}>
+          <p className={`glass-panel max-w-full px-3 py-2 text-sm font-bold ${uploadError || formError ? "" : "text-ink"}`} role={uploadError || formError ? "alert" : "status"}>
             {banner}
           </p>
         )}
@@ -470,7 +470,7 @@ export function RealmMap({
 
       <div
         ref={viewportRef}
-        className={`realm-map-stage relative h-full overflow-hidden bg-[#f7f6f3] touch-none ${drawing ? "cursor-crosshair" : ""}`}
+        className={`realm-map-stage relative min-h-0 flex-1 overflow-hidden bg-[#f7f6f3] touch-none ${drawing ? "cursor-crosshair" : ""}`}
         onPointerDown={(event) => {
           const target = event.target as HTMLElement;
           if (target.closest("[data-popup]")) return;
@@ -746,20 +746,30 @@ export function RealmMap({
                 const ordered = points.length >= 3 ? ring(points) : points;
                 const path = ordered.map((point) => `${point.nx},${point.ny}`).join(" ");
                 return (
-                  <polyline
-                    key={treaty.id}
-                    data-treaty={treaty.id}
-                    points={path}
-                    fill={points.length >= 3 ? treaty.color : "none"}
-                    fillOpacity={points.length >= 3 ? 0.12 : 0}
-                    stroke={treaty.color}
-                    strokeWidth={1.4}
-                    vectorEffect="non-scaling-stroke"
-                    style={{ pointerEvents: drawing ? "none" : "auto" }}
-                    className="cursor-pointer"
-                  >
-                    <title>{treaty.name}</title>
-                  </polyline>
+                  <g key={treaty.id}>
+                    <polyline
+                      data-treaty={treaty.id}
+                      points={path}
+                      fill={points.length >= 3 ? treaty.color : "none"}
+                      fillOpacity={points.length >= 3 ? 0.12 : 0}
+                      stroke={treaty.color}
+                      strokeWidth={22}
+                      strokeOpacity={0.28}
+                      vectorEffect="non-scaling-stroke"
+                      style={{ pointerEvents: drawing ? "none" : "stroke" }}
+                      className="cursor-pointer"
+                    >
+                      <title>{treaty.name}</title>
+                    </polyline>
+                    <polyline
+                      points={path}
+                      fill="none"
+                      stroke={treaty.color}
+                      strokeWidth={3}
+                      vectorEffect="non-scaling-stroke"
+                      style={{ pointerEvents: "none" }}
+                    />
+                  </g>
                 );
               })}
             </svg>
@@ -906,21 +916,21 @@ export function RealmMap({
       {drawing && (
         <div
           data-popup
-          className={narrow
-            ? "absolute left-2 right-2 bottom-2 z-30 glass-panel p-3 space-y-2 max-h-[46%] overflow-y-auto"
-            : "absolute bottom-3 left-3 z-30 w-[min(24rem,calc(100%-1.5rem))] glass-panel p-3 space-y-2"}
+          className="absolute bottom-2 left-2 right-2 z-30 glass-panel flex max-h-[40%] flex-wrap items-center gap-2 overflow-y-auto p-2 sm:left-3 sm:w-[min(36rem,calc(100%-1.5rem))]"
         >
-          <div className="flex justify-between gap-2 items-start">
-            <h2>Draw {drawCity?.name || "city"} border</h2>
+          <div className="flex min-w-0 flex-1 items-start justify-between gap-2">
+            <div className="min-w-0">
+              <h2>Draw {drawCity?.name || "city"} border</h2>
+              <p className="text-sm text-text-muted">Tap to add a corner. Drag a corner to move it. {drawing.points.length} {drawing.points.length === 1 ? "corner" : "corners"}.</p>
+            </div>
             <button type="button" className="menu-button shrink-0" aria-label="Close border drawing" onClick={() => {
               if (drawing.past.length) setNotice("Closed without saving.");
               setDrawing(null);
               setFormError("");
             }}>×</button>
           </div>
-          <p className="text-sm text-text-muted">Tap the map to add a corner. Drag a corner to move it.</p>
           {editableCities.length > 1 && (
-            <label className="block text-sm font-bold">
+            <label className="block min-w-[10rem] flex-1 text-sm font-bold">
               City
               <select
                 className="form-input mt-1"
@@ -938,8 +948,7 @@ export function RealmMap({
               </select>
             </label>
           )}
-          <p className="text-sm">{drawing.points.length} {drawing.points.length === 1 ? "corner" : "corners"}</p>
-          {formError && <p className="text-sm font-bold" role="alert">{formError}</p>}
+          {formError && <p className="w-full text-sm font-bold" role="alert">{formError}</p>}
           <div className="flex flex-wrap gap-2">
             <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" onClick={undoCorner} disabled={borderBusy !== null}>Undo</button>
             <SubmitButton type="button" busy={borderBusy === "save"} busyLabel="Saving…" className="btn text-sm min-h-11 px-3 py-2" disabled={borderBusy !== null} onClick={() => saveBorder()}>Save border</SubmitButton>
