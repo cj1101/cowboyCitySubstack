@@ -31,9 +31,9 @@ export default function TreatiesPage() {
             <h1 className="text-3xl font-bold text-accent-gold">Treaties</h1>
             <p className="text-text-muted">Active alliances, trade pacts, and other agreements. Negotiations stay private until at least two cities ratify.</p>
           </div>
-          <div className="flex gap-2">
-            <Link href="/treaties/negotiations" className="btn btn-secondary text-sm px-4 py-2">Treaty negotiations</Link>
-            <Link href="/treaties/new" className="btn text-sm px-4 py-2">Propose</Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/treaties/negotiations" className="btn btn-secondary text-sm px-4 py-2 min-h-11">Treaty negotiations</Link>
+            <Link href="/treaties/new" className="btn text-sm px-4 py-2 min-h-11">Propose</Link>
           </div>
         </div>
         {treaties.length === 0 ? (

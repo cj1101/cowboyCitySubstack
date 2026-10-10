@@ -43,7 +43,7 @@ export default function RealmMapPage() {
   }, []);
 
   return (
-    <div className="h-[calc(100dvh-3.5rem)] sm:h-[calc(100dvh-4rem)]">
+    <div className="h-[calc(100dvh-var(--app-nav)-var(--app-tabs))]">
       <RealmMap
         imageUrl={imageUrl}
         pins={pins}

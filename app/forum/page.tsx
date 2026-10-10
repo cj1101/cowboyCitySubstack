@@ -33,12 +33,12 @@ export default function ForumPage() {
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-6">
       <div className="max-w-3xl mx-auto space-y-4">
-        <div className="flex justify-between items-end gap-3">
+        <div className="flex flex-wrap justify-between items-end gap-3">
           <div>
             <h1 className="text-3xl font-bold text-accent-gold">Forum</h1>
             <p className="text-text-muted">Open threads, newest activity first.</p>
           </div>
-          <Link href="/forum/new" className="btn text-sm px-4 py-2">New thread</Link>
+          <Link href="/forum/new" className="btn text-sm px-4 py-2 min-h-11">New thread</Link>
         </div>
         <div className="flex flex-wrap gap-3">
           <select className="form-input max-w-xs" value={cityFilter} onChange={(event) => setCityFilter(event.target.value)}>

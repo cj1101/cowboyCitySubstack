@@ -77,11 +77,13 @@ export function MapBoard({
             <Link
               key={pin.id}
               href={pin.postId ? `/posts/${pin.postId}` : "#"}
-              className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-yellow border border-on-yellow"
+              className="absolute w-11 h-11 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
               title={pin.title}
               onClick={(event) => event.stopPropagation()}
-            />
+            >
+              <span className="w-4 h-4 rounded-full bg-accent-yellow border border-on-yellow" />
+            </Link>
           ))}
           {draft && (
             <span className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-cyan border border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />

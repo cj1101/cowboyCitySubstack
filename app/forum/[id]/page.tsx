@@ -9,6 +9,7 @@ import { StoredImage } from "@/components/media/StoredImage";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
 import { actionError, withTimeout } from "@/lib/async";
 import { SubmitButton } from "@/components/ui/SubmitButton";
+import { CameraRollInput } from "@/components/media/CameraRollInput";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
 
 export default function ThreadPage() {
@@ -78,7 +79,7 @@ export default function ThreadPage() {
           <p className="text-sm text-text-muted">{thread.authorName}</p>
           <p className="whitespace-pre-wrap">{thread.body}</p>
           {thread.imageUrls.map((url) => (
-            <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-96 w-auto" />
+            <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-96 max-w-full w-auto" />
           ))}
         </article>
         {replies.map((reply) => (
@@ -89,10 +90,10 @@ export default function ThreadPage() {
             <p className="text-sm font-bold">{reply.authorName}</p>
             <p className="whitespace-pre-wrap">{reply.body}</p>
             {reply.imageUrls.map((url) => (
-              <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-80 w-auto" />
+              <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-80 max-w-full w-auto" />
             ))}
             {user && (
-              <button type="button" className="text-sm text-accent-gold" onClick={() => setQuote(reply)}>Quote</button>
+              <button type="button" className="text-sm text-accent-gold min-h-11 inline-flex items-center" onClick={() => setQuote(reply)}>Quote</button>
             )}
           </article>
         ))}
@@ -104,7 +105,7 @@ export default function ThreadPage() {
               </p>
             )}
             <textarea className="form-input" rows={4} value={body} onChange={(event) => setBody(event.target.value)} required placeholder="Reply" />
-            <input className="form-input" type="file" accept="image/*" multiple onChange={(event) => setFiles([...(event.target.files || [])])} />
+            <CameraRollInput accept="image/*" label="Add a photo" onFiles={setFiles} />
             {error && <p className="text-sm font-bold" role="alert">{error}</p>}
             <SubmitButton busy={busy} busyLabel="Replying…" className="btn text-sm px-4 py-2">Reply</SubmitButton>
           </form>

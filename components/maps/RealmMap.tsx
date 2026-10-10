@@ -6,12 +6,21 @@ import type { Faction, MapPin, WikiEntry } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 import { actionError } from "@/lib/async";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
+import { clamp, pinchView, popupPosition } from "@/lib/maps/gestures";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 
 type DraftPin = { nx: number; ny: number };
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+function useNarrow() {
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 767px)");
+    const apply = () => setNarrow(query.matches);
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, []);
+  return narrow;
 }
 
 function ring(points: { nx: number; ny: number }[]) {
@@ -70,7 +79,11 @@ export function RealmMap({
   const [busy, setBusy] = useState(false);
   const drag = useRef<{ x: number; y: number; panX: number; panY: number; moved: boolean } | null>(null);
   const pinDrag = useRef<{ id: string; moved: boolean } | null>(null);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ distance: number; scale: number; panX: number; panY: number } | null>(null);
+  const pinched = useRef(false);
   const centeredFor = useRef("");
+  const narrow = useNarrow();
   const [livePins, setLivePins] = useState(pins);
 
   useEffect(() => {
@@ -158,36 +171,36 @@ export function RealmMap({
 
   return (
     <div className="relative h-full min-h-0">
-      <div className="absolute top-3 left-3 right-3 z-30 flex flex-wrap items-center gap-2">
-        <div className="glass-panel px-3 py-2 flex flex-wrap items-center gap-2 max-w-full">
+      <div className="absolute top-2 left-2 right-2 z-30 flex flex-wrap items-center gap-2">
+        <div className="glass-panel px-2 py-2 flex flex-wrap items-center gap-2 max-w-full">
           <h1 className="text-accent-gold mr-1">Realm map</h1>
-          <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => zoomAt(
+          <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => zoomAt(
             (viewportRef.current?.getBoundingClientRect().left || 0) + frame.w / 2,
             (viewportRef.current?.getBoundingClientRect().top || 0) + frame.h / 2,
             scale * 1.2
           )}>+</button>
-          <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => zoomAt(
+          <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => zoomAt(
             (viewportRef.current?.getBoundingClientRect().left || 0) + frame.w / 2,
             (viewportRef.current?.getBoundingClientRect().top || 0) + frame.h / 2,
             scale / 1.2
           )}>−</button>
-          <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={resetView}>Fit</button>
-          <label className="flex items-center gap-2 text-sm font-bold">
-            <input type="checkbox" checked={showTreaties} onChange={(event) => setShowTreaties(event.target.checked)} />
+          <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" onClick={resetView}>Fit</button>
+          <label className="flex items-center gap-2 text-sm font-bold min-h-11">
+            <input type="checkbox" className="w-5 h-5" checked={showTreaties} onChange={(event) => setShowTreaties(event.target.checked)} />
             Show treaties
           </label>
           {canEdit && (
-            <button type="button" className={`text-xs px-2 py-1 ${adding ? "btn" : "btn btn-secondary"}`} onClick={() => { setAdding((value) => !value); setDraft(null); }}>
-              {adding ? "Click the map" : "Add pin"}
+            <button type="button" className={`text-sm min-h-11 px-3 py-2 ${adding ? "btn" : "btn btn-secondary"}`} onClick={() => { setAdding((value) => !value); setDraft(null); }}>
+              {adding ? "Tap the map" : "Add pin"}
             </button>
           )}
           {canEdit && (
-            <label className="text-xs">
-              <span className="sr-only">Replace realm map</span>
+            <label className="btn btn-secondary relative text-sm min-h-11 px-3 py-2">
+              Replace map
               <input
                 type="file"
                 accept="image/*"
-                className="text-xs max-w-[9rem]"
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
@@ -212,13 +225,57 @@ export function RealmMap({
 
       <div
         ref={viewportRef}
-        className="relative h-full overflow-hidden bg-[#f7f6f3] touch-none"
+        className="realm-map-stage relative h-full overflow-hidden bg-[#f7f6f3] touch-none"
         onPointerDown={(event) => {
-          if ((event.target as HTMLElement).closest("[data-pin],[data-popup]")) return;
-          drag.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y, moved: false };
+          const target = event.target as HTMLElement;
+          if (target.closest("[data-popup]")) return;
+          pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
           (event.currentTarget as HTMLDivElement).setPointerCapture(event.pointerId);
+          if (pointers.current.size >= 2) {
+            const [a, b] = [...pointers.current.values()];
+            pinched.current = true;
+            drag.current = null;
+            pinDrag.current = null;
+            pinchRef.current = {
+              distance: Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1),
+              scale,
+              panX: pan.x,
+              panY: pan.y,
+            };
+            return;
+          }
+          const pinEl = target.closest("[data-pin]") as HTMLElement | null;
+          const pinId = pinEl?.dataset.pin;
+          if (pinId) {
+            if (!canEdit) {
+              openPin(pinId, event);
+              return;
+            }
+            pinDrag.current = { id: pinId, moved: false };
+            return;
+          }
+          drag.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y, moved: false };
         }}
         onPointerMove={(event) => {
+          if (!pointers.current.has(event.pointerId)) return;
+          pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+          if (pointers.current.size >= 2 && pinchRef.current) {
+            const [a, b] = [...pointers.current.values()];
+            const rect = viewportRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const distance = Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1);
+            const next = pinchView({
+              startScale: pinchRef.current.scale,
+              startPanX: pinchRef.current.panX,
+              startPanY: pinchRef.current.panY,
+              originX: (a.x + b.x) / 2 - rect.left,
+              originY: (a.y + b.y) / 2 - rect.top,
+              ratio: distance / pinchRef.current.distance,
+            });
+            setScale(next.scale);
+            setPan({ x: next.panX, y: next.panY });
+            return;
+          }
           if (pinDrag.current) {
             const next = placeNorm(event);
             if (!next) return;
@@ -234,6 +291,14 @@ export function RealmMap({
           if (drag.current.moved) setPan({ x: drag.current.panX + dx, y: drag.current.panY + dy });
         }}
         onPointerUp={(event) => {
+          pointers.current.delete(event.pointerId);
+          if (pointers.current.size < 2) pinchRef.current = null;
+          if (pinched.current) {
+            drag.current = null;
+            pinDrag.current = null;
+            if (pointers.current.size === 0) pinched.current = false;
+            return;
+          }
           if (pinDrag.current) {
             const dragging = pinDrag.current;
             pinDrag.current = null;
@@ -258,8 +323,15 @@ export function RealmMap({
           setFormError("");
           setNotice("");
         }}
+        onPointerCancel={(event) => {
+          pointers.current.delete(event.pointerId);
+          pinchRef.current = null;
+          drag.current = null;
+          pinDrag.current = null;
+          if (pointers.current.size === 0) pinched.current = false;
+        }}
       >
-        <div style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`, transformOrigin: "0 0" }}>
+        <div className="realm-map-canvas" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`, transformOrigin: "0 0" }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={imageUrl}
@@ -305,20 +377,14 @@ export function RealmMap({
             <button
               key={pin.id}
               type="button"
-              data-pin
+              data-pin={pin.id}
               title={pin.title}
-              className="absolute w-4 h-4 -ml-2 -mt-2 bg-accent-yellow border-2 border-on-yellow"
+              aria-label={pin.title}
+              className="absolute w-11 h-11 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
-              onPointerDown={(event) => {
-                event.stopPropagation();
-                if (!canEdit) {
-                  openPin(pin.id, event);
-                  return;
-                }
-                pinDrag.current = { id: pin.id, moved: false };
-                (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
-              }}
-            />
+            >
+              <span className="w-4 h-4 bg-accent-yellow border-2 border-on-yellow pointer-events-none" />
+            </button>
           ))}
           {draft && (
             <span className="absolute w-4 h-4 -ml-2 -mt-2 bg-accent-cyan border-2 border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
@@ -331,6 +397,8 @@ export function RealmMap({
             city={cityById.get(livePins.find((pin) => pin.id === selectedPin)?.cityId || "")}
             wikiEntries={wikiEntries.filter((entry) => (livePins.find((pin) => pin.id === selectedPin)?.wikiEntryIds || []).includes(entry.id))}
             at={popupAt}
+            frame={frame}
+            sheet={narrow}
             canEdit={canEdit}
             cities={cities}
             allWiki={wikiEntries}
@@ -376,13 +444,15 @@ export function RealmMap({
             treaty={treaties.find((treaty) => treaty.id === selectedTreaty) || null}
             cities={cities}
             at={popupAt}
+            frame={frame}
+            sheet={narrow}
             onClose={() => setSelectedTreaty(null)}
           />
         )}
       </div>
 
-      {showTreaties && (
-        <div className="absolute bottom-3 left-3 z-30 glass-panel p-3 max-w-lg">
+      {showTreaties && !selectedPin && !selectedTreaty && !draft && (
+        <div className={`absolute z-30 glass-panel p-3 overflow-y-auto ${narrow ? "bottom-2 left-2 right-2 max-h-36" : "bottom-3 left-3 max-w-lg"}`}>
           <h2 className="mb-2">Treaty legend</h2>
           {treaties.length === 0 ? (
             <p className="text-sm text-text-muted">No active treaties to draw.</p>
@@ -413,7 +483,9 @@ export function RealmMap({
       {canEdit && draft && (
         <form
           data-popup
-          className="absolute top-16 right-3 z-30 w-[min(22rem,calc(100%-1.5rem))] glass-panel p-4 space-y-3 max-h-[calc(100%-5rem)] overflow-y-auto"
+          className={narrow
+            ? "absolute left-2 right-2 bottom-2 z-30 glass-panel p-4 space-y-3 max-h-[70%] overflow-y-auto"
+            : "absolute top-16 right-3 z-30 w-[min(22rem,calc(100%-1.5rem))] glass-panel p-4 space-y-3 max-h-[calc(100%-5rem)] overflow-y-auto"}
           onSubmit={async (event) => {
             event.preventDefault();
             const city = cityById.get(cityId);
@@ -453,7 +525,7 @@ export function RealmMap({
         >
           <div className="flex justify-between gap-2">
             <h2>Define this pin</h2>
-            <button type="button" className="text-text-muted" onClick={() => setDraft(null)} aria-label="Close">×</button>
+            <button type="button" className="menu-button shrink-0" onClick={() => setDraft(null)} aria-label="Close">×</button>
           </div>
           <p className="text-sm text-text-muted">Nothing is stored until you save.</p>
           <label className="form-label" htmlFor="pin-city">City</label>
@@ -507,11 +579,19 @@ function WikiPicker({
   );
 }
 
+function sheetStyle(sheet: boolean, at: { x: number; y: number }, frame: { w: number; h: number }) {
+  if (sheet || !frame.w || !frame.h) return undefined;
+  const placed = popupPosition({ x: at.x, y: at.y, frameW: frame.w, frameH: frame.h, popupW: 288, popupH: 280 });
+  return { left: placed.x, top: placed.y, width: placed.width };
+}
+
 function PinPopup({
   pin,
   city,
   wikiEntries,
   at,
+  frame,
+  sheet,
   canEdit,
   cities,
   allWiki,
@@ -528,6 +608,8 @@ function PinPopup({
   city?: Faction;
   wikiEntries: WikiEntry[];
   at: { x: number; y: number };
+  frame: { w: number; h: number };
+  sheet: boolean;
   canEdit: boolean;
   cities: Faction[];
   allWiki: WikiEntry[];
@@ -543,10 +625,14 @@ function PinPopup({
   if (!pin) return null;
   const shown = city || cities.find((item) => item.id === pin.cityId);
   return (
-    <div data-popup className="absolute z-20 w-72 glass-panel p-4 shadow-lg" style={{ left: at.x, top: at.y }}>
-      <div className="flex justify-between gap-2">
-        <h3>{shown?.name || pin.title}</h3>
-        <button type="button" className="text-text-muted" onClick={onClose} aria-label="Close">×</button>
+    <div
+      data-popup
+      className={sheet ? "absolute z-20 left-2 right-2 bottom-2 max-h-[70%] overflow-y-auto glass-panel p-4" : "absolute z-20 glass-panel p-4 max-h-[70%] overflow-y-auto"}
+      style={sheetStyle(sheet, at, frame)}
+    >
+      <div className="flex justify-between gap-2 items-start">
+        <h3 className="min-w-0">{shown?.name || pin.title}</h3>
+        <button type="button" className="menu-button shrink-0" onClick={onClose} aria-label="Close">×</button>
       </div>
       {shown?.sigilUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
@@ -589,20 +675,28 @@ function TreatyPopup({
   treaty,
   cities,
   at,
+  frame,
+  sheet,
   onClose,
 }: {
   treaty: StoredTreaty | null;
   cities: Faction[];
   at: { x: number; y: number };
+  frame: { w: number; h: number };
+  sheet: boolean;
   onClose: () => void;
 }) {
   if (!treaty) return null;
   const parties = treaty.partyCityIds.map((id) => cities.find((city) => city.id === id)?.name || "City");
   return (
-    <div data-popup className="absolute z-20 w-72 glass-panel p-4 shadow-lg" style={{ left: at.x, top: at.y }}>
-      <div className="flex justify-between gap-2">
-        <h3>{treaty.name}</h3>
-        <button type="button" className="text-text-muted" onClick={onClose} aria-label="Close">×</button>
+    <div
+      data-popup
+      className={sheet ? "absolute z-20 left-2 right-2 bottom-2 max-h-[60%] overflow-y-auto glass-panel p-4" : "absolute z-20 glass-panel p-4 max-h-[70%] overflow-y-auto"}
+      style={sheetStyle(sheet, at, frame)}
+    >
+      <div className="flex justify-between gap-2 items-start">
+        <h3 className="min-w-0">{treaty.name}</h3>
+        <button type="button" className="menu-button shrink-0" onClick={onClose} aria-label="Close">×</button>
       </div>
       <p className="text-sm mt-1">{parties.join(", ")}</p>
       <p className="text-sm text-text-muted mt-2">{treaty.purpose}</p>

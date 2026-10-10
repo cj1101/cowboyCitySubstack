@@ -71,7 +71,7 @@ export function GlobalFeed() {
   if (!user) {
     return (
       <div className="wood-texture min-h-[calc(100vh-4rem)] flex flex-col items-center justify-center p-8">
-        <div className="glass-panel p-12 text-center max-w-2xl w-full">
+        <div className="glass-panel p-6 sm:p-12 text-center max-w-2xl w-full">
           <h1 className="text-4xl md:text-5xl font-bold text-ink mb-4">
             Cowboy City & The Realm
           </h1>
@@ -107,7 +107,7 @@ export function GlobalFeed() {
             <select
               value={factionFilter}
               onChange={(e) => setFactionFilter(e.target.value)}
-              className="form-input py-2 text-sm w-auto min-w-[160px]"
+              className="form-input py-2 text-base w-full sm:w-auto sm:min-w-[160px] max-w-full"
               aria-label="Filter by city"
             >
               <option value="">All cities</option>

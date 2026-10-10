@@ -69,8 +69,8 @@ export default function MessagesPage() {
 
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] p-4">
-      <div className="max-w-5xl mx-auto grid md:grid-cols-[280px_1fr] gap-4">
-        <aside className="glass-panel p-4 space-y-3">
+      <div className="max-w-5xl mx-auto grid md:grid-cols-[280px_1fr] gap-4 min-w-0">
+        <aside className={`glass-panel p-4 space-y-3 min-w-0 ${activeId ? "hidden md:block" : "block"}`}>
           <h1 className="text-xl font-bold text-accent-gold">Messages</h1>
           <div className="max-h-40 overflow-auto space-y-1">
             {people.map((person) => (
@@ -125,18 +125,23 @@ export default function MessagesPage() {
             })}
           </ul>
         </aside>
-        <section className="glass-panel p-4 min-h-[50vh] flex flex-col">
-          <div className="flex-1 space-y-3 overflow-auto">
+        <section className={`glass-panel p-4 min-h-[50vh] flex-col min-w-0 ${activeId ? "flex" : "hidden md:flex"}`}>
+          {activeId && (
+            <button type="button" className="md:hidden btn btn-secondary text-sm mb-3 self-start" onClick={() => setActiveId("")}>
+              Back to messages
+            </button>
+          )}
+          <div className="flex-1 space-y-3 overflow-auto min-w-0">
             {messages.map((message) => (
               <p key={message.id} className={message.senderUid === user.uid ? "text-right" : ""}>
-                <span className="inline-block glass-panel px-3 py-2 text-sm">{message.body}</span>
+                <span className="inline-block max-w-[85%] break-words glass-panel px-3 py-2 text-sm">{message.body}</span>
               </p>
             ))}
             {activeId && messages.length === 0 && <p className="text-text-muted">No messages yet.</p>}
           </div>
           {activeId && (
             <form
-              className="mt-4 flex gap-2"
+              className="mt-4 flex flex-col sm:flex-row gap-2"
               onSubmit={async (event) => {
                 event.preventDefault();
                 const conversation = conversations.find((item) => item.id === activeId);

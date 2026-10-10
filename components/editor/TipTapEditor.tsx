@@ -139,7 +139,7 @@ function ToolbarButton({
       type="button"
       title={title}
       onClick={onClick}
-      className={`px-2.5 py-1 rounded text-sm transition-colors ${
+      className={`min-h-11 px-3 py-2 text-sm transition-colors ${
         active
           ? "bg-accent-yellow text-on-yellow"
           : "text-text-muted hover:text-accent-gold hover:bg-primary-brown/50"

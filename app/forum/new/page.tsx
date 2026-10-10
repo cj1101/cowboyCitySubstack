@@ -12,6 +12,7 @@ import { actionError, withTimeout } from "@/lib/async";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 import type { Faction } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
+import { CameraRollInput } from "@/components/media/CameraRollInput";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
 
 export default function NewThreadPage() {
@@ -70,8 +71,8 @@ export default function NewThreadPage() {
         <input className="form-input" placeholder="Title" value={title} onChange={(event) => setTitle(event.target.value)} required />
         <textarea className="form-input" rows={8} placeholder="Body" value={body} onChange={(event) => setBody(event.target.value)} required />
         <div>
-          <label className="form-label" htmlFor="images">Images</label>
-          <input id="images" className="form-input" type="file" accept="image/*" multiple onChange={(event) => setFiles([...(event.target.files || [])])} />
+          <p className="form-label" id="images-label">Images</p>
+          <CameraRollInput accept="image/*" label="Choose from camera roll" onFiles={setFiles} />
         </div>
         <select className="form-input" value={cityId} onChange={(event) => setCityId(event.target.value)}>
           <option value="">Tag a city (optional)</option>
