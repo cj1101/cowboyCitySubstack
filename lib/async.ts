@@ -18,6 +18,7 @@ export function withTimeout<T>(promise: Promise<T>, ms = 12000): Promise<T> {
 
 export function actionError(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) {
+    if (/storage\/[a-z0-9-]+/.test(error.message)) return error.message;
     if (/permission|insufficient/i.test(error.message)) {
       return "You don't have permission to do that.";
     }

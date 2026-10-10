@@ -286,6 +286,28 @@ async function main() {
   );
   console.log("ok storage approval");
 
+  // Paths the client actually writes, with the content types uploadBytes sends.
+  await assertSucceeds(uploadString(ref(approvedStorage.storage(), "users/friend/avatar.jpg"), "avatar", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(approvedStorage.storage(), "users/charles/avatar.jpg"), "nope", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(approvedStorage.storage(), "users/friend/avatar.jpg"), "txt", "raw", {
+    contentType: "text/plain",
+  }));
+  await assertSucceeds(uploadString(ref(approvedStorage.storage(), "threads/dock/1.jpg"), "thread", "raw", {
+    contentType: "image/jpeg",
+  }));
+  const rootStorage = env.authenticatedContext("charles", { email: "charlie@suarezhouse.net" });
+  await assertSucceeds(uploadString(ref(rootStorage.storage(), "realm/overview.jpg"), "map", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(approvedStorage.storage(), "realm/overview.jpg"), "map", "raw", {
+    contentType: "image/jpeg",
+  }));
+  console.log("ok client upload paths");
+
   await env.clearFirestore();
   await seedUser(env, "friend", {
     email: "friend@realm.test",

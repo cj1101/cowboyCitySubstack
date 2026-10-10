@@ -220,7 +220,7 @@ export function RealmMap({
                   setBusy(true);
                   onUpload(file)
                     .then(() => setBanner({ tone: "ok", text: "Map image saved." }))
-                    .catch(() => setBanner({ tone: "error", text: UPLOAD_FAILED_MESSAGE }))
+                    .catch((error) => setBanner({ tone: "error", text: actionError(error, UPLOAD_FAILED_MESSAGE) }))
                     .finally(() => setBusy(false));
                 }}
               />

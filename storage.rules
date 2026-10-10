@@ -3,6 +3,11 @@ rules_version = '2';
 // Released onto cowboycityrealm.firebasestorage.app (us-east1).
 // The bucket was created in production mode, which denies every request
 // until these rules are deployed. match /b/{bucket}/o applies to that bucket.
+//
+// Every photo path except users/{uid} calls firestore.exists or firestore.get.
+// Those calls fail closed until the Cloud Storage for Firebase service agent
+// has roles/firebaserules.firestoreServiceAgent on the project. The emulator
+// grants that automatically. Production does not.
 service firebase.storage {
   match /b/{bucket}/o {
 
