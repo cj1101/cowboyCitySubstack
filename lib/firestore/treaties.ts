@@ -15,7 +15,7 @@ import {
   type Timestamp,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
-import { withTimeout } from "@/lib/async";
+import { retryOnceOnPermission, withTimeout } from "@/lib/async";
 import { ensureOwnerMembership, getFactionMembers } from "@/lib/firestore/factions";
 import { notifyMany } from "@/lib/firestore/notifications";
 import { createPost } from "@/lib/firestore/posts";
@@ -185,12 +185,12 @@ function tokensFor(revision: TreatyRevision): string[] {
 
 async function loadTreaty(treatyId: string): Promise<{ stored: StoredTreaty; record: TreatyRecord }> {
   const db = getClientDb();
-  const [snap, revisions, responses] = await Promise.all([
-    getDoc(doc(db, "treaties", treatyId)),
+  const snap = await getDoc(doc(db, "treaties", treatyId));
+  if (!snap.exists()) throw new Error("That treaty is not available.");
+  const [revisions, responses] = await Promise.all([
     getDocs(collection(db, "treaties", treatyId, "revisions")),
     getDocs(collection(db, "treaties", treatyId, "responses")),
   ]);
-  if (!snap.exists()) throw new Error("That treaty is not available.");
   const stored = toStoredTreaty(snap.id, snap.data());
   return {
     stored,
@@ -546,22 +546,22 @@ export async function breakStoredTreaty(
   return { postId, threadId };
 }
 
-export async function getTreatyBundle(treatyId: string): Promise<{
+async function readTreatyBundle(treatyId: string): Promise<{
   treaty: StoredTreaty;
   record: TreatyRecord;
   comments: TreatyComment[];
   wiki: TreatyWikiSection[];
 } | null> {
+  const loaded = await loadTreaty(treatyId).catch((error: unknown) => {
+    if (error instanceof Error && error.message === "That treaty is not available.") return null;
+    throw error;
+  });
+  if (!loaded) return null;
   const db = getClientDb();
-  const [loaded, comments, wiki] = await Promise.all([
-    loadTreaty(treatyId).catch((error: unknown) => {
-      if (error instanceof Error && error.message === "That treaty is not available.") return null;
-      throw error;
-    }),
+  const [comments, wiki] = await Promise.all([
     getDocs(query(collection(db, "treaties", treatyId, "comments"), orderBy("createdAt", "asc"), limit(80))),
     getDocs(query(collection(db, "treaties", treatyId, "wiki_sections"), limit(40))),
   ]);
-  if (!loaded) return null;
   return {
     treaty: loaded.stored,
     record: loaded.record,
@@ -579,6 +579,15 @@ export async function getTreatyBundle(treatyId: string): Promise<{
       updatedAt: item.data().updatedAt as Timestamp | undefined,
     })),
   };
+}
+
+export async function getTreatyBundle(treatyId: string): Promise<{
+  treaty: StoredTreaty;
+  record: TreatyRecord;
+  comments: TreatyComment[];
+  wiki: TreatyWikiSection[];
+} | null> {
+  return retryOnceOnPermission(() => readTreatyBundle(treatyId));
 }
 
 export async function listActiveTreaties(): Promise<StoredTreaty[]> {
