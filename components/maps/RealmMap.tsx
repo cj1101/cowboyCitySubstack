@@ -230,7 +230,6 @@ export function RealmMap({
           const target = event.target as HTMLElement;
           if (target.closest("[data-popup]")) return;
           pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-          (event.currentTarget as HTMLDivElement).setPointerCapture(event.pointerId);
           if (pointers.current.size >= 2) {
             const [a, b] = [...pointers.current.values()];
             pinched.current = true;
@@ -242,8 +241,13 @@ export function RealmMap({
               panX: pan.x,
               panY: pan.y,
             };
-            return;
           }
+          try {
+            (event.currentTarget as HTMLDivElement).setPointerCapture(event.pointerId);
+          } catch {
+            // Pointer capture is unavailable for a synthetic event. The gesture still tracks the points.
+          }
+          if (pointers.current.size >= 2) return;
           const pinEl = target.closest("[data-pin]") as HTMLElement | null;
           const pinId = pinEl?.dataset.pin;
           if (pinId) {
