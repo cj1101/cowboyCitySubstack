@@ -258,16 +258,18 @@ export default function PostDetailPage() {
 
           <EmojiReactionBar target={{ kind: "post", postId: post.id, authorUid: post.authorUid, title: post.title }} />
           <div className="mt-4">
-            <PostComments postId={post.id} postAuthorUid={post.authorUid} postTitle={post.title} anchor="comments" />
+            <ReactionBar postId={post.id} />
           </div>
 
-          <ReactionBar postId={post.id} />
-
-          {post.type === "debate" ? (
-            <DebateThread post={post} canCreatePoll={canCreatePoll} />
-          ) : (
-            <CommentSection postId={post.id} postFactionId={post.factionId} />
-          )}
+          <section id="comments" className="mt-8 scroll-mt-24 space-y-6 border-t border-primary-brown pt-6">
+            <h2 className="text-xl font-bold text-accent-gold">Comments</h2>
+            <PostComments postId={post.id} postAuthorUid={post.authorUid} postTitle={post.title} variant="member" />
+            {post.type === "debate" ? (
+              <DebateThread post={post} canCreatePoll={canCreatePoll} />
+            ) : (
+              <CommentSection postId={post.id} postFactionId={post.factionId} />
+            )}
+          </section>
 
           {post.type === "event" && (
             <p className="text-text-muted text-sm italic border-t border-primary-brown pt-4">

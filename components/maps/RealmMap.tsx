@@ -8,9 +8,9 @@ import type { StoredTreaty } from "@/lib/firestore/treaties";
 import { TreatyBadge } from "@/components/treaties/TreatyBadge";
 import { actionError } from "@/lib/async";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
-import { clamp, pinchView, popupPosition } from "@/lib/maps/gestures";
+import { clamp, imageNorm, pinchView, popupPosition } from "@/lib/maps/gestures";
 import { pinCategoryOf } from "@/lib/maps/pins";
-import { centroid, cleanPoints, frameView } from "@/lib/maps/territory";
+import { centroid, cleanPoints, fitMapToWidth, frameView } from "@/lib/maps/territory";
 import { PinMark } from "@/components/maps/PinMark";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 
@@ -116,6 +116,9 @@ export function RealmMap({
   const pinchRef = useRef<{ distance: number; scale: number; panX: number; panY: number } | null>(null);
   const pinched = useRef(false);
   const centeredFor = useRef("");
+  const drawingRef = useRef(drawing);
+  drawingRef.current = drawing;
+  const drawPress = useRef<{ x: number; y: number } | null>(null);
   const narrow = useNarrow();
   const [toolsOpen, setToolsOpen] = useState(false);
   const [livePins, setLivePins] = useState(pins);
@@ -134,18 +137,17 @@ export function RealmMap({
     return () => observer.disconnect();
   }, []);
 
-  const fitted = useMemo(() => {
-    if (!frame.w || !frame.h || !natural.w || !natural.h) return null;
-    const contain = Math.min(frame.w / natural.w, frame.h / natural.h);
-    return { w: natural.w * contain, h: natural.h * contain };
-  }, [frame, natural]);
+  const fitted = useMemo(
+    () => fitMapToWidth(frame.w, natural.w, natural.h),
+    [frame.w, natural.w, natural.h]
+  );
 
   useEffect(() => {
     if (!fitted || !frame.w || centeredFor.current === imageUrl) return;
     centeredFor.current = imageUrl;
     setScale(1);
-    setPan({ x: (frame.w - fitted.w) / 2, y: (frame.h - fitted.h) / 2 });
-  }, [fitted, frame.w, frame.h, imageUrl]);
+    setPan({ x: 0, y: 0 });
+  }, [fitted, frame.w, imageUrl]);
 
   const cityById = useMemo(() => new Map(cities.map((city) => [city.id, city])), [cities]);
   const editableCities = useMemo(
@@ -159,14 +161,17 @@ export function RealmMap({
   const savedBorder = drawing ? borders.find((border) => border.cityId === drawing.cityId) : undefined;
 
   const placeNorm = (event: { clientX: number; clientY: number }) => {
-    const image = viewportRef.current?.querySelector("img");
+    const image = viewportRef.current?.querySelector("img.realm-map-image");
     if (!image) return null;
     const rect = image.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return null;
-    return {
-      nx: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-      ny: clamp((event.clientY - rect.top) / rect.height, 0, 1),
-    };
+    return imageNorm({
+      clientX: event.clientX,
+      clientY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    });
   };
 
   const zoomAt = (clientX: number, clientY: number, nextScale: number) => {
@@ -183,9 +188,9 @@ export function RealmMap({
   };
 
   const resetView = () => {
+    if (drawingRef.current) return;
     setScale(1);
-    if (fitted) setPan({ x: (frame.w - fitted.w) / 2, y: (frame.h - fitted.h) / 2 });
-    else setPan({ x: 0, y: 0 });
+    setPan({ x: 0, y: 0 });
   };
 
   const centerOf = () => {
@@ -200,6 +205,12 @@ export function RealmMap({
     const viewport = viewportRef.current;
     if (!viewport) return;
     const onWheel = (event: WheelEvent) => {
+      if (drawingRef.current) {
+        event.preventDefault();
+        return;
+      }
+      const zoomGesture = scale > 1 || event.ctrlKey || event.metaKey;
+      if (!zoomGesture) return;
       event.preventDefault();
       zoomAt(event.clientX, event.clientY, scale * (event.deltaY < 0 ? 1.12 : 0.9));
     };
@@ -383,7 +394,7 @@ export function RealmMap({
   const drawCity = drawing ? cityById.get(drawing.cityId) : undefined;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col">
+    <div className="relative flex w-full min-w-0 flex-col">
       <div className="z-30 flex w-full min-w-0 shrink-0 flex-col gap-2 p-2">
         <button
           type="button"
@@ -396,15 +407,17 @@ export function RealmMap({
         <div className={`${toolsOpen ? "flex" : "hidden"} md:flex w-full min-w-0 flex-col gap-2`}>
         <div className="glass-panel flex w-full min-w-0 max-w-full flex-wrap items-center gap-2 px-2 py-2">
           <h1 className="text-accent-gold mr-1">Realm map</h1>
-          <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => {
+          <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" disabled={Boolean(drawing)} onClick={() => {
+            if (drawing) return;
             const center = centerOf();
             zoomAt(center.x, center.y, scale * 1.2);
           }}>+</button>
-          <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => {
+          <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" disabled={Boolean(drawing)} onClick={() => {
+            if (drawing) return;
             const center = centerOf();
             zoomAt(center.x, center.y, scale / 1.2);
           }}>−</button>
-          <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" onClick={resetView}>Fit</button>
+          <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" disabled={Boolean(drawing)} onClick={resetView}>Fit</button>
           <label className="flex items-center gap-2 text-sm font-bold min-h-11">
             <input type="checkbox" className="w-5 h-5" checked={showBorders} onChange={(event) => setShowBorders(event.target.checked)} />
             Borders
@@ -482,11 +495,31 @@ export function RealmMap({
 
       <div
         ref={viewportRef}
-        className={`realm-map-stage relative min-h-0 flex-1 overflow-hidden bg-[#f7f6f3] touch-none ${drawing ? "cursor-crosshair" : ""}`}
+        className={`realm-map-stage relative w-full min-w-0 overflow-hidden bg-[#f7f6f3] touch-none ${drawing ? "cursor-crosshair" : ""}`}
+        style={{ height: fitted ? fitted.h : "70vh", minHeight: "16rem" }}
         onPointerDown={(event) => {
           const target = event.target as HTMLElement;
           if (target.closest("[data-popup]")) return;
           pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+          if (drawingRef.current) {
+            try {
+              (event.currentTarget as HTMLDivElement).setPointerCapture(event.pointerId);
+            } catch {
+              // Pointer capture is unavailable for a synthetic event.
+            }
+            if (pointers.current.size >= 2) return;
+            const vertexEl = target.closest("[data-vertex]") as HTMLElement | null;
+            if (vertexEl && drawing) {
+              const index = Number(vertexEl.dataset.vertex);
+              if (Number.isInteger(index)) {
+                vertexDrag.current = { index, moved: false, before: drawing.points.map((point) => ({ ...point })) };
+              }
+              drawPress.current = null;
+              return;
+            }
+            drawPress.current = { x: event.clientX, y: event.clientY };
+            return;
+          }
           if (pointers.current.size >= 2) {
             const [a, b] = [...pointers.current.values()];
             pinched.current = true;
@@ -534,6 +567,22 @@ export function RealmMap({
         onPointerMove={(event) => {
           if (!pointers.current.has(event.pointerId)) return;
           pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+          if (drawingRef.current) {
+            if (vertexDrag.current && drawing) {
+              const next = placeNorm(event);
+              if (!next) return;
+              const index = vertexDrag.current.index;
+              vertexDrag.current.moved = true;
+              setDrawing((current) => {
+                if (!current) return current;
+                return {
+                  ...current,
+                  points: current.points.map((point, pointIndex) => (pointIndex === index ? next : point)),
+                };
+              });
+            }
+            return;
+          }
           if (pointers.current.size >= 2 && pinchRef.current) {
             const [a, b] = [...pointers.current.values()];
             const rect = viewportRef.current?.getBoundingClientRect();
@@ -576,11 +625,40 @@ export function RealmMap({
           if (!drag.current) return;
           const dx = event.clientX - drag.current.x;
           const dy = event.clientY - drag.current.y;
-          const slop = drawing ? 10 : 4;
-          if (Math.hypot(dx, dy) > slop) drag.current.moved = true;
+          if (Math.hypot(dx, dy) > 4) drag.current.moved = true;
           if (drag.current.moved) setPan({ x: drag.current.panX + dx, y: drag.current.panY + dy });
         }}
         onPointerUp={(event) => {
+          if (drawingRef.current) {
+            pointers.current.delete(event.pointerId);
+            pinchRef.current = null;
+            if (pointers.current.size === 0) pinched.current = false;
+            if (vertexDrag.current) {
+              const draggingVertex = vertexDrag.current;
+              vertexDrag.current = null;
+              drawPress.current = null;
+              if (draggingVertex.moved) {
+                setDrawing((current) => (
+                  current ? { ...current, past: [...current.past, draggingVertex.before] } : current
+                ));
+                setNotice("");
+                setFormError("");
+              }
+              return;
+            }
+            const press = drawPress.current;
+            drawPress.current = null;
+            if (!press || !drawing) return;
+            if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8) return;
+            if (drawing.points.length >= 64) {
+              setNotice("");
+              setFormError("A border can have at most 64 corners.");
+              return;
+            }
+            const next = placeNorm(event);
+            if (next) addCorner(next);
+            return;
+          }
           pointers.current.delete(event.pointerId);
           if (pointers.current.size < 2) pinchRef.current = null;
           if (pinched.current) {
@@ -625,16 +703,6 @@ export function RealmMap({
           drag.current = null;
           pressTarget.current = null;
           if (!background || background.moved) return;
-          if (drawing) {
-            if (drawing.points.length >= 64) {
-              setNotice("");
-              setFormError("A border can have at most 64 corners.");
-              return;
-            }
-            const next = placeNorm(event);
-            if (next) addCorner(next);
-            return;
-          }
           if (adding) {
             const next = placeNorm(event);
             if (!next) return;
@@ -663,6 +731,7 @@ export function RealmMap({
           drag.current = null;
           pinDrag.current = null;
           pressTarget.current = null;
+          drawPress.current = null;
           if (vertexDrag.current) {
             const before = vertexDrag.current.before;
             vertexDrag.current = null;
@@ -687,7 +756,7 @@ export function RealmMap({
             draggable={false}
             onLoad={(event) => setNatural({ w: event.currentTarget.naturalWidth, h: event.currentTarget.naturalHeight })}
             style={fitted ? { width: "100%", height: "100%" } : { width: "100%", height: "auto" }}
-            className="block select-none max-w-none pixel-image"
+            className="realm-map-image block select-none max-w-none pixel-image"
           />
           {(showBorders || drawing) && (
             <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ pointerEvents: "none" }}>
@@ -950,7 +1019,7 @@ export function RealmMap({
           <div className="flex min-w-0 flex-1 items-start justify-between gap-2">
             <div className="min-w-0">
               <h2>Draw {drawCity?.name || "city"} border</h2>
-              <p className="text-sm text-text-muted">Tap to add a corner. Drag a corner to move it. {drawing.points.length} {drawing.points.length === 1 ? "corner" : "corners"}.</p>
+              <p className="text-sm text-text-muted">Tap the map to add a corner. Drag a corner to move it. Pan and zoom stay locked. {drawing.points.length} {drawing.points.length === 1 ? "corner" : "corners"}.</p>
             </div>
             <button type="button" className="menu-button shrink-0" aria-label="Close border drawing" onClick={() => {
               if (drawing.past.length) setNotice("Closed without saving.");

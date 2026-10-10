@@ -43,25 +43,30 @@ export function CommentSection({ postId, postFactionId }: { postId: string; post
   }, [replies]);
 
   return (
-    <section className="mt-8">
-      <h2 className="text-xl font-bold text-accent-gold mb-3">Comments</h2>
+    <section className="space-y-3 border-t border-primary-brown pt-4">
+      <p className="text-sm font-bold text-accent-gold">In-character replies</p>
       <div className="space-y-3">
-        {replies.map((reply) => (
-          <article key={reply.id} className="border border-primary-brown rounded p-3">
-            <p className="text-accent-gold text-sm font-bold">
-              {reply.inCharacter === false && reply.authorUid ? (
-                <PersonName uid={reply.authorUid} name={reply.authorName || "Member"} />
-              ) : (
-                names[reply.id] || "Citizen"
-              )}
-              {reply.inCharacter === false ? <span className="text-text-muted font-normal"> · out of character</span> : null}
-            </p>
-            <p className="text-text-light whitespace-pre-wrap mt-1">{reply.body}</p>
-          </article>
-        ))}
-        {replies.length === 0 && <p className="text-text-muted text-sm">No comments yet.</p>}
+        {replies.map((reply) => {
+          const inCharacter = reply.inCharacter !== false;
+          return (
+            <article key={reply.id} className="border border-primary-brown rounded p-3">
+              <p className="text-accent-gold text-sm font-bold">
+                {inCharacter ? (
+                  names[reply.id] || "Citizen"
+                ) : reply.authorUid ? (
+                  <PersonName uid={reply.authorUid} name={reply.authorName || "Member"} />
+                ) : (
+                  reply.authorName || "Member"
+                )}
+                <span className="text-text-muted font-normal"> · {inCharacter ? "in character" : "out of character"}</span>
+              </p>
+              <p className="text-text-light whitespace-pre-wrap mt-1">{reply.body}</p>
+            </article>
+          );
+        })}
+        {replies.length === 0 && <p className="text-text-muted text-sm">No in-character replies yet.</p>}
       </div>
-      <ReplyForm postId={postId} postFactionId={postFactionId} showStance={false} />
+      <ReplyForm postId={postId} postFactionId={postFactionId} showStance={false} heading="Add an in-character reply" />
     </section>
   );
 }

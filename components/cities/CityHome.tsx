@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { CityPanel } from "@/components/cities/CityPanel";
 import { CityMapCard } from "@/components/cities/CityMapCard";
@@ -65,17 +65,19 @@ export function CityHome({
   const [error, setError] = useState("");
   const [lightbox, setLightbox] = useState<number | null>(null);
   const [showAllPosts, setShowAllPosts] = useState(false);
+  const editingRef = useRef(false);
+  editingRef.current = editing;
   const bannerPreview = useObjectUrl(bannerFile);
   const crestPreview = useObjectUrl(crestFile);
 
   useEffect(() => {
-    if (editing) return;
+    if (editingRef.current) return;
     setCity(faction);
     setMotto(faction.motto || "");
     setPopulation(faction.population != null ? String(faction.population) : "");
     setFoundedOn(faction.foundedOn || "");
     setGallery(faction.gallery || []);
-  }, [faction, editing]);
+  }, [faction]);
 
   const primary = city.colors?.primary ?? "#169C9C";
   const secondary = city.colors?.secondary ?? "#FED83D";
@@ -135,6 +137,9 @@ export function CityHome({
         sigilUrl: sigilUrl || undefined,
       };
       setCity(next);
+      setMotto(next.motto || "");
+      setPopulation(next.population != null ? String(next.population) : "");
+      setFoundedOn(next.foundedOn || "");
       setGallery(nextGallery);
       setBannerFile(null);
       setCrestFile(null);

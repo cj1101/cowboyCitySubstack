@@ -24,6 +24,16 @@ export function centroid(points: MapPoint[]): MapPoint {
   return { nx: total.nx / points.length, ny: total.ny / points.length };
 }
 
+/** Size the map to the full frame width and the image aspect ratio, with nothing cropped. */
+export function fitMapToWidth(
+  frameW: number,
+  naturalW: number,
+  naturalH: number
+): { w: number; h: number } | null {
+  if (!(frameW > 0) || !(naturalW > 0) || !(naturalH > 0)) return null;
+  return { w: frameW, h: frameW * (naturalH / naturalW) };
+}
+
 export function frameView(input: {
   points: MapPoint[];
   frameW: number;

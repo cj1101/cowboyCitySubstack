@@ -23,9 +23,10 @@ interface ReplyFormProps {
   postId: string;
   postFactionId: string;
   showStance?: boolean;
+  heading?: string;
 }
 
-export function ReplyForm({ postId, postFactionId, showStance = true }: ReplyFormProps) {
+export function ReplyForm({ postId, postFactionId, showStance = true, heading = "Add your reply" }: ReplyFormProps) {
   const { user, profile } = useAuth();
   const [body, setBody] = useState("");
   const [stance, setStance] = useState<Stance>("neutral");
@@ -145,7 +146,7 @@ export function ReplyForm({ postId, postFactionId, showStance = true }: ReplyFor
 
   return (
     <form onSubmit={handleSubmit} className="mt-6 space-y-4 border-t border-primary-brown pt-6">
-      <h3 className="text-accent-gold font-bold">Add Your Reply</h3>
+      <p className="text-accent-gold font-bold">{heading}</p>
 
       {factions.length > 1 && (
         <div>

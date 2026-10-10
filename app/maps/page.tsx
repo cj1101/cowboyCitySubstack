@@ -70,11 +70,11 @@ export default function RealmMapPage() {
   }, [selectedFaction, ownedCityIds, userFactions]);
 
   return (
-    <div className="h-[calc(100dvh-var(--app-nav)-var(--app-tabs))] flex flex-col">
+    <div className="flex w-full min-w-0 flex-col">
       {loadError && (
         <p className="px-3 py-2 text-sm font-bold" role="alert">{loadError}</p>
       )}
-      <div className="flex-1 min-h-0">
+      <div className="w-full min-w-0">
         <RealmMap
           imageUrl={imageUrl}
           pins={pins}

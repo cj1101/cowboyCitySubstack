@@ -13,11 +13,13 @@ export function PostComments({
   postAuthorUid,
   postTitle,
   anchor,
+  variant = "section",
 }: {
   postId: string;
   postAuthorUid?: string;
   postTitle: string;
   anchor?: string;
+  variant?: "section" | "member";
 }) {
   const { user, profile } = useAuth();
   const [comments, setComments] = useState<PostComment[]>([]);
@@ -90,9 +92,13 @@ export function PostComments({
     }
   };
 
+  const member = variant === "member";
+
   return (
-    <section id={anchor} className="space-y-3 border-t border-primary-brown pt-3 scroll-mt-24">
-      <p className="text-sm font-bold text-accent-gold">Comments ({comments.length})</p>
+    <section id={anchor} className={member ? "space-y-3 scroll-mt-24" : "space-y-3 border-t border-primary-brown pt-3 scroll-mt-24"}>
+      <p className="text-sm font-bold text-accent-gold">
+        {member ? "Member comments" : "Comments"} ({comments.length})
+      </p>
       {loadError && (
         <p className="text-sm font-bold" role="alert">
           {loadError}
