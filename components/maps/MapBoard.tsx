@@ -2,6 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { StoredImage } from "@/components/media/StoredImage";
+import { SubmitButton } from "@/components/ui/SubmitButton";
+import { actionError } from "@/lib/async";
+import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
 import type { MapPin } from "@/lib/types";
 
 export function MapBoard({
@@ -26,6 +30,9 @@ export function MapBoard({
   const [x, setX] = useState("");
   const [z, setZ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [preview, setPreview] = useState("");
 
   const place = async (event: React.MouseEvent<HTMLDivElement>) => {
     if (!canEdit || !imageUrl) return;
@@ -47,24 +54,36 @@ export function MapBoard({
             className="form-input"
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) onUpload(file).catch((err) => alert(err instanceof Error ? err.message : "Upload failed"));
+              e.target.value = "";
+              if (!file || !onUpload) return;
+              setError("");
+              setNotice("");
+              setPreview(URL.createObjectURL(file));
+              setBusy(true);
+              onUpload(file)
+                .then(() => setNotice("Map image saved."))
+                .catch((err) => setError(actionError(err, UPLOAD_FAILED_MESSAGE)))
+                .finally(() => setBusy(false));
             }}
           />
         </label>
       )}
-      {imageUrl ? (
-        <div className="relative border border-accent-gold rounded overflow-hidden cursor-crosshair" onClick={place}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={imageUrl} alt="Map" className="w-full h-auto block" />
+      {error && <p className="text-sm font-bold" role="alert">{error}</p>}
+      {notice && <p className="text-sm font-bold" role="status">{notice}</p>}
+      {imageUrl || preview ? (
+        <div className="relative border-4 border-ink overflow-hidden cursor-crosshair" onClick={place}>
+          <StoredImage src={imageUrl || preview} alt="City map" className="w-full h-auto block pixel-image" />
           {pins.map((pin) => (
             <Link
               key={pin.id}
               href={pin.postId ? `/posts/${pin.postId}` : "#"}
-              className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-yellow border border-on-yellow"
+              className="absolute w-11 h-11 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
               title={pin.title}
               onClick={(event) => event.stopPropagation()}
-            />
+            >
+              <span className="w-4 h-4 rounded-full bg-accent-yellow border border-on-yellow" />
+            </Link>
           ))}
           {draft && (
             <span className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-cyan border border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
@@ -108,7 +127,7 @@ export function MapBoard({
             <input className="form-input" placeholder="Minecraft X" value={x} onChange={(e) => setX(e.target.value)} />
             <input className="form-input" placeholder="Minecraft Z" value={z} onChange={(e) => setZ(e.target.value)} />
           </div>
-          <button className="btn text-sm px-4 py-2" disabled={busy} type="submit">Save pin</button>
+          <SubmitButton busy={busy} busyLabel="Saving…" className="btn text-sm px-4 py-2">Save pin</SubmitButton>
         </form>
       )}
       <ul className="space-y-2">

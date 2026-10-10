@@ -2,6 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { slugify } from "@/lib/utils/slug";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 import type { FactionColors } from "@/lib/types";
 
 export interface FactionFormData {
@@ -189,9 +190,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
 
       {error && <p className="text-red-400 text-sm">{error}</p>}
 
-      <button type="submit" disabled={submitting} className="btn">
-        {submitting ? "Saving…" : submitLabel}
-      </button>
+      <SubmitButton busy={submitting} busyLabel="Saving…">{submitLabel}</SubmitButton>
     </form>
   );
 }

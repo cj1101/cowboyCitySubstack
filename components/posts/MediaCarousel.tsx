@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import type { PostMedia } from "@/lib/types";
+import { StoredImage } from "@/components/media/StoredImage";
 
 interface MediaCarouselProps {
   media: PostMedia[];
@@ -33,8 +34,7 @@ export function MediaCarousel({ media, title }: MediaCarouselProps) {
             className="w-full h-full object-contain bg-black"
           />
         ) : (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
+          <StoredImage
             src={item.url}
             alt={title ? `${title} — ${index + 1}` : `Media ${index + 1}`}
             className="w-full h-full object-cover"

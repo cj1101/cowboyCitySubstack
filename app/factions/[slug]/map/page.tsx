@@ -8,6 +8,7 @@ import { MapBoard } from "@/components/maps/MapBoard";
 import { getFactionBySlug, isFactionOwner } from "@/lib/firestore/factions";
 import { addCityPin, deleteCityPin, getCityPins, setCityMapImage } from "@/lib/firestore/maps";
 import { uploadMapImage } from "@/lib/storage/uploads";
+import { withTimeout } from "@/lib/async";
 import type { Faction, MapPin } from "@/lib/types";
 
 export default function CityMapPage() {
@@ -42,8 +43,8 @@ export default function CityMapPage() {
             pins={pins}
             canEdit={owner}
             onUpload={async (file) => {
-              const url = await uploadMapImage(`factions/${city.id}/map.jpg`, file);
-              await setCityMapImage(city.id, url);
+              const url = await withTimeout(uploadMapImage(`factions/${city.id}/map.jpg`, file), 20000);
+              await withTimeout(setCityMapImage(city.id, url), 8000);
               setCity({ ...city, mapImageUrl: url });
             }}
             onAddPin={async (pin) => {

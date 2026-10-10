@@ -33,7 +33,8 @@ function emulatorsRequested(): boolean {
 }
 
 function connectEmulators(firebaseApp: FirebaseApp) {
-  if (emulatorsConnected || !emulatorsRequested() || typeof window === "undefined") return;
+  if (emulatorsConnected || !emulatorsRequested()) return;
+  if (typeof window === "undefined" && process.env.FIREBASE_EMULATOR_SCRIPT !== "1") return;
   connectAuthEmulator(getAuth(firebaseApp), "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(getFirestore(firebaseApp), "127.0.0.1", 8080);
   connectStorageEmulator(getStorage(firebaseApp), "127.0.0.1", 9199);

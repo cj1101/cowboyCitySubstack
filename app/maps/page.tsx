@@ -2,55 +2,77 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
-import { MapBoard } from "@/components/maps/MapBoard";
-import { addRealmPin, deleteRealmPin, getRealmMap, getRealmPins, setRealmMapImage } from "@/lib/firestore/maps";
+import { RealmMap } from "@/components/maps/RealmMap";
+import { isSheriff } from "@/lib/membership";
+import { getAllFactions } from "@/lib/firestore/factions";
+import {
+  addRealmPin,
+  deleteRealmPin,
+  getRealmMap,
+  getRealmPins,
+  setRealmMapImage,
+  updateRealmPin,
+} from "@/lib/firestore/maps";
+import { listActiveTreaties } from "@/lib/firestore/treaties";
+import { getAllWikiEntries } from "@/lib/firestore/wikiEntries";
 import { uploadMapImage } from "@/lib/storage/uploads";
-import type { MapPin } from "@/lib/types";
+import { withTimeout } from "@/lib/async";
+import type { Faction, MapPin, WikiEntry } from "@/lib/types";
+import type { StoredTreaty } from "@/lib/firestore/treaties";
+
+const DEFAULT_REALM_MAP = "/realm-map.jpg";
 
 export default function RealmMapPage() {
-  const { profile } = useAuth();
-  const [imageUrl, setImageUrl] = useState("");
+  const { profile, user } = useAuth();
+  const [imageUrl, setImageUrl] = useState(DEFAULT_REALM_MAP);
   const [pins, setPins] = useState<MapPin[]>([]);
-
-  const load = () => {
-    Promise.all([getRealmMap(), getRealmPins()])
-      .then(([map, pinList]) => {
-        setImageUrl(map?.imageUrl || "");
-        setPins(pinList);
-      })
-      .catch(() => undefined);
-  };
+  const [cities, setCities] = useState<Faction[]>([]);
+  const [wikiEntries, setWikiEntries] = useState<WikiEntry[]>([]);
+  const [treaties, setTreaties] = useState<StoredTreaty[]>([]);
 
   useEffect(() => {
-    load();
+    Promise.all([getRealmMap(), getRealmPins(), getAllFactions(), getAllWikiEntries(), listActiveTreaties()])
+      .then(([map, pinList, factionList, entries, active]) => {
+        setImageUrl(map?.imageUrl || DEFAULT_REALM_MAP);
+        setPins(pinList);
+        setCities(factionList);
+        setWikiEntries(entries);
+        setTreaties(active);
+      })
+      .catch(() => undefined);
   }, []);
 
   return (
-    <div className="wood-texture min-h-[calc(100vh-4rem)] p-6">
-      <div className="max-w-4xl mx-auto space-y-4">
-        <h1 className="text-3xl font-bold text-accent-gold">Realm map</h1>
-        <p className="text-text-muted">Optional overview of every city-state. Sheriffs place the image and the pins.</p>
-        <div className="glass-panel p-4">
-          <MapBoard
-            imageUrl={imageUrl}
-            pins={pins}
-            canEdit={profile?.isAdmin === true}
-            onUpload={async (file) => {
-              const url = await uploadMapImage(`realm/overview.jpg`, file);
-              await setRealmMapImage(url);
-              setImageUrl(url);
-            }}
-            onAddPin={async (pin) => {
-              await addRealmPin(pin);
-              load();
-            }}
-            onDeletePin={async (pinId) => {
-              await deleteRealmPin(pinId);
-              load();
-            }}
-          />
-        </div>
-      </div>
+    <div className="h-[calc(100dvh-var(--app-nav)-var(--app-tabs))]">
+      <RealmMap
+        imageUrl={imageUrl}
+        pins={pins}
+        cities={cities}
+        wikiEntries={wikiEntries}
+        treaties={treaties}
+        canEdit={isSheriff(profile, user?.email)}
+        onUpload={async (file) => {
+          const url = await withTimeout(uploadMapImage("realm/overview.jpg", file), 20000);
+          await withTimeout(setRealmMapImage(url), 8000);
+          setImageUrl(url);
+        }}
+        onAddPin={async (pin) => {
+          const id = await withTimeout(addRealmPin(pin), 8000);
+          setPins((current) => [...current, { ...pin, id }]);
+        }}
+        onMovePin={async (pinId, nx, ny) => {
+          setPins((current) => current.map((pin) => (pin.id === pinId ? { ...pin, nx, ny } : pin)));
+          await withTimeout(updateRealmPin(pinId, { nx, ny }), 8000);
+        }}
+        onUpdatePin={async (pinId, patch) => {
+          await withTimeout(updateRealmPin(pinId, patch), 8000);
+          setPins((current) => current.map((pin) => (pin.id === pinId ? { ...pin, ...patch } : pin)));
+        }}
+        onDeletePin={async (pinId) => {
+          await withTimeout(deleteRealmPin(pinId), 8000);
+          setPins((current) => current.filter((pin) => pin.id !== pinId));
+        }}
+      />
     </div>
   );
 }

@@ -18,7 +18,7 @@ import {
   Timestamp,
   updateDoc,
 } from "firebase/firestore";
-import { ref, uploadString } from "firebase/storage";
+import { getBytes, listAll, ref, uploadString } from "firebase/storage";
 
 const PROJECT_ID = "cowboycityrealm";
 
@@ -284,6 +284,308 @@ async function main() {
     })
   );
   console.log("ok storage approval");
+
+  await env.clearFirestore();
+  await seedUser(env, "friend", {
+    email: "friend@realm.test",
+    status: "approved",
+    isAdmin: false,
+  });
+  await seedUser(env, "other", {
+    email: "other@realm.test",
+    status: "approved",
+    isAdmin: false,
+  });
+  await seedUser(env, "charles", {
+    email: "charlie@suarezhouse.net",
+    status: "approved",
+    isAdmin: true,
+  });
+  await seedUser(env, "visitor", {
+    email: "visitor@realm.test",
+    status: "approved",
+    isAdmin: false,
+  });
+  const treatyFriend = env.authenticatedContext("friend", { email: "friend@realm.test" });
+  const treatyOther = env.authenticatedContext("other", { email: "other@realm.test" });
+  const treatySheriff = env.authenticatedContext("charles", { email: "charlie@suarezhouse.net" });
+  const treatyVisitor = env.authenticatedContext("visitor", { email: "visitor@realm.test" });
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "factions", "city1"), {
+    name: "Cascadia",
+    slug: "cascadia",
+    ownerUids: ["friend"],
+    colors: { primary: "#169C9C", secondary: "#FED83D" },
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "faction_members", "friend_city1"), {
+    uid: "friend",
+    factionId: "city1",
+    role: "owner",
+  }));
+  await assertSucceeds(updateDoc(doc(treatyFriend.firestore(), "users", "friend"), {
+    ownsCity: true,
+    proofCityId: "city1",
+  }));
+  await assertFails(updateDoc(doc(treatyOther.firestore(), "users", "other"), {
+    ownsCity: true,
+    proofCityId: "city1",
+  }));
+  await assertSucceeds(setDoc(doc(treatyOther.firestore(), "factions", "city2"), {
+    name: "Evan",
+    slug: "evan",
+    ownerUids: ["other"],
+    colors: { primary: "#169C9C", secondary: "#FED83D" },
+  }));
+  await assertSucceeds(setDoc(doc(treatyOther.firestore(), "faction_members", "other_city2"), {
+    uid: "other",
+    factionId: "city2",
+    role: "owner",
+  }));
+  await assertSucceeds(updateDoc(doc(treatyOther.firestore(), "users", "other"), {
+    ownsCity: true,
+    proofCityId: "city2",
+  }));
+  const pendingTreaty = {
+    name: "Harbor Accord",
+    type: "trade",
+    nature: "Docks",
+    terms: "No tariff",
+    purpose: "Keep trade moving",
+    open: false,
+    status: "pending",
+    proposerCityId: "city1",
+    authorUid: "friend",
+    currentRevision: 1,
+    inviteeCityIds: ["city2"],
+    partyCityIds: ["city1"],
+    readerUids: ["friend", "other"],
+    partyOwnerUids: ["friend"],
+    color: "#169C9C",
+    lastActionCityId: "city1",
+  };
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "harbor"), pendingTreaty));
+  await assertFails(getDoc(doc(treatyVisitor.firestore(), "treaties", "harbor")));
+  await assertSucceeds(getDoc(doc(treatyOther.firestore(), "treaties", "harbor")));
+  await assertSucceeds(getDoc(doc(treatySheriff.firestore(), "treaties", "harbor")));
+  await assertFails(updateDoc(doc(treatyOther.firestore(), "treaties", "harbor"), {
+    partyCityIds: ["city1", "city2"],
+    status: "active",
+    lastActionCityId: "city1",
+    updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "harbor", "revisions", "1"), {
+    number: 1,
+    authorCityId: "city1",
+    authorUid: "friend",
+    name: "Harbor Accord",
+    note: "",
+  }));
+  await assertSucceeds(updateDoc(doc(treatyOther.firestore(), "treaties", "harbor"), {
+    partyCityIds: ["city1", "city2"],
+    status: "active",
+    lastActionCityId: "city2",
+    updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(getDoc(doc(treatyVisitor.firestore(), "treaties", "harbor")));
+  await assertSucceeds(setDoc(doc(treatyOther.firestore(), "treaties", "harbor", "responses", "city2_1"), {
+    cityId: "city2",
+    revision: 1,
+    decision: "accept",
+    uid: "other",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "treaties", "harbor", "responses", "stolen"), {
+    cityId: "city2",
+    revision: 1,
+    decision: "accept",
+    uid: "visitor",
+  }));
+  await assertSucceeds(setDoc(doc(treatyOther.firestore(), "treaties", "harbor", "revisions", "2"), {
+    number: 2,
+    authorCityId: "city2",
+    authorUid: "other",
+    name: "Harbor Accord",
+    note: "Add grain",
+  }));
+  await assertSucceeds(updateDoc(doc(treatyOther.firestore(), "treaties", "harbor"), {
+    currentRevision: 2,
+    partyCityIds: ["city2"],
+    status: "pending",
+    lastActionCityId: "city2",
+    name: "Harbor Accord",
+    type: "trade",
+    nature: "Docks",
+    terms: "No tariff on grain",
+    purpose: "Keep trade moving",
+    open: false,
+    proposerCityId: "city1",
+    color: "#169C9C",
+    inviteeCityIds: ["city2"],
+    readerUids: ["friend", "other"],
+    partyOwnerUids: ["other"],
+  }));
+  await assertFails(getDoc(doc(treatyVisitor.firestore(), "treaties", "harbor")));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "league"), {
+    ...pendingTreaty,
+    name: "Open League",
+    open: true,
+    inviteeCityIds: [],
+    readerUids: ["friend"],
+    purpose: "A league for every city",
+  }));
+  await assertSucceeds(getDoc(doc(treatyOther.firestore(), "treaties", "league")));
+  await assertFails(getDoc(doc(treatyVisitor.firestore(), "treaties", "league")));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "threads", "dock"), {
+    title: "Dock hours",
+    body: "When do the lamps go out?",
+    imageUrls: [],
+    authorUid: "visitor",
+    authorName: "Visitor",
+    cityId: null,
+    treatyId: null,
+    replyCount: 0,
+  }));
+  await assertSucceeds(addDoc(collection(treatyFriend.firestore(), "threads", "dock", "replies"), {
+    body: "After the tide.",
+    imageUrls: [],
+    authorUid: "friend",
+    quoteExcerpt: "Visitor: When do the lamps go out?",
+  }));
+  await assertSucceeds(updateDoc(doc(treatyFriend.firestore(), "threads", "dock"), {
+    replyCount: 1,
+    lastActivityAt: Timestamp.now(),
+  }));
+  await assertFails(setDoc(doc(env.unauthenticatedContext().firestore(), "threads", "nope"), {
+    title: "No",
+    body: "No",
+    imageUrls: [],
+    authorUid: "visitor",
+    replyCount: 0,
+  }));
+  console.log("ok treaties and forum");
+
+  const clientTreaty = {
+    name: "Cedar Pact",
+    type: "alliance",
+    nature: "Share the harbor",
+    terms: "No tolls",
+    purpose: "Keep the cedar moving",
+    open: false,
+    status: "pending",
+    proposerCityId: "city1",
+    authorUid: "friend",
+    currentRevision: 1,
+    inviteeCityIds: ["city2"],
+    partyCityIds: ["city1"],
+    readerUids: ["friend", "other"],
+    partyOwnerUids: ["friend"],
+    color: "#169C9C",
+    lastActionCityId: "city1",
+  };
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "pact"), clientTreaty));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "treaties", "pact", "revisions", "1"), {
+    number: 1,
+    authorCityId: "city1",
+    name: "Cedar Pact",
+    note: "",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "pact", "revisions", "1"), {
+    number: 1,
+    authorCityId: "city1",
+    authorUid: "friend",
+    name: "Cedar Pact",
+    type: "alliance",
+    nature: "Share the harbor",
+    terms: "No tolls",
+    purpose: "Keep the cedar moving",
+    open: false,
+    inviteeCityIds: ["city2"],
+    note: "",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "pact", "responses", "city1_1"), {
+    cityId: "city1",
+    revision: 1,
+    decision: "accept",
+    uid: "friend",
+    note: "",
+  }));
+  await assertFails(setDoc(doc(treatyOther.firestore(), "treaties", "stolen"), {
+    ...clientTreaty,
+    authorUid: "other",
+    proposerCityId: "city1",
+    readerUids: ["other"],
+    partyOwnerUids: ["other"],
+    partyCityIds: ["city1"],
+    lastActionCityId: "city1",
+  }));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "factions", "city3"), {
+    name: "Listed Only",
+    slug: "listed-only",
+    ownerUids: ["visitor"],
+    colors: { primary: "#169C9C", secondary: "#FED83D" },
+  }));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "treaties", "listed"), {
+    ...clientTreaty,
+    name: "Listed Pact",
+    proposerCityId: "city3",
+    authorUid: "visitor",
+    inviteeCityIds: ["city2"],
+    partyCityIds: ["city3"],
+    readerUids: ["visitor", "other"],
+    partyOwnerUids: ["visitor"],
+    lastActionCityId: "city3",
+    purpose: "A pact from a listed owner",
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "factions", "sheriff-city"), {
+    name: "Sheriffburg",
+    slug: "sheriffburg",
+    ownerUids: ["charles"],
+    colors: { primary: "#169C9C", secondary: "#FED83D" },
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "faction_members", "charles_sheriff-city"), {
+    uid: "charles",
+    factionId: "sheriff-city",
+    role: "owner",
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "treaties", "admin-pact"), {
+    ...clientTreaty,
+    name: "Sheriff Pact",
+    proposerCityId: "sheriff-city",
+    authorUid: "charles",
+    inviteeCityIds: ["city1"],
+    partyCityIds: ["sheriff-city"],
+    readerUids: ["charles", "friend"],
+    partyOwnerUids: ["charles"],
+    lastActionCityId: "sheriff-city",
+    purpose: "An admin owner can propose",
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "treaties", "admin-pact", "revisions", "1"), {
+    number: 1,
+    authorCityId: "sheriff-city",
+    authorUid: "charles",
+    name: "Sheriff Pact",
+    note: "",
+  }));
+  await assertSucceeds(uploadString(ref(treatyFriend.storage(), "factions/city1/map.jpg"), "map", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(treatyOther.storage(), "factions/city1/map.jpg"), "nope", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertSucceeds(uploadString(ref(treatyFriend.storage(), "factions/city1/clip.mp4"), "video", "raw", {
+    contentType: "video/mp4",
+  }));
+  await assertSucceeds(uploadString(ref(treatyFriend.storage(), "posts/pact-post/clip.mp4"), "video", "raw", {
+    contentType: "video/mp4",
+  }));
+  await assertFails(getBytes(ref(env.unauthenticatedContext().storage(), "factions/city1/map.jpg")));
+  await assertSucceeds(getBytes(ref(treatyFriend.storage(), "factions/city1/map.jpg")));
+  await assertFails(getBytes(ref(env.unauthenticatedContext().storage(), "posts/pact-post/clip.mp4")));
+  await assertSucceeds(getBytes(ref(treatyOther.storage(), "posts/pact-post/clip.mp4")));
+  await assertFails(listAll(ref(env.unauthenticatedContext().storage(), "factions/city1")));
+  await assertFails(listAll(ref(treatyFriend.storage(), "factions/city1")));
+  await assertSucceeds(listAll(ref(treatySheriff.storage(), "factions/city1")));
+  await assertFails(listAll(ref(treatyFriend.storage(), "posts/pact-post")));
+  await assertSucceeds(listAll(ref(treatySheriff.storage(), "posts/pact-post")));
+  console.log("ok treaty create and city media");
 
   await env.cleanup();
   assert.ok(true);

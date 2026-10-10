@@ -1,5 +1,5 @@
-const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
-const VIDEO_MAX_BYTES = 80 * 1024 * 1024;
+const IMAGE_MAX_BYTES = 12 * 1024 * 1024;
+const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_EDGE = 1920;
 
 export function mediaKind(file: File): "image" | "video" | null {
@@ -27,13 +27,13 @@ export function assertMediaFile(file: File): void {
   const kind = mediaKind(file);
   if (kind === "image") {
     if (file.size >= IMAGE_MAX_BYTES) {
-      throw new Error("Images must be under 8 MB before upload.");
+      throw new Error("Images must be under 12 MB before upload.");
     }
     return;
   }
   if (kind === "video") {
     if (file.size >= VIDEO_MAX_BYTES) {
-      throw new Error("Videos must be under 80 MB.");
+      throw new Error("Videos must be under 100 MB.");
     }
     return;
   }

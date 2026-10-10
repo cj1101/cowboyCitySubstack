@@ -22,6 +22,12 @@ function toPin(id: string, data: Record<string, unknown>): MapPin {
     z: (data.z as number | null) ?? null,
     postId: (data.postId as string | null) ?? null,
     wikiEntryId: (data.wikiEntryId as string | null) ?? null,
+    wikiEntryIds: Array.isArray(data.wikiEntryIds)
+      ? (data.wikiEntryIds as string[])
+      : data.wikiEntryId
+        ? [data.wikiEntryId as string]
+        : [],
+    cityId: (data.cityId as string | null) ?? null,
     note: (data.note as string) || "",
   };
 }
@@ -64,6 +70,13 @@ export async function getRealmPins(): Promise<MapPin[]> {
 export async function addRealmPin(pin: Omit<MapPin, "id">): Promise<string> {
   const ref = await addDoc(collection(getClientDb(), "realm_map", "overview", "pins"), pin);
   return ref.id;
+}
+
+export async function updateRealmPin(
+  pinId: string,
+  patch: Partial<Omit<MapPin, "id">>
+): Promise<void> {
+  await updateDoc(doc(getClientDb(), "realm_map", "overview", "pins", pinId), patch);
 }
 
 export async function deleteRealmPin(pinId: string): Promise<void> {

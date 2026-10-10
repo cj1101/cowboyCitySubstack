@@ -37,7 +37,7 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
 
   return (
     <article className="glass-panel overflow-hidden" style={{ borderTop: `3px solid ${faction?.colors?.primary ?? "#169C9C"}` }}>
-      <div className="flex items-center gap-3 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3 min-w-0">
         {faction?.sigilUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={faction.sigilUrl} alt="" className="w-10 h-10 rounded-full border border-accent-gold object-cover" />
@@ -51,14 +51,14 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
             <Link href={faction ? `/cities/${faction.slug}` : "/cities"}>{faction?.name ?? "Unknown city"}</Link>
             {character?.name ? <span className="text-text-muted font-normal"> · {character.name}</span> : null}
           </p>
-          <p className="text-xs text-text-muted">
+          <p className="text-sm text-text-muted">
             {formatDate(post.createdAt)}
             {post.settlementYear ? ` · Year ${post.settlementYear}` : ""}
             {post.era ? ` · ${post.era}` : ""}
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          {post.pinned && <span className="text-[10px] font-bold text-accent-gold uppercase">Pinned</span>}
+          {post.pinned && <span className="text-xs font-bold text-accent-gold uppercase">Pinned</span>}
           <PostTypeBadge type={post.type} />
         </div>
       </div>

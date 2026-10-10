@@ -1,4 +1,5 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
+import "@fontsource/press-start-2p/latin-400.css";
 import { AuthProvider } from "@/components/auth/AuthProvider";
 import { FactionProvider } from "@/components/factions/FactionContext";
 import { MembershipGate } from "@/components/auth/MembershipGate";
@@ -8,6 +9,12 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Cowboy City & The Realm",
   description: "Private multimedia chronicle for the realm's city-states",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
@@ -21,7 +28,7 @@ export default function RootLayout({
         <AuthProvider>
           <FactionProvider>
             <NavBar />
-            <main className="pt-14 sm:pt-16">
+            <main className="app-main">
               <MembershipGate>{children}</MembershipGate>
             </main>
           </FactionProvider>

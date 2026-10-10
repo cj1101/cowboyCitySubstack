@@ -6,7 +6,8 @@ import { useEffect } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { useFactionContext } from "@/components/factions/FactionContext";
 import { FactionForm } from "@/components/factions/FactionForm";
-import { createFaction, isSlugTaken } from "@/lib/firestore/factions";
+import { withTimeout } from "@/lib/async";
+import { createFaction, isSlugTaken, updateFaction } from "@/lib/firestore/factions";
 import { uploadFactionImage } from "@/lib/firestore/storage";
 import type { FactionFormData } from "@/components/factions/FactionForm";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
@@ -25,36 +26,34 @@ export default function NewFactionPage() {
   const handleSubmit = async (data: FactionFormData) => {
     if (!user) throw new Error("You must be signed in");
 
-    if (await isSlugTaken(data.slug)) {
+    if (await withTimeout(isSlugTaken(data.slug), 8000)) {
       throw new Error("That slug is already taken. Choose another.");
     }
 
-    const faction = await createFaction(user.uid, {
+    const faction = await withTimeout(createFaction(user.uid, {
       name: data.name,
       slug: data.slug,
       colors: data.colors,
       bio: data.bio,
       description: data.bio,
       lore: data.lore,
-    });
+    }), 15000);
 
-    let bannerUrl: string | undefined;
-    let sigilUrl: string | undefined;
-
-    if (data.bannerFile) {
-      bannerUrl = await uploadFactionImage(faction.id, data.bannerFile, "banner");
-    }
-    if (data.sigilFile) {
-      sigilUrl = await uploadFactionImage(faction.id, data.sigilFile, "sigil");
-    }
-
-    if (bannerUrl || sigilUrl) {
-      const { updateFaction } = await import("@/lib/firestore/factions");
-      await updateFaction(faction.id, { bannerUrl, sigilUrl });
+    let uploadNote = "";
+    try {
+      const [bannerUrl, sigilUrl] = await withTimeout(Promise.all([
+        data.bannerFile ? uploadFactionImage(faction.id, data.bannerFile, "banner") : Promise.resolve(undefined),
+        data.sigilFile ? uploadFactionImage(faction.id, data.sigilFile, "sigil") : Promise.resolve(undefined),
+      ]), 20000);
+      if (bannerUrl || sigilUrl) {
+        await withTimeout(updateFaction(faction.id, { bannerUrl, sigilUrl }), 8000);
+      }
+    } catch {
+      uploadNote = `?upload=failed`;
     }
 
-    await refresh();
-    router.push(`/cities/${data.slug}/edit`);
+    void refresh();
+    router.push(`/cities/${data.slug}${uploadNote}`);
   };
 
   if (authLoading) {

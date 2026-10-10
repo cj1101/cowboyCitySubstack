@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import Image from "next/image";
+import { StoredImage } from "@/components/media/StoredImage";
 
 interface BuildCarouselProps {
   images: string[];
@@ -24,13 +24,11 @@ export function BuildCarousel({ images, title }: BuildCarouselProps) {
   return (
     <div className="relative w-full rounded-lg overflow-hidden border border-primary-brown bg-darker-brown">
       <div className="relative aspect-video w-full">
-        <Image
+        <StoredImage
           src={images[index]}
           alt={title ? `${title} — image ${index + 1}` : `Build image ${index + 1}`}
           fill
           className="object-cover"
-          sizes="(max-width: 768px) 100vw, 720px"
-          unoptimized
         />
       </div>
 

@@ -1,12 +1,19 @@
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { getClientStorage } from "@/lib/firebase";
+import { asUploadError } from "@/lib/images";
 import type { PostMedia } from "@/lib/types";
 import { assertMediaFile, captureVideoThumbnail, compressImage, mediaContentType, mediaKind } from "@/lib/storage/media";
 
 async function uploadBlob(path: string, data: Blob, contentType: string): Promise<string> {
-  const storageRef = ref(getClientStorage(), path);
-  await uploadBytes(storageRef, data, { contentType });
-  return getDownloadURL(storageRef);
+  try {
+    const storageRef = ref(getClientStorage(), path);
+    await uploadBytes(storageRef, data, { contentType });
+    const url = await getDownloadURL(storageRef);
+    if (!url) throw new Error("empty download url");
+    return url;
+  } catch (error) {
+    throw asUploadError(error);
+  }
 }
 
 export async function uploadPostImage(postId: string, file: File, index: number): Promise<string> {
@@ -63,6 +70,12 @@ export async function uploadUserAvatar(uid: string, file: File): Promise<string>
   assertMediaFile(file);
   const prepared = await compressImage(file);
   return uploadBlob(`users/${uid}/avatar.jpg`, prepared, "image/jpeg");
+}
+
+export async function uploadThreadImage(threadId: string, file: File, index: number): Promise<string> {
+  const prepared = await compressImage(file);
+  const path = `threads/${threadId}/${Date.now()}_${index}.jpg`;
+  return uploadBlob(path, prepared, prepared.type || "image/jpeg");
 }
 
 export async function uploadMapImage(path: string, file: File): Promise<string> {

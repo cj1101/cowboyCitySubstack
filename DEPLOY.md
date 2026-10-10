@@ -5,16 +5,14 @@ The primary host is **Vercel**. Firebase Auth, Firestore, and Storage stay on th
 ## 1. Firebase, before the first visit
 
 1. Firebase Console → Authentication → Sign-in method → enable **Email/Password**.
-2. Root sheriffs are `charlie@suarezhouse.net` and `cjtheswimmer1101@gmail.com` in both `rootAdminEmails()` (`firestore.rules`) and `isRootAdmin()` (`storage.rules`). Deploy:
+2. Root sheriffs are `charlie@suarezhouse.net` and `cjtheswimmer1101@gmail.com` in both `rootAdminEmails()` (`firestore.rules`) and `isRootAdmin()` (`storage.rules`). Storage is the bucket `cowboycityrealm.firebasestorage.app` in `us-east1`. It was created in production mode, so every upload and download is denied until `storage.rules` is released onto that bucket. `firebase.json` and `.firebaserc` pin the `media` target to that bucket. Deploy:
 
    ```bash
-   npm install -g firebase-tools
-   firebase login
-   firebase use cowboycityrealm
-   firebase deploy --only firestore,storage
+   npx firebase login
+   npx firebase deploy --only firestore:rules,firestore:indexes,storage --project cowboycityrealm
    ```
 
-   That publishes `firestore.rules`, `firestore.indexes.json`, and `storage.rules`.
+   That publishes `firestore.rules`, `firestore.indexes.json`, and `storage.rules` onto `cowboycityrealm.firebasestorage.app`. The client must use `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=cowboycityrealm.firebasestorage.app` on Vercel preview and production. Redeploy the site after changing that variable so the value is baked into the client bundle.
 
 3. After Vercel assigns a URL, add it under Authentication → Settings → **Authorized domains**. Add a custom domain too if you attach one. Local `localhost` is already allowed.
 

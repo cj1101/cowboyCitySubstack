@@ -18,6 +18,8 @@ import {
 import { uploadPostGallery } from "@/lib/storage/uploads";
 import type { Character, Faction, Post, PostStatus, PostType } from "@/lib/types";
 import { POST_TYPES, POST_TYPE_LABELS } from "@/lib/types";
+import { CameraRollInput } from "@/components/media/CameraRollInput";
+import { actionError, withTimeout } from "@/lib/async";
 
 export default function NewPostPage() {
   const { user, profile, loading: authLoading } = useAuth();
@@ -82,7 +84,7 @@ export default function NewPostPage() {
     return recent.filter((post) => !q || post.title.toLowerCase().includes(q)).slice(0, 8);
   }, [recent, refQuery]);
 
-  const addFiles = useCallback((list: FileList | null) => {
+  const addFiles = useCallback((list: FileList | File[] | null) => {
     const next = Array.from(list ?? []);
     if (next.length === 0) return;
     setFiles((current) => [...current, ...next].slice(0, 10));
@@ -106,7 +108,7 @@ export default function NewPostPage() {
     setError(null);
     try {
       const year = settlementYear ? Number(settlementYear) : null;
-      const postId = await createPost(
+      const postId = await withTimeout(createPost(
         {
           type,
           factionId,
@@ -126,13 +128,14 @@ export default function NewPostPage() {
           spoiler: spoiler || Boolean(contentWarning.trim()),
         },
         user.uid
-      );
+      ), 15000);
       if (files.length > 0) {
-        const media = await uploadPostGallery(postId, files);
-        await updatePostMedia(postId, media);
+        const media = await withTimeout(uploadPostGallery(postId, files), 60000);
+        await withTimeout(updatePostMedia(postId, media), 10000);
       }
+      router.push(status === "published" ? `/posts/${postId}` : "/drafts");
       if (status === "published") {
-        await fanOutNewPost({
+        void fanOutNewPost({
           id: postId,
           title: title.trim(),
           body,
@@ -141,13 +144,11 @@ export default function NewPostPage() {
           referencedPostIds: referenced,
           authorUid: user.uid,
         });
-        router.push(`/posts/${postId}`);
-      } else {
-        router.push("/drafts");
       }
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : "Failed to save the post.");
+      setError(actionError(err, "Failed to save the post."));
+    } finally {
       setSubmitting(false);
     }
   };
@@ -238,14 +239,14 @@ export default function NewPostPage() {
           </div>
           <div>
             <label className="form-label">Photos and videos</label>
-            <input type="file" accept="image/*,video/*" multiple className="form-input" onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+            <CameraRollInput accept="image/*,video/*" label="Choose from camera roll" onFiles={addFiles} />
             <p className="text-xs text-text-muted mt-1">Up to 10 items. Images are compressed. Videos stay under 80 MB and get a thumbnail.</p>
             {files.length > 0 && (
               <ul className="mt-3 space-y-1 text-sm">
                 {files.map((file, index) => (
                   <li key={`${file.name}-${index}`} className="flex justify-between gap-2">
-                    <span>{file.type.startsWith("video/") || /\.(mp4|webm|mov|m4v)$/i.test(file.name) ? "Video" : "Photo"} · {file.name}</span>
-                    <button type="button" className="text-accent-gold" onClick={() => {
+                    <span className="min-w-0 break-all">{file.type.startsWith("video/") || /\.(mp4|webm|mov|m4v)$/i.test(file.name) ? "Video" : "Photo"} · {file.name}</span>
+                    <button type="button" className="text-accent-gold shrink-0 min-h-11" onClick={() => {
                       setFiles((current) => current.filter((_, i) => i !== index));
                     }}>Remove</button>
                   </li>
@@ -304,7 +305,7 @@ export default function NewPostPage() {
             </label>
           )}
           <div className="flex flex-wrap gap-3">
-            <button type="submit" className="btn" disabled={submitting}>Publish</button>
+            <button type="submit" className="btn" disabled={submitting} aria-busy={submitting}>{submitting ? "Publishing…" : "Publish"}</button>
             <button type="button" className="btn btn-secondary" disabled={submitting} onClick={() => publish("draft")}>Save draft</button>
             <button type="button" className="btn btn-secondary" disabled={submitting || !scheduleAt} onClick={() => publish("scheduled")}>Schedule</button>
           </div>
