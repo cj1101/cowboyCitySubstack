@@ -1,25 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
 import { getAllFactions } from "@/lib/firestore/factions";
 import { TREATY_TYPE_LABELS } from "@/lib/treaties/machine";
-import { actionError, withTimeout } from "@/lib/async";
-import { LoadNotice } from "@/components/ui/LoadNotice";
+import { TreatyBadge } from "@/components/treaties/TreatyBadge";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 import type { Faction } from "@/lib/types";
+import { actionError, withTimeout } from "@/lib/async";
 
 export default function TreatiesPage() {
   const [treaties, setTreaties] = useState<StoredTreaty[]>([]);
   const [cities, setCities] = useState<Faction[]>([]);
-  const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false;
-    setError("");
     setLoading(true);
+    setError("");
     withTimeout(Promise.all([listActiveTreaties(), getAllFactions()]))
       .then(([items, factions]) => {
         if (cancelled) return;
@@ -37,6 +37,11 @@ export default function TreatiesPage() {
     };
   }, []);
 
+  useEffect(() => {
+    const cancel = load();
+    return cancel;
+  }, [load]);
+
   const nameOf = (id: string) => cities.find((city) => city.id === id)?.name || "City";
 
   return (
@@ -52,22 +57,32 @@ export default function TreatiesPage() {
             <Link href="/treaties/new" className="btn text-sm px-4 py-2 min-h-11">Propose</Link>
           </div>
         </div>
-        <LoadNotice message={error} onRetry={() => window.location.reload()} />
-        {loading && !error ? <p className="text-text-muted">Loading treaties…</p> : null}
+        {loading && <p className="text-text-muted" role="status">Loading treaties…</p>}
+        {error && (
+          <p className="text-sm font-bold" role="alert">
+            {error}{" "}
+            <button type="button" className="btn btn-secondary text-sm px-3 py-1.5 min-h-11" onClick={load} disabled={loading}>
+              {loading ? "Loading…" : "Try again"}
+            </button>
+          </p>
+        )}
         {!loading && !error && treaties.length === 0 ? (
           <p className="text-text-muted">No active treaties yet.</p>
-        ) : (
-          treaties.map((treaty) => (
+        ) : null}
+        {!loading && !error && treaties.map((treaty) => (
             <article key={treaty.id} className="glass-panel p-5">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-block w-3 h-3 rounded-full" style={{ background: treaty.color }} />
                 <Link href={`/treaties/${treaty.id}`} className="text-xl font-bold text-accent-gold">{treaty.name}</Link>
+                <TreatyBadge status={treaty.status} expiresOn={treaty.expiresOn} />
               </div>
-              <p className="text-sm text-text-muted mt-1">{TREATY_TYPE_LABELS[treaty.type]} · {treaty.partyCityIds.map(nameOf).join(", ")}</p>
+              <p className="text-sm text-text-muted mt-1">
+                {TREATY_TYPE_LABELS[treaty.type]} · {treaty.partyCityIds.map(nameOf).join(", ")}
+                {treaty.expiresOn ? ` · expires ${treaty.expiresOn}` : ""}
+              </p>
               <p className="mt-2">{treaty.purpose}</p>
             </article>
-          ))
-        )}
+        ))}
       </div>
     </div>
   );

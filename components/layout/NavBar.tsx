@@ -7,6 +7,7 @@ import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { RealmWordmark } from "@/components/brand/RealmWordmark";
 import { PersonName } from "@/components/profile/PersonName";
+import { SearchBox } from "@/components/search/SearchBox";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
 import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
@@ -122,11 +123,12 @@ export function NavBar() {
 
         {user && member && (
           <div className="hidden md:flex items-center gap-4 min-w-0">
-            {NAV_LINKS.filter((link) => link.href !== "/").map((link) => (
+            {NAV_LINKS.filter((link) => link.href !== "/" && link.href !== "/search").map((link) => (
               <Link key={link.href} href={link.href} className={navClass(link.href)}>
                 {link.label}
               </Link>
             ))}
+            <SearchBox />
             {sheriff && (
               <Link href="/sheriff" className="text-accent-gold text-sm hover:text-accent-gold-hover font-bold whitespace-nowrap">
                 Sheriff
@@ -191,6 +193,7 @@ export function NavBar() {
         <div id="mobile-nav" className="mobile-nav-drawer md:hidden">
           {user && member ? (
             <div className="space-y-1">
+              <SearchBox className="flex items-center gap-2 mb-3" />
               {NAV_LINKS.map((link) => (
                 <Link
                   key={link.href}

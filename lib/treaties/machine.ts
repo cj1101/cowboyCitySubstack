@@ -1,7 +1,11 @@
 export const TREATY_TYPES = ["alliance", "trade", "non-aggression", "other"] as const;
 export type TreatyType = (typeof TREATY_TYPES)[number];
-export type TreatyDecision = "accept" | "decline" | "counter" | "withdraw";
-export type TreatyStatus = "pending" | "active";
+export type TreatyDecision = "accept" | "decline" | "counter" | "withdraw" | "break";
+export type TreatyStatus = "pending" | "active" | "broken";
+export type TreatyRevisionKind = "proposal" | "counter" | "renewal";
+
+/** Active treaties inside this window show an "Expiring soon" badge. */
+export const EXPIRING_SOON_DAYS = 14;
 
 export const TREATY_TYPE_LABELS: Record<TreatyType, string> = {
   alliance: "Alliance",
@@ -39,6 +43,11 @@ export interface TreatyRevision {
   inviteeCityIds: string[];
   authorCityId: string;
   note: string;
+  expiresOn: string;
+  renewOn: string;
+  kind: TreatyRevisionKind;
+  /** Milliseconds, when Firestore stored a timestamp. Display only. */
+  at?: number;
 }
 
 export interface TreatyResponse {
@@ -46,6 +55,8 @@ export interface TreatyResponse {
   revision: number;
   decision: TreatyDecision;
   note?: string;
+  /** Milliseconds, when Firestore stored a timestamp. Display only. */
+  at?: number;
 }
 
 export interface TreatyDraft {
@@ -57,6 +68,8 @@ export interface TreatyDraft {
   open: boolean;
   inviteeCityIds: string[];
   proposerCityId: string;
+  expiresOn?: string;
+  renewOn?: string;
 }
 
 export interface TreatyRecord {
@@ -72,6 +85,36 @@ export interface TreatyAccess {
 
 function unique(ids: string[]): string[] {
   return [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+}
+
+export function parseTreatyDate(value: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+export function cleanDate(value: string | undefined, label: string): string {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "";
+  if (!parseTreatyDate(trimmed)) throw new TreatyError(`The ${label} date should look like YYYY-MM-DD.`);
+  return trimmed;
+}
+
+export type ExpiryBadge = "expiring" | "expired";
+
+/** Badge for an active treaty. `now` is injectable so tests can pin the day. */
+export function expiryBadge(expiresOn: string, now = new Date()): ExpiryBadge | null {
+  const date = parseTreatyDate(expiresOn);
+  if (!date) return null;
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const delta = date.getTime() - today;
+  if (delta < 0) return "expired";
+  if (delta <= EXPIRING_SOON_DAYS * 24 * 60 * 60 * 1000) return "expiring";
+  return null;
 }
 
 function assertText(draft: { name: string; type: TreatyType; nature: string; terms: string; purpose: string }) {
@@ -99,20 +142,32 @@ export function responsesForRevision(record: TreatyRecord, revision: number): Tr
   return [...latest.values()];
 }
 
-/** Cities that ratified the current revision. The revision's author counts. */
+/**
+ * Cities that ratified the current revision. The revision's author counts.
+ * Older saves stored the author's own revision as decision "counter".
+ */
 export function ratifiedCityIds(record: TreatyRecord): string[] {
-  const revision = currentRevision(record).number;
-  return responsesForRevision(record, revision)
-    .filter((response) => response.decision === "accept")
+  const revision = currentRevision(record);
+  return responsesForRevision(record, revision.number)
+    .filter(
+      (response) =>
+        response.decision === "accept" ||
+        (response.decision === "counter" && response.cityId === revision.authorCityId)
+    )
     .map((response) => response.cityId);
 }
 
 export function treatyStatus(record: TreatyRecord): TreatyStatus {
-  return ratifiedCityIds(record).length >= 2 ? "active" : "pending";
+  const parties = ratifiedCityIds(record);
+  const revision = currentRevision(record).number;
+  const broke = responsesForRevision(record, revision).some((response) => response.decision === "break");
+  if (broke && parties.length < 2) return "broken";
+  return parties.length >= 2 ? "active" : "pending";
 }
 
 export function isPublicTreaty(record: TreatyRecord): boolean {
-  return treatyStatus(record) === "active";
+  const status = treatyStatus(record);
+  return status === "active" || status === "broken";
 }
 
 export function canCityAct(record: TreatyRecord, cityId: string): boolean {
@@ -156,6 +211,9 @@ export function proposeTreaty(draft: TreatyDraft): TreatyRecord {
         inviteeCityIds,
         authorCityId: draft.proposerCityId,
         note: "",
+        expiresOn: cleanDate(draft.expiresOn, "expiry"),
+        renewOn: cleanDate(draft.renewOn, "renewal"),
+        kind: "proposal",
       },
     ],
     responses: [{ cityId: draft.proposerCityId, revision: 1, decision: "accept" }],
@@ -168,6 +226,7 @@ function withResponse(
   decision: TreatyDecision,
   note?: string
 ): TreatyRecord {
+  if (treatyStatus(record) === "broken") throw new TreatyError("This treaty is broken.");
   const revision = currentRevision(record).number;
   const responses = record.responses.filter(
     (response) => !(response.cityId === cityId && response.revision === revision)
@@ -177,6 +236,7 @@ function withResponse(
 }
 
 export function acceptTreaty(record: TreatyRecord, cityId: string): TreatyRecord {
+  if (treatyStatus(record) === "broken") throw new TreatyError("This treaty is broken.");
   if (!canCityAct(record, cityId)) throw new TreatyError("That city cannot ratify this treaty.");
   return withResponse(record, cityId, "accept");
 }
@@ -201,6 +261,7 @@ export function counterTreaty(
   cityId: string,
   changes: Partial<Omit<TreatyDraft, "proposerCityId">> & { note: string }
 ): TreatyRecord {
+  if (treatyStatus(record) === "broken") throw new TreatyError("This treaty is broken.");
   if (!canCityAct(record, cityId)) throw new TreatyError("That city cannot counter-propose.");
   if (!changes.note?.trim()) throw new TreatyError("Describe the requested changes.");
   const previous = currentRevision(record);
@@ -220,6 +281,9 @@ export function counterTreaty(
     inviteeCityIds,
     authorCityId: cityId,
     note: changes.note.trim(),
+    expiresOn: changes.expiresOn !== undefined ? cleanDate(changes.expiresOn, "expiry") : previous.expiresOn,
+    renewOn: changes.renewOn !== undefined ? cleanDate(changes.renewOn, "renewal") : previous.renewOn,
+    kind: "counter",
   };
   assertText(revision);
   return {
@@ -230,6 +294,61 @@ export function counterTreaty(
       { cityId, revision: nextNumber, decision: "accept", note: revision.note },
     ],
   };
+}
+
+/** A member proposes new dates. Every other member must ratify the new revision. */
+export function renewTreaty(
+  record: TreatyRecord,
+  cityId: string,
+  input: { expiresOn?: string; renewOn?: string; note: string }
+): TreatyRecord {
+  if (treatyStatus(record) !== "active") throw new TreatyError("Only an active treaty can be renewed.");
+  if (!ratifiedCityIds(record).includes(cityId)) throw new TreatyError("Only a member can renew this treaty.");
+  const note = input.note?.trim() || "";
+  if (!note) throw new TreatyError("Add a note for the cities ratifying this renewal.");
+  if (note.length > 500) throw new TreatyError("Keep the renewal note under 500 characters.");
+  const expiresOn = cleanDate(input.expiresOn, "expiry");
+  const renewOn = cleanDate(input.renewOn, "renewal");
+  if (!expiresOn && !renewOn) throw new TreatyError("Set an expiry date or a renewal date.");
+  const previous = currentRevision(record);
+  const nextNumber = previous.number + 1;
+  const inviteeCityIds = unique([
+    ...previous.inviteeCityIds,
+    ...(cityId === record.proposerCityId ? [] : [cityId]),
+  ]).filter((id) => id !== record.proposerCityId);
+  const revision: TreatyRevision = {
+    number: nextNumber,
+    name: previous.name,
+    type: previous.type,
+    nature: previous.nature,
+    terms: previous.terms,
+    purpose: previous.purpose,
+    open: previous.open,
+    inviteeCityIds,
+    authorCityId: cityId,
+    note,
+    expiresOn,
+    renewOn,
+    kind: "renewal",
+  };
+  assertText(revision);
+  return {
+    proposerCityId: record.proposerCityId,
+    revisions: [...record.revisions, revision],
+    responses: [...record.responses, { cityId, revision: nextNumber, decision: "accept", note }],
+  };
+}
+
+/** A member publicly leaves. Below two members, the treaty is broken and leaves the map. */
+export function breakTreaty(record: TreatyRecord, cityId: string, note: string): TreatyRecord {
+  if (treatyStatus(record) !== "active") throw new TreatyError("Only an active treaty can be broken.");
+  if (!ratifiedCityIds(record).includes(cityId)) {
+    throw new TreatyError("Only a member of this treaty can break it.");
+  }
+  const trimmed = note.trim();
+  if (!trimmed) throw new TreatyError("Say why this treaty is breaking.");
+  if (trimmed.length > 500) throw new TreatyError("Keep the break note under 500 characters.");
+  return withResponse(record, cityId, "break", trimmed);
 }
 
 export function colorForTreatyName(name: string): string {

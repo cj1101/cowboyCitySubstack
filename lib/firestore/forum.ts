@@ -15,6 +15,7 @@ import {
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
 import { uploadThreadImage } from "@/lib/storage/uploads";
+import { searchTokensFrom } from "@/lib/search/tokens";
 
 export interface ForumThread {
   id: string;
@@ -101,6 +102,7 @@ export async function createThread(input: {
     cityId: input.cityId,
     treatyId: input.treatyId,
     replyCount: 0,
+    searchTokens: searchTokensFrom({ title: input.title, body: input.body }),
     lastActivityAt: serverTimestamp(),
     createdAt: serverTimestamp(),
   });

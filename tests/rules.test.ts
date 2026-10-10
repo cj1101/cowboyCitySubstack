@@ -16,6 +16,7 @@ import {
   orderBy,
   query,
   setDoc,
+  where,
   Timestamp,
   updateDoc,
 } from "firebase/firestore";
@@ -766,6 +767,108 @@ async function main() {
     category: "banner",
   }));
   console.log("ok borders and pin categories");
+
+  await env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "treaties", "pact-live"), {
+      ...clientTreaty,
+      name: "Live Pact",
+      status: "active",
+      partyCityIds: ["city1", "city2"],
+      partyOwnerUids: ["friend", "other"],
+      readerUids: ["friend", "other"],
+      purpose: "A pact both cities signed",
+    });
+    await setDoc(doc(context.firestore(), "posts", "legacy-search"), {
+      type: "lore",
+      factionId: "city1",
+      title: "Legacy harbor",
+      body: "Before keywords",
+      authorUid: "friend",
+      cityIds: ["city1"],
+      status: "published",
+    });
+  });
+  await assertSucceeds(updateDoc(doc(treatyOther.firestore(), "treaties", "pact-live"), {
+    partyCityIds: ["city1"],
+    status: "broken",
+    updatedAt: Timestamp.now(),
+    lastActionCityId: "city2",
+    partyOwnerUids: ["friend"],
+    readerUids: ["friend", "other"],
+    brokenByCityId: "city2",
+    breakNote: "The harbor dues changed.",
+  }));
+  await assertSucceeds(getDoc(doc(treatyVisitor.firestore(), "treaties", "pact-live")));
+  await assertSucceeds(setDoc(doc(treatyOther.firestore(), "treaties", "pact-live", "responses", "city2_1"), {
+    cityId: "city2",
+    revision: 1,
+    decision: "break",
+    uid: "other",
+    note: "The harbor dues changed.",
+  }));
+  await assertFails(updateDoc(doc(treatyVisitor.firestore(), "treaties", "pact-live"), {
+    partyCityIds: [],
+    status: "broken",
+    updatedAt: Timestamp.now(),
+    lastActionCityId: "city2",
+    brokenByCityId: "city2",
+    breakNote: "Not my treaty.",
+  }));
+  await assertSucceeds(getDocs(query(
+    collection(treatyVisitor.firestore(), "treaties"),
+    where("status", "==", "broken"),
+    where("searchTokens", "array-contains", "pact")
+  )));
+  await env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "treaties", "renew-me"), {
+      ...clientTreaty,
+      name: "Renew Me",
+      status: "active",
+      partyCityIds: ["city1", "city2"],
+      currentRevision: 1,
+      inviteeCityIds: ["city2"],
+      readerUids: ["friend", "other"],
+      partyOwnerUids: ["friend", "other"],
+      purpose: "Needs a new season",
+    });
+  });
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "renew-me", "revisions", "2"), {
+    number: 2,
+    authorCityId: "city1",
+    authorUid: "friend",
+    name: "Renew Me",
+    note: "Renew for another year.",
+    kind: "renewal",
+    expiresOn: "2027-01-01",
+  }));
+  await assertSucceeds(updateDoc(doc(treatyFriend.firestore(), "treaties", "renew-me"), {
+    currentRevision: 2,
+    partyCityIds: ["city1"],
+    status: "pending",
+    lastActionCityId: "city1",
+    name: "Renew Me",
+    type: "alliance",
+    nature: "Share the harbor",
+    terms: "No tolls",
+    purpose: "Needs a new season",
+    open: false,
+    proposerCityId: "city1",
+    color: "#169C9C",
+    inviteeCityIds: ["city2"],
+    readerUids: ["friend", "other"],
+    partyOwnerUids: ["friend"],
+    expiresOn: "2027-01-01",
+    renewOn: "2026-12-01",
+    searchTokens: ["renew", "ren", "season"],
+  }));
+  await assertFails(getDoc(doc(treatyVisitor.firestore(), "treaties", "renew-me")));
+  await assertSucceeds(updateDoc(doc(treatySheriff.firestore(), "posts", "legacy-search"), {
+    searchTokens: ["legacy", "leg", "harbor"],
+  }));
+  await assertFails(updateDoc(doc(treatyOther.firestore(), "posts", "legacy-search"), {
+    searchTokens: ["nope"],
+  }));
+  console.log("ok treaty break, renewal, and search tokens");
 
   await env.cleanup();
   assert.ok(true);
