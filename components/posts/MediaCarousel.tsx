@@ -49,7 +49,7 @@ export function MediaCarousel({ media, title }: MediaCarouselProps) {
           <button type="button" onClick={goNext} className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-glass-bg/90 border border-accent-gold text-accent-gold font-bold" aria-label="Next">
             ›
           </button>
-          <span className="absolute top-3 right-3 text-xs bg-glass-bg/90 px-2 py-1 rounded border border-accent-gold/30">
+          <span className="absolute top-3 right-3 text-xs bg-glass-bg/90 px-2 py-1 rounded border border-primary-brown">
             {index + 1} / {media.length}
           </span>
         </>

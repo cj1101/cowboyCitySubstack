@@ -36,13 +36,13 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
   const others = tagged.filter((city) => city.id !== post.factionId);
 
   return (
-    <article className="glass-panel overflow-hidden" style={{ borderTop: `3px solid ${faction?.colors?.primary ?? "#d4af37"}` }}>
+    <article className="glass-panel overflow-hidden" style={{ borderTop: `3px solid ${faction?.colors?.primary ?? "#169C9C"}` }}>
       <div className="flex items-center gap-3 px-4 py-3">
         {faction?.sigilUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={faction.sigilUrl} alt="" className="w-10 h-10 rounded-full border border-accent-gold object-cover" />
         ) : (
-          <div className="w-10 h-10 rounded-full border border-accent-gold flex items-center justify-center font-bold" style={{ background: faction?.colors?.primary ?? "#5a3e2b" }}>
+          <div className="w-10 h-10 rounded-full border border-primary-brown flex items-center justify-center font-bold text-on-yellow" style={{ background: faction?.colors?.primary ?? "#169C9C" }}>
             {(faction?.name || "?").charAt(0)}
           </div>
         )}
@@ -70,7 +70,7 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
           </div>
         )}
         {hidden && (
-          <button type="button" className="absolute inset-0 flex items-center justify-center bg-darker-brown/50" onClick={() => setRevealed(true)}>
+          <button type="button" className="absolute inset-0 flex items-center justify-center bg-white/80" onClick={() => setRevealed(true)}>
             <span className="glass-panel px-4 py-3 text-sm">
               {post.contentWarning ? `Content warning: ${post.contentWarning}` : "Spoiler"} — show
             </span>

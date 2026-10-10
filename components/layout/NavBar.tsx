@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
@@ -22,6 +22,11 @@ const NAV_LINKS = [
 export function NavBar() {
   const { user, profile, loading, logout } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
+  const navClass = (href: string) =>
+    pathname === href || pathname.startsWith(`${href}/`)
+      ? "text-sm font-bold text-accent-gold whitespace-nowrap"
+      : "text-text-muted text-sm hover:text-accent-gold whitespace-nowrap";
   const [menuOpen, setMenuOpen] = useState(false);
   const [notes, setNotes] = useState(0);
   const [dms, setDms] = useState(0);
@@ -64,7 +69,7 @@ export function NavBar() {
   if (loading) {
     return (
       <nav className="hud">
-        <span className="hud-title">Cowboy City Lore</span>
+        <span className="hud-title">Cowboy City & The Realm</span>
         <span className="text-text-muted text-sm">Loading…</span>
       </nav>
     );
@@ -76,9 +81,9 @@ export function NavBar() {
         <div className="flex items-center gap-3 sm:gap-6 min-w-0">
           <Link
             href="/"
-            className="hud-title hover:text-accent-gold-hover transition-colors truncate"
+            className="hud-title hover:text-accent-gold transition-colors truncate"
           >
-            Cowboy City Lore
+            Cowboy City & The Realm
           </Link>
           {user && member && (
             <div className="hidden md:flex items-center gap-4">
@@ -86,7 +91,7 @@ export function NavBar() {
                 <Link
                   key={link.href}
                   href={link.href}
-                  className="text-text-muted text-sm hover:text-accent-gold whitespace-nowrap"
+                  className={navClass(link.href)}
                 >
                   {link.label}
                 </Link>
@@ -161,7 +166,7 @@ export function NavBar() {
               <Link
                 key={link.href}
                 href={link.href}
-                className="mobile-nav-link"
+                className={`mobile-nav-link ${pathname === link.href || pathname.startsWith(`${link.href}/`) ? "text-accent-gold font-bold" : ""}`}
                 onClick={() => setMenuOpen(false)}
               >
                 {link.label}
@@ -184,7 +189,7 @@ export function NavBar() {
               New Post
             </Link>
           </div>
-          <div className="sm:hidden pt-4 mt-4 border-t border-accent-gold/30">
+          <div className="sm:hidden pt-4 mt-4 border-t border-primary-brown">
             <p className="text-text-muted text-xs uppercase tracking-wide mb-2">Post as</p>
             <FactionSwitcher compact />
           </div>

@@ -128,7 +128,7 @@ export function MentionAutocomplete({
                 type="button"
                 className={`w-full text-left px-3 py-2 text-sm transition-colors ${
                   index === selectedIndex
-                    ? "bg-accent-gold text-darker-brown"
+                    ? "bg-accent-yellow text-on-yellow"
                     : "text-text-light hover:bg-primary-brown"
                 }`}
                 onMouseDown={(e) => {

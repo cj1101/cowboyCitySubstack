@@ -183,7 +183,7 @@ export default function NewPostPage() {
                   key={item}
                   type="button"
                   onClick={() => setType(item)}
-                  className={`p-3 rounded border text-left ${type === item ? "border-accent-gold bg-accent-gold/10" : "border-accent-gold/30"}`}
+                  className={`p-3 rounded border text-left ${type === item ? "border-accent-gold bg-accent-gold/10" : "border-primary-brown"}`}
                 >
                   <PostTypeBadge type={item} />
                   <span className="block text-xs text-text-muted mt-1">{POST_TYPE_LABELS[item]}</span>
@@ -216,7 +216,7 @@ export default function NewPostPage() {
             <p className="form-label">Tag other cities</p>
             <div className="flex flex-wrap gap-2">
               {allCities.filter((city) => city.id !== factionId).map((city) => (
-                <label key={city.id} className="text-sm flex items-center gap-2 border border-accent-gold/30 rounded px-2 py-1">
+                <label key={city.id} className="text-sm flex items-center gap-2 border border-primary-brown rounded px-2 py-1">
                   <input
                     type="checkbox"
                     checked={tagged.includes(city.id)}

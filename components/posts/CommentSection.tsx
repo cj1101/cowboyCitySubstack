@@ -46,7 +46,7 @@ export function CommentSection({ postId, postFactionId }: { postId: string; post
       <h2 className="text-xl font-bold text-accent-gold mb-3">Comments</h2>
       <div className="space-y-3">
         {replies.map((reply) => (
-          <article key={reply.id} className="border border-accent-gold/20 rounded p-3">
+          <article key={reply.id} className="border border-primary-brown rounded p-3">
             <p className="text-accent-gold text-sm font-bold">
               {names[reply.id] || "Citizen"}
               {reply.inCharacter === false ? <span className="text-text-muted font-normal"> · out of character</span> : null}

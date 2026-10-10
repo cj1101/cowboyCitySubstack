@@ -4,12 +4,12 @@ import type { PostType } from "@/lib/types";
 import { POST_TYPE_LABELS } from "@/lib/types";
 
 const TYPE_STYLES: Record<PostType, string> = {
-  announcement: "bg-accent-gold text-darker-brown",
-  build: "bg-primary-brown text-text-light border border-accent-gold",
-  lore: "bg-dark-brown text-accent-gold border border-accent-gold/50",
-  debate: "bg-danger/80 text-text-light",
-  event: "bg-accent-gold/20 text-accent-gold border border-accent-gold",
-  wiki: "bg-primary-brown/60 text-text-muted border border-text-muted/30",
+  announcement: "bg-accent-yellow text-on-yellow",
+  build: "bg-white text-accent-gold border border-primary-brown",
+  lore: "bg-dark-brown text-accent-gold border border-primary-brown",
+  debate: "bg-white text-ink border border-primary-brown",
+  event: "bg-white text-accent-gold border border-accent-cyan",
+  wiki: "bg-dark-brown text-text-muted border border-primary-brown",
 };
 
 interface PostTypeBadgeProps {

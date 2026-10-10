@@ -72,8 +72,8 @@ export function GlobalFeed() {
     return (
       <div className="wood-texture min-h-[calc(100vh-4rem)] flex flex-col items-center justify-center p-8">
         <div className="glass-panel p-12 text-center max-w-2xl w-full">
-          <h1 className="text-4xl md:text-5xl font-bold text-accent-gold mb-4 text-shadow">
-            Cowboy City Lore
+          <h1 className="text-4xl md:text-5xl font-bold text-ink mb-4">
+            Cowboy City & The Realm
           </h1>
           <p className="text-text-muted text-lg mb-8">
             A private chronicle of the realm&apos;s city-states. Ask to join, then a sheriff lets you in.

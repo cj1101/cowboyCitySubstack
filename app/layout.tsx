@@ -6,7 +6,7 @@ import { NavBar } from "@/components/layout/NavBar";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Cowboy City Lore",
+  title: "Cowboy City & The Realm",
   description: "Private multimedia chronicle for the realm's city-states",
 };
 
@@ -16,8 +16,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" style={{ backgroundColor: "#2a1a0f" }}>
-      <body className="antialiased" style={{ backgroundColor: "#2a1a0f", color: "#f5e6d3" }}>
+    <html lang="en" style={{ backgroundColor: "#f7f6f3" }}>
+      <body className="antialiased" style={{ backgroundColor: "#f7f6f3", color: "#3f3d39" }}>
         <AuthProvider>
           <FactionProvider>
             <NavBar />

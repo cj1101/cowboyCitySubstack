@@ -14,7 +14,7 @@ const STANCE_CONFIG: Record<
   },
   neutral: {
     label: "Neutral",
-    className: "bg-primary-brown/80 text-text-muted border-accent-gold/50",
+    className: "bg-primary-brown/80 text-text-muted border-primary-brown",
   },
 };
 
