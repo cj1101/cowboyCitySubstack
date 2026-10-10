@@ -92,22 +92,21 @@ Rules tests (Firestore and Storage emulators):
 npm run test:rules
 ```
 
-Enable Email/Password in Firebase Authentication before using production. Deploy rules and indexes when they change:
+Enable Email/Password in Firebase Authentication before using production. Storage uses `cowboycityrealm.firebasestorage.app` (`NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`). That bucket starts in production mode and denies every request until rules are released onto it. Deploy rules and indexes when they change:
 
 ```bash
-firebase login
-firebase use cowboycityrealm
-firebase deploy --only firestore,storage
+npx firebase login
+npx firebase deploy --only firestore:rules,firestore:indexes,storage --project cowboycityrealm
 ```
 
-`firebase deploy --only firestore` publishes `firestore.rules` and `firestore.indexes.json`. Storage rules deploy with the `storage` target.
+`firestore:rules` and `firestore:indexes` publish `firestore.rules` and `firestore.indexes.json`. `storage` releases `storage.rules` onto `cowboycityrealm.firebasestorage.app` (the `media` target in `.firebaserc`).
 
 ## Production on Vercel
 
 1. Import this GitHub repo in Vercel. Framework preset: Next.js. Root directory: the repo root.
 2. Add the seven `NEXT_PUBLIC_FIREBASE_*` variables. Redeploy after changing them so they are baked into the client bundle.
 3. In Firebase Console → Authentication → Settings → Authorized domains, add the Vercel domain (for example `your-project.vercel.app`) and any custom domain.
-4. `firebase deploy --only firestore,storage` when you can sign in to the Firebase CLI. Until that deploy, the site still has to live with the July rules. See the pull request for what those rules block.
+4. `npx firebase deploy --only firestore:rules,firestore:indexes,storage --project cowboycityrealm` when you can sign in to the Firebase CLI. Until that deploy, Firestore still has the July rules, and the Storage bucket denies every upload and download.
 5. Open the site and sign up. A root sheriff email can open `/sheriff` to suspend or remove members once the new rules are deployed.
 
 Step-by-step notes are in [DEPLOY.md](DEPLOY.md). An IONOS VPS with Node, PM2, and nginx remains an alternative there. It is not required.

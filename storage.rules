@@ -1,5 +1,8 @@
 rules_version = '2';
 
+// Released onto cowboycityrealm.firebasestorage.app (us-east1).
+// The bucket was created in production mode, which denies every request
+// until these rules are deployed. match /b/{bucket}/o applies to that bucket.
 service firebase.storage {
   match /b/{bucket}/o {
 
