@@ -488,6 +488,42 @@ body {
   line-height: 1.1rem;
 }
 
+.notice-count {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.15rem;
+  background: #fed83d;
+  color: #1c1917;
+  border: 2px solid #1c1917;
+  font-size: 0.65rem;
+  line-height: 0.85rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.notice-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 70;
+  width: min(22rem, calc(100vw - 1rem));
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+@media (max-width: 767px) {
+  .notice-panel {
+    position: fixed;
+    top: calc(var(--app-nav) + 0.5rem);
+    left: 0.75rem;
+    right: 0.75rem;
+    width: auto;
+  }
+}
+
 button,
 a,
 label,

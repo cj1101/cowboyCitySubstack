@@ -13,6 +13,7 @@ import {
   type Timestamp,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { notifyMany } from "@/lib/firestore/notifications";
 import { uploadThreadImage } from "@/lib/storage/uploads";
 
 export interface ForumThread {
@@ -133,6 +134,7 @@ export async function addReply(input: {
   authorName: string;
   quoteReplyId: string | null;
   quoteExcerpt: string;
+  quoteAuthorUid?: string | null;
   files: File[];
   replyCount: number;
 }): Promise<void> {
@@ -153,6 +155,14 @@ export async function addReply(input: {
   await updateDoc(doc(getClientDb(), "threads", input.threadId), {
     replyCount: input.replyCount + 1,
     lastActivityAt: serverTimestamp(),
+  });
+  const thread = await getThread(input.threadId);
+  const recipients = [thread?.authorUid, input.quoteAuthorUid].filter((id): id is string => Boolean(id));
+  await notifyMany(recipients, {
+    actorUid: input.authorUid,
+    type: "reply",
+    summary: `${input.authorName} replied in “${thread?.title || "a forum thread"}”`,
+    href: `/forum/${input.threadId}`,
   });
 }
 

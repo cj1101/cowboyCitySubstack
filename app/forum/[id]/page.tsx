@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { addReply, getThread, listReplies, type ForumReply, type ForumThread } from "@/lib/firestore/forum";
+import { EmojiReactionBar } from "@/components/reactions/EmojiReactionBar";
 import { StoredImage } from "@/components/media/StoredImage";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
 import { actionError, withTimeout } from "@/lib/async";
@@ -52,6 +53,7 @@ export default function ThreadPage() {
         authorName: profile?.displayName || "Member",
         quoteReplyId: quote?.id || null,
         quoteExcerpt: quote ? `${quote.authorName}: ${quote.body}` : "",
+        quoteAuthorUid: quote?.authorUid || null,
         files,
         replyCount: thread.replyCount,
       }), 20000);
@@ -92,6 +94,15 @@ export default function ThreadPage() {
             {reply.imageUrls.map((url) => (
               <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-80 max-w-full w-auto" />
             ))}
+            <EmojiReactionBar
+              target={{
+                kind: "reply",
+                threadId: thread.id,
+                replyId: reply.id,
+                authorUid: reply.authorUid,
+                title: thread.title,
+              }}
+            />
             {user && (
               <button type="button" className="text-sm text-accent-gold min-h-11 inline-flex items-center" onClick={() => setQuote(reply)}>Quote</button>
             )}

@@ -9,8 +9,10 @@ import { RealmMark } from "@/components/brand/RealmMark";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
 import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { notificationsQuery, toNotification } from "@/lib/firestore/notifications";
 import { subscribeConversations } from "@/lib/firestore/messages";
+import type { AppNotification } from "@/lib/types";
 
 const NAV_LINKS = [
   { href: "/", label: "Feed" },
@@ -45,7 +47,9 @@ export function NavBar() {
       ? "text-sm font-bold text-accent-gold whitespace-nowrap"
       : "text-text-muted text-sm hover:text-accent-gold whitespace-nowrap";
   const [menuOpen, setMenuOpen] = useState(false);
-  const [notes, setNotes] = useState(0);
+  const [notices, setNotices] = useState<AppNotification[]>([]);
+  const [noticesReady, setNoticesReady] = useState(false);
+  const [noticeError, setNoticeError] = useState("");
   const [dms, setDms] = useState(0);
   const member = !!user && canUseRealm(profile);
   const sheriff = isSheriff(profile, user?.email);
@@ -67,10 +71,25 @@ export function NavBar() {
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!user || !member) return;
-    const unsubNotes = onSnapshot(notificationsQuery(user.uid), (snap) => {
-      setNotes(snap.docs.map((d) => toNotification(d.id, d.data())).filter((item) => !item.read).length);
-    });
+    if (!user || !member) {
+      setNotices([]);
+      setNoticesReady(false);
+      setNoticeError("");
+      setDms(0);
+      return;
+    }
+    const unsubNotes = onSnapshot(
+      notificationsQuery(user.uid),
+      (snap) => {
+        setNotices(snap.docs.map((d) => toNotification(d.id, d.data())));
+        setNoticesReady(true);
+        setNoticeError("");
+      },
+      () => {
+        setNoticeError("Couldn't load notices.");
+        setNoticesReady(true);
+      }
+    );
     let reads: Record<string, number> = {};
     const unsubReads = onSnapshot(collection(getClientDb(), "users", user.uid, "reads"), (snap) => {
       reads = {};
@@ -135,19 +154,24 @@ export function NavBar() {
         )}
 
         <div className="flex items-center gap-2 shrink-0">
+          {user && member && (
+            <NotificationBell
+              uid={user.uid}
+              items={notices}
+              ready={noticesReady}
+              loadError={noticeError}
+              placement="header"
+              closeSignal={menuOpen}
+            />
+          )}
           <div className="hidden md:flex items-center gap-3">
             {user ? (
               <>
                 <FactionSwitcher />
                 {member && (
-                  <>
-                    <Link href="/messages" className="text-sm text-text-muted hover:text-accent-gold min-h-11 inline-flex items-center">
-                      Mail{dms > 0 ? ` (${dms})` : ""}
-                    </Link>
-                    <Link href="/notifications" className="text-sm text-text-muted hover:text-accent-gold min-h-11 inline-flex items-center">
-                      Notices{notes > 0 ? ` (${notes})` : ""}
-                    </Link>
-                  </>
+                  <Link href="/messages" className="text-sm text-text-muted hover:text-accent-gold min-h-11 inline-flex items-center">
+                    Mail{dms > 0 ? ` (${dms})` : ""}
+                  </Link>
                 )}
                 {profile?.displayName && (
                   <Link href="/settings" className="text-text-muted text-sm hidden xl:inline max-w-[120px] truncate hover:text-accent-gold">
@@ -195,9 +219,14 @@ export function NavBar() {
               <Link href="/messages" className="mobile-nav-link" onClick={() => setMenuOpen(false)}>
                 Mail{dms > 0 ? ` (${dms})` : ""}
               </Link>
-              <Link href="/notifications" className="mobile-nav-link" onClick={() => setMenuOpen(false)}>
-                Notices{notes > 0 ? ` (${notes})` : ""}
-              </Link>
+              <NotificationBell
+                uid={user.uid}
+                items={notices}
+                ready={noticesReady}
+                loadError={noticeError}
+                placement="drawer"
+                onNavigate={() => setMenuOpen(false)}
+              />
               <Link href="/posts/new" className="mobile-nav-link" onClick={() => setMenuOpen(false)}>
                 New Post
               </Link>

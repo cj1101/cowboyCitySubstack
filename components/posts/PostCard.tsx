@@ -6,7 +6,8 @@ import type { Timestamp } from "firebase/firestore";
 import type { Character, Faction, Post } from "@/lib/types";
 import { PostTypeBadge } from "./PostTypeBadge";
 import { MediaCarousel } from "./MediaCarousel";
-import { ReactionBar } from "@/components/reactions/ReactionBar";
+import { EmojiReactionBar } from "@/components/reactions/EmojiReactionBar";
+import { PostComments } from "@/components/posts/PostComments";
 
 function formatDate(ts: Timestamp | undefined): string {
   if (!ts?.toDate) return "";
@@ -78,8 +79,7 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
         )}
       </div>
 
-      <div className={`px-4 py-3 space-y-2 ${hidden ? "blur-md select-none" : ""}`}>
-        <ReactionBar postId={post.id} />
+      <div className={`px-4 py-3 space-y-3 ${hidden ? "blur-md select-none" : ""}`}>
         <Link href={`/posts/${post.id}`} className="block">
           <h2 className="text-lg font-bold">{post.title}</h2>
           {post.body && <p className="text-text-muted text-sm mt-1">{excerptFromHtml(post.body)}</p>}
@@ -92,6 +92,8 @@ export function PostCard({ post, faction, character, tagged = [], compact = fals
         {(post.referencedPostIds?.length ?? 0) > 0 && (
           <p className="text-xs text-accent-gold">{post.referencedPostIds!.length} referenced post{post.referencedPostIds!.length > 1 ? "s" : ""}</p>
         )}
+        <EmojiReactionBar target={{ kind: "post", postId: post.id, authorUid: post.authorUid, title: post.title }} />
+        <PostComments postId={post.id} postAuthorUid={post.authorUid} postTitle={post.title} />
       </div>
     </article>
   );
