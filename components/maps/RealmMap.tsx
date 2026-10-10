@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import type { Faction, MapPin, WikiEntry } from "@/lib/types";
+import type { Faction, MapPin, PinCategory, WikiEntry } from "@/lib/types";
+import { PIN_CATEGORIES, PIN_CATEGORY_LABELS } from "@/lib/types";
+import type { CityBorder } from "@/lib/firestore/maps";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 import { actionError } from "@/lib/async";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
@@ -38,24 +40,34 @@ export function RealmMap({
   cities,
   wikiEntries,
   treaties,
+  borders,
+  myCityId,
+  ownedCityIds,
   canEdit,
   onUpload,
   onAddPin,
   onMovePin,
   onUpdatePin,
   onDeletePin,
+  onSaveBorder,
+  onDeleteBorder,
 }: {
   imageUrl: string;
   pins: MapPin[];
   cities: Faction[];
   wikiEntries: WikiEntry[];
   treaties: StoredTreaty[];
+  borders: CityBorder[];
+  myCityId?: string | null;
+  ownedCityIds: string[];
   canEdit: boolean;
   onUpload: (file: File) => Promise<void>;
   onAddPin: (pin: Omit<MapPin, "id">) => Promise<void>;
   onMovePin: (pinId: string, nx: number, ny: number) => Promise<void>;
   onUpdatePin: (pinId: string, patch: Partial<MapPin>) => Promise<void>;
   onDeletePin: (pinId: string) => Promise<void>;
+  onSaveBorder: (border: CityBorder) => Promise<void>;
+  onDeleteBorder: (cityId: string) => Promise<void>;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -63,6 +75,13 @@ export function RealmMap({
   const [frame, setFrame] = useState({ w: 0, h: 0 });
   const [natural, setNatural] = useState({ w: 0, h: 0 });
   const [showTreaties, setShowTreaties] = useState(false);
+  const [showTerritories, setShowTerritories] = useState(true);
+  const [borderPanel, setBorderPanel] = useState(false);
+  const [drawing, setDrawing] = useState(false);
+  const [drawCityId, setDrawCityId] = useState("");
+  const [drawPoints, setDrawPoints] = useState<{ nx: number; ny: number }[]>([]);
+  const [category, setCategory] = useState<PinCategory>("outpost");
+  const [selectedCityId, setSelectedCityId] = useState<string | null>(null);
   const [hiddenTreaties, setHiddenTreaties] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<DraftPin | null>(null);
@@ -147,6 +166,31 @@ export function RealmMap({
     else setPan({ x: 0, y: 0 });
   };
 
+  const canDrawCity = (cityId: string) => canEdit || ownedCityIds.includes(cityId);
+  const drawableCities = cities.filter((city) => canDrawCity(city.id));
+
+  const jumpToCity = () => {
+    setUploadError("");
+    if (!myCityId || !fitted) {
+      setNotice("Your city is not on the map yet.");
+      return;
+    }
+    const pin = livePins.find((item) => item.cityId === myCityId && item.category === "capital")
+      || livePins.find((item) => item.cityId === myCityId);
+    if (!pin) {
+      setNotice("Your city has no pin yet.");
+      return;
+    }
+    const nextScale = 2.2;
+    setScale(nextScale);
+    setPan({
+      x: frame.w / 2 - pin.nx * fitted.w * nextScale,
+      y: frame.h / 2 - pin.ny * fitted.h * nextScale,
+    });
+    setSelectedPin(pin.id);
+    setNotice(`Showing ${pin.title}.`);
+  };
+
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -167,11 +211,12 @@ export function RealmMap({
     const pin = livePins.find((item) => item.id === pinId);
     setCityId(pin?.cityId || "");
     setWikiIds(pin?.wikiEntryIds || []);
+    setCategory(pin?.category || "outpost");
   };
 
   return (
     <div className="relative h-full min-h-0">
-      <div className="absolute top-2 left-2 right-2 z-30 flex flex-wrap items-center gap-2">
+      <div className="absolute top-2 left-2 right-2 z-30 flex flex-col items-start gap-2 pointer-events-none [&>*]:pointer-events-auto">
         <div className="glass-panel px-2 py-2 flex flex-wrap items-center gap-2 max-w-full">
           <h1 className="text-accent-gold mr-1">Realm map</h1>
           <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => zoomAt(
@@ -184,8 +229,20 @@ export function RealmMap({
             (viewportRef.current?.getBoundingClientRect().top || 0) + frame.h / 2,
             scale / 1.2
           )}>−</button>
-          <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" onClick={resetView}>Fit</button>
-          <label className="flex items-center gap-2 text-sm font-bold min-h-11">
+            <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" onClick={resetView}>Fit</button>
+            {myCityId && (
+              <button type="button" className="btn btn-secondary text-sm min-h-11 px-3 py-2" onClick={jumpToCity}>My city</button>
+            )}
+            <label className="flex items-center gap-2 text-sm font-bold min-h-11">
+              <input type="checkbox" className="w-5 h-5" checked={showTerritories} onChange={(event) => setShowTerritories(event.target.checked)} />
+              Territories
+            </label>
+            {drawableCities.length > 0 && (
+              <button type="button" className={`text-sm min-h-11 px-3 py-2 ${borderPanel ? "btn" : "btn btn-secondary"}`} onClick={() => setBorderPanel((value) => !value)}>
+                Borders
+              </button>
+            )}
+            <label className="flex items-center gap-2 text-sm font-bold min-h-11">
             <input type="checkbox" className="w-5 h-5" checked={showTreaties} onChange={(event) => setShowTreaties(event.target.checked)} />
             Show treaties
           </label>
@@ -208,20 +265,76 @@ export function RealmMap({
                   setUploadError("");
                   setBusy(true);
                   onUpload(file)
-                    .then(() => setNotice("Map image saved."))
-                    .catch(() => setUploadError(UPLOAD_FAILED_MESSAGE))
+                    .then(() => {
+                      setUploadError("");
+                      setNotice("Map image saved.");
+                    })
+                    .catch((error) => setUploadError(actionError(error, UPLOAD_FAILED_MESSAGE)))
                     .finally(() => setBusy(false));
                 }}
               />
             </label>
           )}
         </div>
+        {(uploadError || notice) && (
+          <p className="glass-panel px-3 py-2 text-sm font-bold max-w-xl" role={uploadError ? "alert" : "status"}>
+            {uploadError || notice}
+          </p>
+        )}
+        {borderPanel && drawableCities.length > 0 && (
+          <div className="glass-panel p-3 space-y-2 max-w-md">
+            <label className="form-label" htmlFor="border-city">City border</label>
+            <select id="border-city" className="form-input" value={drawCityId} onChange={(event) => {
+              const next = event.target.value;
+              setDrawCityId(next);
+              const existing = borders.find((border) => border.cityId === next);
+              setDrawPoints(existing?.points || []);
+              setDrawing(false);
+            }}>
+              <option value="">Choose a city you can edit</option>
+              {drawableCities.map((city) => <option key={city.id} value={city.id}>{city.name}</option>)}
+            </select>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="btn btn-secondary text-sm min-h-11 px-3" disabled={!drawCityId} onClick={() => {
+                setDrawing(true);
+                setAdding(false);
+                setDraft(null);
+                setNotice("Tap the map to place corners.");
+              }}>Draw</button>
+              <button type="button" className="btn btn-secondary text-sm min-h-11 px-3" disabled={drawPoints.length === 0} onClick={() => setDrawPoints((current) => current.slice(0, -1))}>Undo</button>
+              <button type="button" className="btn text-sm min-h-11 px-3" disabled={!drawCityId || drawPoints.length < 3 || busy} onClick={() => {
+                const city = cityById.get(drawCityId);
+                if (!city) return;
+                setBusy(true);
+                setUploadError("");
+                onSaveBorder({
+                  cityId: city.id,
+                  points: drawPoints,
+                  color: city.colors?.primary || "#169C9C",
+                }).then(() => {
+                  setDrawing(false);
+                  setNotice("Border saved.");
+                }).catch((error) => {
+                  setNotice("");
+                  setUploadError(actionError(error, "Could not save that border."));
+                }).finally(() => setBusy(false));
+              }}>{busy ? "Saving…" : "Save border"}</button>
+              <button type="button" className="btn btn-danger text-sm min-h-11 px-3" disabled={!drawCityId || busy} onClick={() => {
+                setBusy(true);
+                onDeleteBorder(drawCityId).then(() => {
+                  setDrawPoints([]);
+                  setDrawing(false);
+                  setNotice("Border removed.");
+                }).catch((error) => {
+                  setNotice("");
+                  setUploadError(actionError(error, "Could not remove that border."));
+                }).finally(() => setBusy(false));
+              }}>Remove</button>
+            </div>
+            <p className="text-sm text-text-muted">{drawing ? "Drawing is on. " : ""}{drawPoints.length} corner{drawPoints.length === 1 ? "" : "s"}.</p>
+          </div>
+        )}
       </div>
-      {(uploadError || notice) && (
-        <p className={`absolute top-16 left-3 z-30 glass-panel px-3 py-2 text-sm font-bold ${uploadError ? "" : "text-ink"}`} role="status">
-          {uploadError || notice}
-        </p>
-      )}
 
       <div
         ref={viewportRef}
@@ -307,21 +420,33 @@ export function RealmMap({
             const dragging = pinDrag.current;
             pinDrag.current = null;
             const next = placeNorm(event);
-            if (dragging.moved && next) onMovePin(dragging.id, next.nx, next.ny).catch(() => undefined);
-            else if (!dragging.moved) openPin(dragging.id, event);
+            if (dragging.moved && next) {
+              onMovePin(dragging.id, next.nx, next.ny).catch((error) => {
+                setNotice("");
+                setUploadError(actionError(error, "Could not move that pin."));
+              });
+            } else if (!dragging.moved) openPin(dragging.id, event);
             return;
           }
           const background = drag.current;
           drag.current = null;
           if (!background || background.moved) return;
+          const nextPoint = placeNorm(event);
+          if (drawing) {
+            if (!nextPoint) return;
+            setDrawPoints((current) => [...current, nextPoint]);
+            setNotice(`${drawPoints.length + 1} corner${drawPoints.length === 0 ? "" : "s"}. Save needs at least 3.`);
+            return;
+          }
           if (!adding) return;
-          const next = placeNorm(event);
+          const next = nextPoint;
           if (!next) return;
           const firstCity = cities[0];
           setDraft(next);
           setSelectedPin(null);
           setCityId(firstCity?.id || "");
           setTitle(firstCity?.name || "");
+          setCategory("outpost");
           setDescription("");
           setWikiIds([]);
           setFormError("");
@@ -335,7 +460,15 @@ export function RealmMap({
           if (pointers.current.size === 0) pinched.current = false;
         }}
       >
-        <div className="realm-map-canvas" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`, transformOrigin: "0 0" }}>
+        <div
+          className="realm-map-canvas relative"
+          style={{
+            width: fitted?.w,
+            height: fitted?.h,
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+            transformOrigin: "0 0",
+          }}
+        >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={imageUrl}
@@ -377,6 +510,45 @@ export function RealmMap({
               })}
             </svg>
           )}
+          {(showTerritories || drawing) && (
+            <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+              {showTerritories && borders.map((border) => {
+                const path = border.points.map((point) => `${point.nx * 100},${point.ny * 100}`).join(" ");
+                return (
+                  <polygon
+                    key={border.cityId}
+                    data-territory={border.cityId}
+                    points={path}
+                    fill={border.color}
+                    fillOpacity={0.28}
+                    stroke={border.color}
+                    strokeWidth={1.2}
+                    vectorEffect="non-scaling-stroke"
+                    className="cursor-pointer"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const viewport = viewportRef.current?.getBoundingClientRect();
+                      setSelectedPin(null);
+                      setSelectedTreaty(null);
+                      setDraft(null);
+                      setSelectedCityId(border.cityId);
+                      if (viewport) setPopupAt({ x: event.clientX - viewport.left, y: event.clientY - viewport.top });
+                    }}
+                  />
+                );
+              })}
+              {drawing && drawPoints.length > 0 && (
+                <polyline
+                  points={drawPoints.map((point) => `${point.nx * 100},${point.ny * 100}`).join(" ")}
+                  fill="none"
+                  stroke="#169C9C"
+                  strokeWidth={1.6}
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
+            </svg>
+          )}
           {livePins.map((pin) => (
             <button
               key={pin.id}
@@ -387,7 +559,15 @@ export function RealmMap({
               className="absolute w-11 h-11 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
             >
-              <span className="w-4 h-4 bg-accent-yellow border-2 border-on-yellow pointer-events-none" />
+              <span
+                className={`pointer-events-none border-2 border-on-yellow ${
+                  pin.category === "capital"
+                    ? "w-5 h-5 bg-accent-yellow"
+                    : pin.category === "landmark"
+                      ? "w-3.5 h-3.5 bg-accent-cyan rotate-45"
+                      : "w-4 h-4 bg-accent-cyan"
+                }`}
+              />
             </button>
           ))}
           {draft && (
@@ -408,9 +588,11 @@ export function RealmMap({
             allWiki={wikiEntries}
             cityId={cityId}
             wikiIds={wikiIds}
+            category={category}
             busy={busy}
             onClose={() => setSelectedPin(null)}
             onCityId={setCityId}
+            onCategory={setCategory}
             onWikiIds={setWikiIds}
             onSave={async () => {
               if (!selectedPin) return;
@@ -420,6 +602,7 @@ export function RealmMap({
                 await onUpdatePin(selectedPin, {
                   cityId,
                   title: city?.name || "Pin",
+                  category,
                   wikiEntryIds: wikiIds,
                   wikiEntryId: wikiIds[0] || null,
                 });
@@ -433,14 +616,27 @@ export function RealmMap({
             onDelete={async () => {
               if (!selectedPin) return;
               setBusy(true);
+              setUploadError("");
               try {
                 await onDeletePin(selectedPin);
                 setSelectedPin(null);
                 setNotice("Pin deleted.");
+              } catch (error) {
+                setNotice("");
+                setUploadError(actionError(error, "Could not delete that pin."));
               } finally {
                 setBusy(false);
               }
             }}
+          />
+        )}
+        {popupAt && selectedCityId && !selectedPin && (
+          <CityPopup
+            city={cityById.get(selectedCityId)}
+            at={popupAt}
+            frame={frame}
+            sheet={narrow}
+            onClose={() => setSelectedCityId(null)}
           />
         )}
         {popupAt && selectedTreaty && (
@@ -509,6 +705,7 @@ export function RealmMap({
                 note: description.trim(),
                 nx: draft.nx,
                 ny: draft.ny,
+                category,
                 cityId: city.id,
                 wikiEntryIds: wikiIds,
                 wikiEntryId: wikiIds[0] || null,
@@ -540,6 +737,10 @@ export function RealmMap({
             if (!title.trim() && city) setTitle(city.name);
           }} required>
             {cities.map((city) => <option key={city.id} value={city.id}>{city.name}</option>)}
+          </select>
+          <label className="form-label" htmlFor="pin-kind">Kind</label>
+          <select id="pin-kind" className="form-input" value={category} onChange={(event) => setCategory(event.target.value as PinCategory)}>
+            {PIN_CATEGORIES.map((item) => <option key={item} value={item}>{PIN_CATEGORY_LABELS[item]}</option>)}
           </select>
           <label className="form-label" htmlFor="pin-title">Title</label>
           <input id="pin-title" className="form-input" value={title} onChange={(event) => setTitle(event.target.value)} required />
@@ -601,9 +802,11 @@ function PinPopup({
   allWiki,
   cityId,
   wikiIds,
+  category,
   busy,
   onClose,
   onCityId,
+  onCategory,
   onWikiIds,
   onSave,
   onDelete,
@@ -619,9 +822,11 @@ function PinPopup({
   allWiki: WikiEntry[];
   cityId: string;
   wikiIds: string[];
+  category: PinCategory;
   busy: boolean;
   onClose: () => void;
   onCityId: (id: string) => void;
+  onCategory: (category: PinCategory) => void;
   onWikiIds: (ids: string[]) => void;
   onSave: () => Promise<void>;
   onDelete: () => Promise<void>;
@@ -664,6 +869,9 @@ function PinPopup({
           <select className="form-input" value={cityId} onChange={(event) => onCityId(event.target.value)}>
             {cities.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
+          <select className="form-input" value={category} onChange={(event) => onCategory(event.target.value as PinCategory)} aria-label="Pin kind">
+            {PIN_CATEGORIES.map((item) => <option key={item} value={item}>{PIN_CATEGORY_LABELS[item]}</option>)}
+          </select>
           <WikiPicker entries={allWiki} selected={wikiIds} onChange={onWikiIds} />
           <div className="flex gap-2">
             <SubmitButton type="button" busy={busy} busyLabel="Saving…" className="btn text-sm px-3 py-1.5" onClick={() => onSave()}>Save</SubmitButton>
@@ -671,6 +879,36 @@ function PinPopup({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function CityPopup({
+  city,
+  at,
+  frame,
+  sheet,
+  onClose,
+}: {
+  city?: Faction;
+  at: { x: number; y: number };
+  frame: { w: number; h: number };
+  sheet: boolean;
+  onClose: () => void;
+}) {
+  if (!city) return null;
+  return (
+    <div
+      data-popup
+      className={sheet ? "absolute z-20 left-2 right-2 bottom-2 glass-panel p-4" : "absolute z-20 glass-panel p-4"}
+      style={sheetStyle(sheet, at, frame)}
+    >
+      <div className="flex justify-between gap-2 items-start">
+        <h3 className="min-w-0">{city.name}</h3>
+        <button type="button" className="menu-button shrink-0" onClick={onClose} aria-label="Close">×</button>
+      </div>
+      <p className="text-sm text-text-muted mt-2 line-clamp-3">{city.bio || city.description || "No description yet."}</p>
+      <Link className="text-accent-gold text-sm font-bold" href={`/cities/${city.slug}`}>Open city</Link>
     </div>
   );
 }

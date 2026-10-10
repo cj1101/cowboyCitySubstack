@@ -9,8 +9,9 @@ import { RealmMark } from "@/components/brand/RealmMark";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
 import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
-import { notificationsQuery, toNotification } from "@/lib/firestore/notifications";
 import { subscribeConversations } from "@/lib/firestore/messages";
+import { NotificationBell } from "@/components/layout/NotificationBell";
+import { PlayerAvatar, RoleBadges } from "@/components/profile/RoleBadges";
 
 const NAV_LINKS = [
   { href: "/", label: "Feed" },
@@ -45,7 +46,6 @@ export function NavBar() {
       ? "text-sm font-bold text-accent-gold whitespace-nowrap"
       : "text-text-muted text-sm hover:text-accent-gold whitespace-nowrap";
   const [menuOpen, setMenuOpen] = useState(false);
-  const [notes, setNotes] = useState(0);
   const [dms, setDms] = useState(0);
   const member = !!user && canUseRealm(profile);
   const sheriff = isSheriff(profile, user?.email);
@@ -68,9 +68,6 @@ export function NavBar() {
 
   useEffect(() => {
     if (!user || !member) return;
-    const unsubNotes = onSnapshot(notificationsQuery(user.uid), (snap) => {
-      setNotes(snap.docs.map((d) => toNotification(d.id, d.data())).filter((item) => !item.read).length);
-    });
     let reads: Record<string, number> = {};
     const unsubReads = onSnapshot(collection(getClientDb(), "users", user.uid, "reads"), (snap) => {
       reads = {};
@@ -87,7 +84,6 @@ export function NavBar() {
       );
     });
     return () => {
-      unsubNotes();
       unsubReads();
       unsubDms();
     };
@@ -144,14 +140,14 @@ export function NavBar() {
                     <Link href="/messages" className="text-sm text-text-muted hover:text-accent-gold min-h-11 inline-flex items-center">
                       Mail{dms > 0 ? ` (${dms})` : ""}
                     </Link>
-                    <Link href="/notifications" className="text-sm text-text-muted hover:text-accent-gold min-h-11 inline-flex items-center">
-                      Notices{notes > 0 ? ` (${notes})` : ""}
-                    </Link>
+                    <NotificationBell uid={user.uid} />
                   </>
                 )}
                 {profile?.displayName && (
-                  <Link href="/settings" className="text-text-muted text-sm hidden xl:inline max-w-[120px] truncate hover:text-accent-gold">
-                    {profile.displayName}
+                  <Link href="/settings" className="hidden xl:inline-flex items-center gap-2 max-w-[180px] text-text-muted text-sm hover:text-accent-gold">
+                    <PlayerAvatar minecraftName={profile.minecraftName} avatarUrl={profile.avatarUrl} label={profile.displayName} size={28} />
+                    <span className="truncate">{profile.displayName}</span>
+                    <RoleBadges email={profile.email || user.email} isAdmin={profile.isAdmin} founder={profile.ownsCity} />
                   </Link>
                 )}
                 <button type="button" onClick={handleLogout} className="btn btn-secondary text-sm px-4 py-2">
@@ -165,6 +161,7 @@ export function NavBar() {
               </>
             )}
           </div>
+          {user && member && <span className="md:hidden"><NotificationBell uid={user.uid} /></span>}
           <button
             type="button"
             className="md:hidden menu-button"
@@ -196,7 +193,7 @@ export function NavBar() {
                 Mail{dms > 0 ? ` (${dms})` : ""}
               </Link>
               <Link href="/notifications" className="mobile-nav-link" onClick={() => setMenuOpen(false)}>
-                Notices{notes > 0 ? ` (${notes})` : ""}
+                All notices
               </Link>
               <Link href="/posts/new" className="mobile-nav-link" onClick={() => setMenuOpen(false)}>
                 New Post

@@ -16,6 +16,7 @@ import { getClientDb } from "@/lib/firebase";
 import { withTimeout } from "@/lib/async";
 import { ensureOwnerMembership, getFactionMembers } from "@/lib/firestore/factions";
 import { notifyMany } from "@/lib/firestore/notifications";
+import { createPost } from "@/lib/firestore/posts";
 import type { Faction } from "@/lib/types";
 import {
   acceptTreaty,
@@ -55,6 +56,10 @@ export interface StoredTreaty {
   partyOwnerUids: string[];
   color: string;
   lastActionCityId: string;
+  expiresOn?: string;
+  renewsOn?: string;
+  brokenByUid?: string;
+  brokenReason?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }
@@ -94,12 +99,18 @@ function toRevision(id: string, data: Record<string, unknown>): TreatyRevision {
   };
 }
 
+function calendarDay(value: string | undefined): string {
+  const day = (value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : "";
+}
+
 function toResponse(data: Record<string, unknown>): TreatyResponse {
   return {
     cityId: (data.cityId as string) || "",
     revision: Number(data.revision ?? 0),
     decision: data.decision as TreatyResponse["decision"],
     note: (data.note as string) || "",
+    uid: (data.uid as string) || "",
   };
 }
 
@@ -112,7 +123,7 @@ export function toStoredTreaty(id: string, data: Record<string, unknown>): Store
     terms: (data.terms as string) || "",
     purpose: (data.purpose as string) || "",
     open: data.open === true,
-    status: data.status === "active" ? "active" : "pending",
+    status: data.status === "active" || data.status === "broken" || data.status === "pending" ? data.status : "pending",
     proposerCityId: (data.proposerCityId as string) || "",
     authorUid: (data.authorUid as string) || "",
     currentRevision: Number(data.currentRevision ?? 1),
@@ -122,6 +133,10 @@ export function toStoredTreaty(id: string, data: Record<string, unknown>): Store
     partyOwnerUids: (data.partyOwnerUids as string[]) || [],
     color: (data.color as string) || "#169C9C",
     lastActionCityId: (data.lastActionCityId as string) || "",
+    expiresOn: calendarDay(data.expiresOn as string | undefined),
+    renewsOn: calendarDay(data.renewsOn as string | undefined),
+    brokenByUid: (data.brokenByUid as string) || "",
+    brokenReason: (data.brokenReason as string) || "",
     createdAt: data.createdAt as Timestamp | undefined,
     updatedAt: data.updatedAt as Timestamp | undefined,
   };
@@ -218,6 +233,8 @@ export async function createTreaty(
     partyOwnerUids,
     color: colorForTreatyName(revision.name),
     lastActionCityId: draft.proposerCityId,
+    expiresOn: calendarDay(draft.expiresOn),
+    renewsOn: calendarDay(draft.renewsOn),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   }));
@@ -346,6 +363,55 @@ export async function respondToTreaty(
     factions,
     "counter"
   );
+}
+
+export async function breakTreaty(input: {
+  treaty: StoredTreaty;
+  cityId: string;
+  cityName: string;
+  uid: string;
+  reason: string;
+}): Promise<string> {
+  const reason = input.reason.trim();
+  if (!reason) throw new Error("Say why the treaty is ending.");
+  if (input.treaty.status !== "active") throw new Error("Only an active treaty can be broken.");
+  if (!input.treaty.partyCityIds.includes(input.cityId)) {
+    throw new Error("Only a city on this treaty can break it.");
+  }
+  await updateDoc(doc(getClientDb(), "treaties", input.treaty.id), {
+    status: "broken",
+    lastActionCityId: input.cityId,
+    brokenByUid: input.uid,
+    brokenReason: reason.slice(0, 500),
+    updatedAt: serverTimestamp(),
+  });
+  const postId = await createPost(
+    {
+      type: "announcement",
+      factionId: input.cityId,
+      characterId: "",
+      title: `${input.cityName} broke ${input.treaty.name}`,
+      body: reason,
+      status: "published",
+    },
+    input.uid
+  );
+  void notifyMany(input.treaty.readerUids, {
+    type: "treaty",
+    summary: `${input.cityName} broke ${input.treaty.name}.`,
+    href: `/posts/${postId}`,
+    actorUid: input.uid,
+  });
+  return postId;
+}
+
+export async function listSearchableTreaties(): Promise<StoredTreaty[]> {
+  const db = getClientDb();
+  const [active, broken] = await Promise.all([
+    getDocs(query(collection(db, "treaties"), where("status", "==", "active"))),
+    getDocs(query(collection(db, "treaties"), where("status", "==", "broken"))),
+  ]);
+  return [...active.docs, ...broken.docs].map((item) => toStoredTreaty(item.id, item.data()));
 }
 
 export async function getTreatyBundle(treatyId: string): Promise<{

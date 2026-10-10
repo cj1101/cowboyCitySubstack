@@ -587,6 +587,63 @@ async function main() {
   await assertSucceeds(listAll(ref(treatySheriff.storage(), "posts/pact-post")));
   console.log("ok treaty create and city media");
 
+  const border = {
+    cityId: "city1",
+    color: "#169C9C",
+    points: [
+      { nx: 0.1, ny: 0.2 },
+      { nx: 0.4, ny: 0.2 },
+      { nx: 0.3, ny: 0.5 },
+    ],
+  };
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "borders", "city1"), border));
+  await assertFails(setDoc(doc(treatyOther.firestore(), "realm_map", "overview", "borders", "city1"), border));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "realm_map", "overview", "borders", "city1"), border));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "borders", "city2"), {
+    ...border,
+    cityId: "city2",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "posts", "notice", "reactions", "friend"), { type: "likes" }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "posts", "notice", "reactions", "friend"), { type: "love" }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "threads", "dock", "replies", "lamp", "reactions", "friend"), { type: "agrees" }));
+  await assertFails(setDoc(doc(treatyOther.firestore(), "threads", "dock", "replies", "lamp", "reactions", "friend"), { type: "likes" }));
+  await env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "treaties", "sealed"), {
+      name: "Sealed Pact",
+      type: "alliance",
+      nature: "Peace",
+      terms: "Hold the ridge",
+      purpose: "Stay allied",
+      open: false,
+      status: "active",
+      proposerCityId: "city1",
+      authorUid: "friend",
+      currentRevision: 1,
+      inviteeCityIds: ["city2"],
+      partyCityIds: ["city1", "city2"],
+      readerUids: ["friend", "other"],
+      partyOwnerUids: ["friend", "other"],
+      color: "#169C9C",
+      lastActionCityId: "city1",
+    });
+  });
+  await assertFails(updateDoc(doc(treatyVisitor.firestore(), "treaties", "sealed"), {
+    status: "broken",
+    lastActionCityId: "city1",
+    brokenByUid: "visitor",
+    brokenReason: "Not our pact",
+    updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(updateDoc(doc(treatyFriend.firestore(), "treaties", "sealed"), {
+    status: "broken",
+    lastActionCityId: "city1",
+    brokenByUid: "friend",
+    brokenReason: "The ridge fell",
+    updatedAt: Timestamp.now(),
+  }));
+  await assertSucceeds(getDoc(doc(treatyVisitor.firestore(), "treaties", "sealed")));
+  console.log("ok borders reactions and broken treaties");
+
   await env.cleanup();
   assert.ok(true);
   console.log("rules tests passed");

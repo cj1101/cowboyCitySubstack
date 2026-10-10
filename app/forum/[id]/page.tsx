@@ -11,6 +11,7 @@ import { actionError, withTimeout } from "@/lib/async";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 import { CameraRollInput } from "@/components/media/CameraRollInput";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { ReactionBar } from "@/components/reactions/ReactionBar";
 
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
@@ -23,6 +24,7 @@ export default function ThreadPage() {
   const [error, setError] = useState("");
   const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
 
   const load = () => {
     if (!params.id) return;
@@ -43,9 +45,10 @@ export default function ThreadPage() {
     event.preventDefault();
     if (!user || !thread || !body.trim()) return;
     setError("");
+    setNotice("");
     setBusy(true);
     try {
-      await withTimeout(addReply({
+      const replyId = await withTimeout(addReply({
         threadId: thread.id,
         body,
         authorUid: user.uid,
@@ -54,11 +57,27 @@ export default function ThreadPage() {
         quoteExcerpt: quote ? `${quote.authorName}: ${quote.body}` : "",
         files,
         replyCount: thread.replyCount,
+        threadAuthorUid: thread.authorUid,
+        threadTitle: thread.title,
       }), 20000);
+      setReplies((current) => [
+        ...current,
+        {
+          id: replyId,
+          body: body.trim(),
+          imageUrls: [],
+          authorUid: user.uid,
+          authorName: profile?.displayName || "Member",
+          quoteReplyId: quote?.id || null,
+          quoteExcerpt: quote ? `${quote.authorName}: ${quote.body}` : "",
+        },
+      ]);
+      setThread({ ...thread, replyCount: thread.replyCount + 1 });
       setBody("");
       setFiles([]);
       setQuote(null);
-      load();
+      setNotice(files.length > 0 ? "Reply posted. Photos appear after they finish saving." : "Reply posted.");
+      if (files.length > 0) load();
     } catch (err) {
       const message = actionError(err, "Could not post that reply.");
       setError(files.length > 0 && !message.includes("under") && !message.includes("too long") ? UPLOAD_FAILED_MESSAGE : message);
@@ -92,6 +111,7 @@ export default function ThreadPage() {
             {reply.imageUrls.map((url) => (
               <StoredImage key={url} src={url} alt="" className="rounded border border-primary-brown max-h-80 max-w-full w-auto" />
             ))}
+            <ReactionBar threadId={thread.id} replyId={reply.id} compact />
             {user && (
               <button type="button" className="text-sm text-accent-gold min-h-11 inline-flex items-center" onClick={() => setQuote(reply)}>Quote</button>
             )}
@@ -107,6 +127,7 @@ export default function ThreadPage() {
             <textarea className="form-input" rows={4} value={body} onChange={(event) => setBody(event.target.value)} required placeholder="Reply" />
             <CameraRollInput accept="image/*" label="Add a photo" onFiles={setFiles} />
             {error && <p className="text-sm font-bold" role="alert">{error}</p>}
+            {notice && <p className="text-sm font-bold text-accent-gold" role="status">{notice}</p>}
             <SubmitButton busy={busy} busyLabel="Replying…" className="btn text-sm px-4 py-2">Reply</SubmitButton>
           </form>
         ) : (

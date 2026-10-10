@@ -11,6 +11,8 @@ export interface FactionFormData {
   colors: FactionColors;
   bio: string;
   lore: string;
+  population: string;
+  foundedOn: string;
   bannerFile: File | null;
   sigilFile: File | null;
 }
@@ -31,10 +33,13 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
   const [secondaryColor, setSecondaryColor] = useState(initial?.colors?.secondary ?? DEFAULT_COLORS.secondary);
   const [bio, setBio] = useState(initial?.bio ?? "");
   const [lore, setLore] = useState(initial?.lore ?? "");
+  const [population, setPopulation] = useState(initial?.population ?? "");
+  const [foundedOn, setFoundedOn] = useState(initial?.foundedOn ?? "");
   const [bannerFile, setBannerFile] = useState<File | null>(null);
   const [sigilFile, setSigilFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
 
   const handleNameChange = (value: string) => {
     setName(value);
@@ -46,6 +51,16 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
+    setSaved("");
+    const people = population.trim();
+    if (people && (!/^\d+$/.test(people) || Number(people) > 1000000000)) {
+      setError("Population has to be a whole number.");
+      return;
+    }
+    if (foundedOn && !/^\d{4}-\d{2}-\d{2}$/.test(foundedOn)) {
+      setError("Founding date has to be a calendar day.");
+      return;
+    }
     setSubmitting(true);
     try {
       await onSubmit({
@@ -54,9 +69,12 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
         colors: { primary: primaryColor, secondary: secondaryColor },
         bio: bio.trim(),
         lore: lore.trim(),
+        population: people,
+        foundedOn,
         bannerFile,
         sigilFile,
       });
+      setSaved("City saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save faction");
     } finally {
@@ -135,6 +153,30 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
         </div>
       </div>
 
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label htmlFor="faction-population" className="form-label">Population</label>
+          <input
+            id="faction-population"
+            inputMode="numeric"
+            value={population}
+            onChange={(e) => setPopulation(e.target.value.replace(/[^\d]/g, ""))}
+            className="form-input"
+            placeholder="120"
+          />
+        </div>
+        <div>
+          <label htmlFor="faction-founded" className="form-label">Founding date</label>
+          <input
+            id="faction-founded"
+            type="date"
+            value={foundedOn}
+            onChange={(e) => setFoundedOn(e.target.value)}
+            className="form-input"
+          />
+        </div>
+      </div>
+
       <div>
         <label htmlFor="faction-bio" className="form-label">Description</label>
         <textarea
@@ -174,7 +216,7 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
           />
         </div>
         <div>
-          <label htmlFor="sigil-upload" className="form-label">Crest</label>
+          <label htmlFor="sigil-upload" className="form-label">Flag</label>
           {initial?.sigilUrl && !sigilFile && (
             <img src={initial.sigilUrl} alt="Current sigil" className="w-16 h-16 object-cover rounded-full mb-2 border border-accent-gold" />
           )}
@@ -188,7 +230,8 @@ export function FactionForm({ initial, onSubmit, submitLabel = "Save Faction" }:
         </div>
       </div>
 
-      {error && <p className="text-red-400 text-sm">{error}</p>}
+      {error && <p className="text-sm font-bold" role="alert">{error}</p>}
+      {saved && !error && <p className="text-sm font-bold text-accent-gold" role="status">{saved}</p>}
 
       <SubmitButton busy={submitting} busyLabel="Saving…">{submitLabel}</SubmitButton>
     </form>

@@ -1,7 +1,7 @@
 export const TREATY_TYPES = ["alliance", "trade", "non-aggression", "other"] as const;
 export type TreatyType = (typeof TREATY_TYPES)[number];
 export type TreatyDecision = "accept" | "decline" | "counter" | "withdraw";
-export type TreatyStatus = "pending" | "active";
+export type TreatyStatus = "pending" | "active" | "broken";
 
 export const TREATY_TYPE_LABELS: Record<TreatyType, string> = {
   alliance: "Alliance",
@@ -46,6 +46,7 @@ export interface TreatyResponse {
   revision: number;
   decision: TreatyDecision;
   note?: string;
+  uid?: string;
 }
 
 export interface TreatyDraft {
@@ -57,6 +58,8 @@ export interface TreatyDraft {
   open: boolean;
   inviteeCityIds: string[];
   proposerCityId: string;
+  expiresOn?: string;
+  renewsOn?: string;
 }
 
 export interface TreatyRecord {

@@ -7,16 +7,20 @@ import { isSheriff } from "@/lib/membership";
 import { getAllFactions } from "@/lib/firestore/factions";
 import {
   addRealmPin,
+  deleteRealmBorder,
   deleteRealmPin,
+  getRealmBorders,
   getRealmMap,
   getRealmPins,
+  saveRealmBorder,
   setRealmMapImage,
   updateRealmPin,
+  type CityBorder,
 } from "@/lib/firestore/maps";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
 import { getAllWikiEntries } from "@/lib/firestore/wikiEntries";
 import { uploadMapImage } from "@/lib/storage/uploads";
-import { withTimeout } from "@/lib/async";
+import { actionError, withTimeout } from "@/lib/async";
 import type { Faction, MapPin, WikiEntry } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 
@@ -29,27 +33,37 @@ export default function RealmMapPage() {
   const [cities, setCities] = useState<Faction[]>([]);
   const [wikiEntries, setWikiEntries] = useState<WikiEntry[]>([]);
   const [treaties, setTreaties] = useState<StoredTreaty[]>([]);
+  const [borders, setBorders] = useState<CityBorder[]>([]);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
-    Promise.all([getRealmMap(), getRealmPins(), getAllFactions(), getAllWikiEntries(), listActiveTreaties()])
-      .then(([map, pinList, factionList, entries, active]) => {
+    Promise.all([getRealmMap(), getRealmPins(), getAllFactions(), getAllWikiEntries(), listActiveTreaties(), getRealmBorders()])
+      .then(([map, pinList, factionList, entries, active, borderList]) => {
         setImageUrl(map?.imageUrl || DEFAULT_REALM_MAP);
         setPins(pinList);
         setCities(factionList);
         setWikiEntries(entries);
         setTreaties(active);
+        setBorders(borderList);
+        setLoadError("");
       })
-      .catch(() => undefined);
+      .catch((error) => setLoadError(actionError(error, "Could not load the realm map.")));
   }, []);
 
+  const ownedCityIds = user ? cities.filter((city) => city.ownerUids.includes(user.uid)).map((city) => city.id) : [];
+
   return (
-    <div className="h-[calc(100dvh-var(--app-nav)-var(--app-tabs))]">
+    <div className="relative h-[calc(100dvh-var(--app-nav)-var(--app-tabs))]">
+      {loadError && <p className="absolute top-2 left-2 z-40 glass-panel px-3 py-2 text-sm font-bold" role="alert">{loadError}</p>}
       <RealmMap
         imageUrl={imageUrl}
         pins={pins}
         cities={cities}
         wikiEntries={wikiEntries}
         treaties={treaties}
+        borders={borders}
+        myCityId={ownedCityIds[0] || null}
+        ownedCityIds={ownedCityIds}
         canEdit={isSheriff(profile, user?.email)}
         onUpload={async (file) => {
           const url = await withTimeout(uploadMapImage("realm/overview.jpg", file), 20000);
@@ -71,6 +85,32 @@ export default function RealmMapPage() {
         onDeletePin={async (pinId) => {
           await withTimeout(deleteRealmPin(pinId), 8000);
           setPins((current) => current.filter((pin) => pin.id !== pinId));
+        }}
+        onSaveBorder={async (border) => {
+          let previous: CityBorder[] = [];
+          setBorders((current) => {
+            previous = current;
+            return [...current.filter((item) => item.cityId !== border.cityId), border];
+          });
+          try {
+            await withTimeout(saveRealmBorder(border), 8000);
+          } catch (error) {
+            setBorders(previous);
+            throw error;
+          }
+        }}
+        onDeleteBorder={async (cityId) => {
+          let previous: CityBorder[] = [];
+          setBorders((current) => {
+            previous = current;
+            return current.filter((item) => item.cityId !== cityId);
+          });
+          try {
+            await withTimeout(deleteRealmBorder(cityId), 8000);
+          } catch (error) {
+            setBorders(previous);
+            throw error;
+          }
         }}
       />
     </div>

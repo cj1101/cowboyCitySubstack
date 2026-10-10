@@ -26,6 +26,8 @@ export default function NewTreatyPage() {
   const [invitees, setInvitees] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [expiresOn, setExpiresOn] = useState("");
+  const [renewsOn, setRenewsOn] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -56,6 +58,8 @@ export default function NewTreatyPage() {
         open,
         inviteeCityIds: invitees,
         proposerCityId,
+        expiresOn,
+        renewsOn,
       }, cities), 15000);
       router.push(`/treaties/${id}`);
     } catch (err) {
@@ -101,6 +105,16 @@ export default function NewTreatyPage() {
         <div>
           <label className="form-label" htmlFor="terms">Specific terms</label>
           <textarea id="terms" className="form-input" rows={6} value={terms} onChange={(event) => setTerms(event.target.value)} />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="form-label" htmlFor="expires">Expiry date</label>
+            <input id="expires" type="date" className="form-input" value={expiresOn} onChange={(event) => setExpiresOn(event.target.value)} />
+          </div>
+          <div>
+            <label className="form-label" htmlFor="renews">Renewal date</label>
+            <input id="renews" type="date" className="form-input" value={renewsOn} onChange={(event) => setRenewsOn(event.target.value)} />
+          </div>
         </div>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={open} onChange={(event) => setOpen(event.target.checked)} />

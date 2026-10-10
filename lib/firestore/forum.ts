@@ -13,6 +13,7 @@ import {
   type Timestamp,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { notify } from "@/lib/firestore/notifications";
 import { uploadThreadImage } from "@/lib/storage/uploads";
 
 export interface ForumThread {
@@ -135,7 +136,9 @@ export async function addReply(input: {
   quoteExcerpt: string;
   files: File[];
   replyCount: number;
-}): Promise<void> {
+  threadAuthorUid?: string;
+  threadTitle?: string;
+}): Promise<string> {
   const ref = doc(collection(getClientDb(), "threads", input.threadId, "replies"));
   let imageUrls: string[] = [];
   if (input.files.length > 0) {
@@ -154,6 +157,16 @@ export async function addReply(input: {
     replyCount: input.replyCount + 1,
     lastActivityAt: serverTimestamp(),
   });
+  if (input.threadAuthorUid && input.threadAuthorUid !== input.authorUid) {
+    void notify({
+      recipientUid: input.threadAuthorUid,
+      type: "reply",
+      summary: `${input.authorName} replied in ${input.threadTitle || "a forum thread"}.`,
+      href: `/forum/${input.threadId}`,
+      actorUid: input.authorUid,
+    }).catch(() => undefined);
+  }
+  return ref.id;
 }
 
 export async function deleteThread(threadId: string): Promise<void> {

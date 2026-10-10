@@ -11,6 +11,7 @@ import type { AppNotification } from "@/lib/types";
 export default function NotificationsPage() {
   const { user } = useAuth();
   const [items, setItems] = useState<AppNotification[]>([]);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -26,8 +27,13 @@ export default function NotificationsPage() {
       <div className="max-w-2xl mx-auto space-y-4">
         <div className="flex justify-between items-center">
           <h1 className="text-3xl font-bold text-accent-gold">Notices</h1>
-          <button type="button" className="btn btn-secondary text-sm px-3 py-1" onClick={() => markAllNotificationsRead(user.uid)}>Mark all read</button>
+          <button type="button" className="btn btn-secondary text-sm px-3 py-1" onClick={() => {
+            markAllNotificationsRead(user.uid)
+              .then(() => setNotice("All notices marked read."))
+              .catch(() => setNotice("Could not mark notices read."));
+          }}>Mark all read</button>
         </div>
+        {notice && <p className="text-sm font-bold" role="status">{notice}</p>}
         {items.map((item) => (
           <Link
             key={item.id}

@@ -101,6 +101,8 @@ export interface Faction {
   htmlStatus?: HtmlStatus;
   htmlSubmittedAt?: Timestamp;
   ownerUids: string[];
+  population?: number | null;
+  foundedOn?: string | null;
   createdAt?: Timestamp;
 }
 
@@ -114,6 +116,8 @@ export interface FactionInput {
   description?: string;
   lore?: string;
   mapImageUrl?: string;
+  population?: number | null;
+  foundedOn?: string | null;
 }
 
 export interface Character {
@@ -152,7 +156,7 @@ export interface PostingIdentity {
 
 export type Stance = "for" | "against" | "neutral";
 
-export type ReactionType = "agrees" | "disputes" | "witnessed";
+export type ReactionType = "likes" | "agrees" | "disputes" | "witnessed";
 
 export interface Reply {
   id: string;
@@ -171,6 +175,7 @@ export interface Reaction {
 }
 
 export interface ReactionCounts {
+  likes: number;
   agrees: number;
   disputes: number;
   witnessed: number;
@@ -218,11 +223,22 @@ export interface WikiEntry {
   updatedAt?: Timestamp;
 }
 
+export type PinCategory = "capital" | "outpost" | "landmark";
+
+export const PIN_CATEGORIES: PinCategory[] = ["capital", "outpost", "landmark"];
+
+export const PIN_CATEGORY_LABELS: Record<PinCategory, string> = {
+  capital: "Capital",
+  outpost: "Outpost",
+  landmark: "Landmark",
+};
+
 export interface MapPin {
   id: string;
   title: string;
   nx: number;
   ny: number;
+  category?: PinCategory | null;
   x?: number | null;
   z?: number | null;
   postId?: string | null;

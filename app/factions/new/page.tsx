@@ -37,6 +37,8 @@ export default function NewFactionPage() {
       bio: data.bio,
       description: data.bio,
       lore: data.lore,
+      population: data.population ? Number(data.population) : null,
+      foundedOn: data.foundedOn || null,
     }), 15000);
 
     let uploadNote = "";

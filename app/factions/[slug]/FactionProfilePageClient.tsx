@@ -22,6 +22,8 @@ import { CityTreaties } from "@/components/treaties/CityTreaties";
 
 import { CityMapCard } from "@/components/cities/CityMapCard";
 
+import { CityShowcase } from "@/components/cities/CityShowcase";
+
 import { getFactionBySlug, isFactionOwner } from "@/lib/firestore/factions";
 
 import { getCharactersForFaction } from "@/lib/firestore/characters";
@@ -75,6 +77,8 @@ export default function FactionProfilePageClient() {
   const [loading, setLoading] = useState(true);
 
   const [feedLoading, setFeedLoading] = useState(false);
+
+  const [feedError, setFeedError] = useState("");
 
   const [error, setError] = useState("");
 
@@ -178,7 +182,10 @@ export default function FactionProfilePageClient() {
 
       })
 
-      .catch(() => setFactionPosts([]))
+      .catch(() => {
+        setFeedError("Could not load this city's posts.");
+        setFactionPosts([]);
+      })
 
       .finally(() => setFeedLoading(false));
 
@@ -546,6 +553,8 @@ export default function FactionProfilePageClient() {
 
 
 
+          <CityShowcase faction={faction} posts={factionPosts} />
+
           {faction.bio && (
 
             <section className="glass-panel p-6">
@@ -685,6 +694,8 @@ export default function FactionProfilePageClient() {
 
 
           <h2 className="text-xl font-bold text-accent-gold mb-4">City feed</h2>
+
+            {feedError && <p className="text-sm font-bold mb-3" role="alert">{feedError}</p>}
 
             {feedLoading ? (
 

@@ -38,6 +38,8 @@ function docToFaction(id: string, data: Record<string, unknown>): Faction {
     htmlStatus: data.htmlStatus as Faction["htmlStatus"],
     htmlSubmittedAt: data.htmlSubmittedAt as Faction["htmlSubmittedAt"],
     ownerUids: (data.ownerUids as string[]) ?? [],
+    population: typeof data.population === "number" ? data.population : null,
+    foundedOn: typeof data.foundedOn === "string" ? data.foundedOn : null,
     createdAt: data.createdAt as Faction["createdAt"],
   };
 }
@@ -87,6 +89,8 @@ export async function createFaction(
     description,
     lore: input.lore ?? "",
     mapImageUrl: input.mapImageUrl ?? null,
+    population: input.population ?? null,
+    foundedOn: input.foundedOn ?? null,
     ownerUids: [creatorUid],
     createdAt: serverTimestamp(),
   }));
@@ -109,6 +113,8 @@ export async function createFaction(
     description,
     lore: input.lore,
     mapImageUrl: input.mapImageUrl,
+    population: input.population ?? null,
+    foundedOn: input.foundedOn ?? null,
     ownerUids: [creatorUid],
   };
 }
@@ -148,6 +154,8 @@ export async function updateFaction(
   }
   if (input.lore !== undefined) updates.lore = input.lore;
   if (input.mapImageUrl !== undefined) updates.mapImageUrl = input.mapImageUrl;
+  if (input.population !== undefined) updates.population = input.population;
+  if (input.foundedOn !== undefined) updates.foundedOn = input.foundedOn;
   await updateDoc(doc(db, FACTIONS, factionId), updates);
 }
 

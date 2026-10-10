@@ -114,6 +114,8 @@ export default function FactionEditPage() {
       lore: data.lore,
       bannerUrl,
       sigilUrl,
+      population: data.population ? Number(data.population) : null,
+      foundedOn: data.foundedOn || null,
     });
 
     await refreshFactionContext();
@@ -220,6 +222,8 @@ export default function FactionEditPage() {
               colors: faction.colors,
               bio: faction.bio,
               lore: faction.lore,
+              population: faction.population != null ? String(faction.population) : "",
+              foundedOn: faction.foundedOn || "",
               bannerUrl: faction.bannerUrl,
               sigilUrl: faction.sigilUrl,
             }}

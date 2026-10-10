@@ -8,6 +8,7 @@ import { ensureCityOwnerClaim, getAllFactions } from "@/lib/firestore/factions";
 import {
   addTreatyComment,
   deleteTreatyWiki,
+  breakTreaty,
   getTreatyBundle,
   respondToTreaty,
   saveTreatyWiki,
@@ -26,6 +27,7 @@ import {
 import type { Faction } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { actionError } from "@/lib/async";
 
 export default function TreatyPage() {
   const params = useParams<{ id: string }>();
@@ -44,6 +46,9 @@ export default function TreatyPage() {
   const [wikiTitle, setWikiTitle] = useState("");
   const [wikiBody, setWikiBody] = useState("");
   const [acting, setActing] = useState("");
+  const [breakReason, setBreakReason] = useState("");
+  const [breakCityId, setBreakCityId] = useState("");
+  const [breakNotice, setBreakNotice] = useState("");
 
   const load = () => {
     if (!params.id) return;
@@ -77,7 +82,7 @@ export default function TreatyPage() {
   if (!treaty || !record) return <ScreenStatus>Loading…</ScreenStatus>;
 
   const revision = currentRevision(record);
-  const status = treatyStatus(record);
+  const status = treaty.status === "broken" ? "broken" : treatyStatus(record);
   const parties = ratifiedCityIds(record);
   const owned = cities.filter((city) => user && city.ownerUids.includes(user.uid));
   const nameOf = (id: string) => cities.find((city) => city.id === id)?.name || "A city";
@@ -99,6 +104,30 @@ export default function TreatyPage() {
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not record that response.");
+    } finally {
+      setActing("");
+    }
+  };
+
+  const breakPact = async () => {
+    if (!user || !breakCityId) return;
+    const city = cities.find((item) => item.id === breakCityId);
+    setActing("break");
+    setError("");
+    setBreakNotice("");
+    try {
+      const postId = await breakTreaty({
+        treaty,
+        cityId: breakCityId,
+        cityName: city?.name || "A city",
+        uid: user.uid,
+        reason: breakReason,
+      });
+      setBreakNotice(postId);
+      setBreakReason("");
+      load();
+    } catch (err) {
+      setError(actionError(err, "Could not break that treaty."));
     } finally {
       setActing("");
     }
@@ -128,6 +157,17 @@ export default function TreatyPage() {
           <p className="text-xs uppercase tracking-wide text-accent-gold">{status} · {TREATY_TYPE_LABELS[revision.type]}{revision.open ? " · open" : ""}</p>
           <h1 className="text-3xl font-bold text-accent-gold">{revision.name}</h1>
           <p className="mt-2">{revision.purpose}</p>
+          {(treaty.expiresOn || treaty.renewsOn) && (
+            <p className="text-sm text-text-muted mt-3">
+              {treaty.expiresOn ? `Expires ${treaty.expiresOn}` : "No expiry"}
+              {treaty.renewsOn ? ` · Renews ${treaty.renewsOn}` : ""}
+            </p>
+          )}
+          {status === "broken" && (
+            <p className="text-sm font-bold mt-3" role="status">
+              Broken{treaty.brokenReason ? `: ${treaty.brokenReason}` : "."}
+            </p>
+          )}
         </header>
         <section className="glass-panel p-6 space-y-3">
           <h2 className="text-xl font-bold text-accent-gold">Nature</h2>
@@ -153,7 +193,48 @@ export default function TreatyPage() {
           </p>
         </section>
 
-        {user && owned.length > 0 && (
+        <section className="glass-panel p-6">
+          <h2 className="text-xl font-bold text-accent-gold mb-3">Vote history</h2>
+          {record.responses.length === 0 ? (
+            <p className="text-text-muted text-sm">No votes recorded yet.</p>
+          ) : (
+            <ul className="space-y-2">
+              {record.responses.map((response, index) => (
+                <li key={`${response.cityId}-${response.revision}-${response.decision}-${index}`} className="text-sm">
+                  <span className="font-bold">{nameOf(response.cityId)}</span>
+                  <span className="text-text-muted"> · revision {response.revision} · {response.decision}</span>
+                  {response.note ? <span> — {response.note}</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {status === "active" && user && owned.some((city) => parties.includes(city.id)) && (
+          <section className="glass-panel p-6 space-y-3">
+            <h2 className="text-xl font-bold text-accent-gold">Break treaty</h2>
+            <p className="text-sm text-text-muted">This ends the treaty and posts an announcement from your city.</p>
+            <label className="form-label" htmlFor="break-city">City</label>
+            <select id="break-city" className="form-input" value={breakCityId} onChange={(event) => setBreakCityId(event.target.value)}>
+              <option value="">Choose a city</option>
+              {owned.filter((city) => parties.includes(city.id)).map((city) => (
+                <option key={city.id} value={city.id}>{city.name}</option>
+              ))}
+            </select>
+            <label className="form-label" htmlFor="break-reason">Reason</label>
+            <textarea id="break-reason" className="form-input" rows={3} value={breakReason} onChange={(event) => setBreakReason(event.target.value)} required />
+            <button type="button" className="btn btn-danger" disabled={acting === "break" || !breakCityId || !breakReason.trim()} onClick={breakPact}>
+              {acting === "break" ? "Breaking…" : "Break treaty"}
+            </button>
+            {breakNotice && (
+              <p className="text-sm font-bold text-accent-gold" role="status">
+                Treaty broken. <Link href={`/posts/${breakNotice}`} className="underline">Read the announcement</Link>
+              </p>
+            )}
+          </section>
+        )}
+
+        {user && owned.length > 0 && status !== "broken" && (
           <section className="glass-panel p-6 space-y-3">
             <h2 className="text-xl font-bold text-accent-gold">Your city&apos;s response</h2>
             {owned.map((city) => {

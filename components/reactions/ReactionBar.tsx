@@ -2,14 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { actionError } from "@/lib/async";
 import {
+  subscribeForumReactions,
   subscribeReactions,
+  toggleForumReaction,
   toggleReaction,
 } from "@/lib/firestore/reactions";
 import type { ReactionCounts, ReactionType } from "@/lib/types";
 
 interface ReactionBarProps {
-  postId: string;
+  postId?: string;
+  threadId?: string;
+  replyId?: string;
 }
 
 const REACTIONS: {
@@ -18,6 +23,12 @@ const REACTIONS: {
   icon: string;
   activeClass: string;
 }[] = [
+  {
+    type: "likes",
+    label: "Like",
+    icon: "★",
+    activeClass: "border-accent-yellow bg-accent-yellow/40 text-on-yellow",
+  },
   {
     type: "agrees",
     label: "Agrees",
@@ -38,41 +49,52 @@ const REACTIONS: {
   },
 ];
 
-export function ReactionBar({ postId }: ReactionBarProps) {
+export function ReactionBar({ postId, threadId, replyId, compact }: ReactionBarProps & { compact?: boolean }) {
   const { user } = useAuth();
   const [counts, setCounts] = useState<ReactionCounts>({
+    likes: 0,
     agrees: 0,
     disputes: 0,
     witnessed: 0,
   });
   const [userReaction, setUserReaction] = useState<ReactionType | null>(null);
   const [pending, setPending] = useState<ReactionType | null>(null);
+  const [error, setError] = useState("");
+  const forum = Boolean(threadId && replyId);
 
   useEffect(() => {
-    const unsubscribe = subscribeReactions(
-      postId,
-      (nextCounts, nextUserReaction) => {
-        setCounts(nextCounts);
-        setUserReaction(nextUserReaction);
-      },
-      user?.uid
-    );
-    return unsubscribe;
-  }, [postId, user?.uid]);
+    const onData = (nextCounts: ReactionCounts, nextUserReaction: ReactionType | null) => {
+      setCounts(nextCounts);
+      setUserReaction(nextUserReaction);
+    };
+    const onError = () => setError("Could not load reactions.");
+    if (forum && threadId && replyId) {
+      return subscribeForumReactions(threadId, replyId, onData, user?.uid, onError);
+    }
+    if (!postId) return;
+    return subscribeReactions(postId, onData, user?.uid, onError);
+  }, [postId, threadId, replyId, forum, user?.uid]);
 
   const handleReaction = async (type: ReactionType) => {
     if (!user) return;
 
     setPending(type);
+    setError("");
     try {
-      await toggleReaction(postId, user.uid, type, userReaction);
+      if (forum && threadId && replyId) {
+        await toggleForumReaction(threadId, replyId, user.uid, type, userReaction);
+      } else if (postId) {
+        await toggleReaction(postId, user.uid, type, userReaction);
+      }
+    } catch (err) {
+      setError(actionError(err, "Could not save that reaction."));
     } finally {
       setPending(null);
     }
   };
 
   return (
-    <div className="flex flex-wrap gap-3 mt-6 pt-4 border-t border-primary-brown">
+    <div className={`flex flex-wrap gap-2 ${compact ? "mt-2" : "mt-6 pt-4 border-t border-primary-brown"}`}>
       {REACTIONS.map(({ type, label, icon, activeClass }) => {
         const isActive = userReaction === type;
         const count = counts[type];
@@ -101,6 +123,7 @@ export function ReactionBar({ postId }: ReactionBarProps) {
           Sign in to react
         </span>
       )}
+      {error && <p className="text-sm font-bold w-full" role="alert">{error}</p>}
     </div>
   );
 }

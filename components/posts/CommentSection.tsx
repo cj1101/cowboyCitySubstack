@@ -10,9 +10,13 @@ import type { Reply } from "@/lib/types";
 export function CommentSection({ postId, postFactionId }: { postId: string; postFactionId: string }) {
   const [replies, setReplies] = useState<Reply[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    return subscribeReplies(postId, (data) => setReplies(data));
+    return subscribeReplies(postId, (data) => {
+      setError("");
+      setReplies(data);
+    }, () => setError("Could not load comments."));
   }, [postId]);
 
   useEffect(() => {
@@ -44,6 +48,7 @@ export function CommentSection({ postId, postFactionId }: { postId: string; post
   return (
     <section className="mt-8">
       <h2 className="text-xl font-bold text-accent-gold mb-3">Comments</h2>
+      {error && <p className="text-sm font-bold mb-2" role="alert">{error}</p>}
       <div className="space-y-3">
         {replies.map((reply) => (
           <article key={reply.id} className="border border-primary-brown rounded p-3">

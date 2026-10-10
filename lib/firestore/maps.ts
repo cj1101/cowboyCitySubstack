@@ -29,6 +29,32 @@ function toPin(id: string, data: Record<string, unknown>): MapPin {
         : [],
     cityId: (data.cityId as string | null) ?? null,
     note: (data.note as string) || "",
+    category: data.category === "capital" || data.category === "outpost" || data.category === "landmark"
+      ? data.category
+      : null,
+  };
+}
+
+export interface CityBorder {
+  cityId: string;
+  points: { nx: number; ny: number }[];
+  color: string;
+}
+
+function toBorder(cityId: string, data: Record<string, unknown>): CityBorder | null {
+  const points = Array.isArray(data.points)
+    ? data.points
+        .map((point) => {
+          const row = point as { nx?: unknown; ny?: unknown };
+          return { nx: Number(row.nx), ny: Number(row.ny) };
+        })
+        .filter((point) => Number.isFinite(point.nx) && Number.isFinite(point.ny))
+    : [];
+  if (points.length < 3) return null;
+  return {
+    cityId,
+    points,
+    color: typeof data.color === "string" && data.color ? data.color : "#169C9C",
   };
 }
 
@@ -81,6 +107,26 @@ export async function updateRealmPin(
 
 export async function deleteRealmPin(pinId: string): Promise<void> {
   await deleteDoc(doc(getClientDb(), "realm_map", "overview", "pins", pinId));
+}
+
+export async function getRealmBorders(): Promise<CityBorder[]> {
+  const snap = await getDocs(collection(getClientDb(), "realm_map", "overview", "borders"));
+  return snap.docs
+    .map((item) => toBorder(item.id, item.data()))
+    .filter((border): border is CityBorder => border !== null);
+}
+
+export async function saveRealmBorder(border: CityBorder): Promise<void> {
+  await setDoc(doc(getClientDb(), "realm_map", "overview", "borders", border.cityId), {
+    cityId: border.cityId,
+    points: border.points,
+    color: border.color,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteRealmBorder(cityId: string): Promise<void> {
+  await deleteDoc(doc(getClientDb(), "realm_map", "overview", "borders", cityId));
 }
 
 export async function setCityMapImage(cityId: string, mapImageUrl: string): Promise<void> {
