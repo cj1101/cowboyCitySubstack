@@ -88,13 +88,22 @@ export async function markAllNotificationsRead(uid: string): Promise<number> {
   return unread.length;
 }
 
+/** The notices list lives at /notifications. Older links used /notices. */
+export function notificationHref(href: string | undefined): string {
+  const value = href || "/";
+  if (value === "/notices" || value.startsWith("/notices/") || value.startsWith("/notices?") || value.startsWith("/notices#")) {
+    return `/notifications${value.slice("/notices".length)}`;
+  }
+  return value;
+}
+
 export function toNotification(id: string, data: Record<string, unknown>): AppNotification {
   return {
     id,
     recipientUid: data.recipientUid as string,
     type: data.type as NotificationType,
     summary: (data.summary as string) || "",
-    href: (data.href as string) || "/",
+    href: notificationHref(data.href as string | undefined),
     read: data.read === true,
     actorUid: (data.actorUid as string) || undefined,
     kind: (data.kind as string) || undefined,

@@ -384,7 +384,7 @@ export function RealmMap({
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
-      <div className="z-30 flex shrink-0 flex-col items-start gap-2 p-2">
+      <div className="z-30 flex w-full min-w-0 shrink-0 flex-col gap-2 p-2">
         <button
           type="button"
           className="btn btn-secondary text-sm min-h-11 px-3 py-2 md:hidden"
@@ -393,8 +393,8 @@ export function RealmMap({
         >
           {toolsOpen ? "Hide tools" : "Map tools"}
         </button>
-        <div className={`${toolsOpen ? "flex" : "hidden"} md:flex w-full flex-col items-start gap-2`}>
-        <div className="glass-panel flex max-w-full flex-wrap items-center gap-2 px-2 py-2">
+        <div className={`${toolsOpen ? "flex" : "hidden"} md:flex w-full min-w-0 flex-col gap-2`}>
+        <div className="glass-panel flex w-full min-w-0 max-w-full flex-wrap items-center gap-2 px-2 py-2">
           <h1 className="text-accent-gold mr-1">Realm map</h1>
           <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => {
             const center = centerOf();
@@ -458,7 +458,7 @@ export function RealmMap({
             </label>
           )}
         </div>
-        <div className="glass-panel flex max-w-full flex-wrap items-center gap-2 px-2 py-2" role="group" aria-label="Pin categories">
+        <div className="glass-panel flex w-full min-w-0 max-w-full flex-wrap items-center gap-2 px-2 py-2" role="group" aria-label="Pin categories">
           <span className="text-sm font-bold">Pins</span>
           <FilterButton pressed={pinFilter === "all"} label="All" onClick={() => setPinFilter("all")} />
           {PIN_CATEGORIES.map((item) => (

@@ -9,6 +9,10 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Cowboy City & The Realm",
   description: "Private multimedia chronicle for the realm's city-states",
+  icons: {
+    icon: [{ url: "/favicon.ico" }, { url: "/icon.png", type: "image/png" }],
+    apple: "/apple-touch-icon.png",
+  },
 };
 
 export const viewport: Viewport = {

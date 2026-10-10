@@ -15,11 +15,11 @@ export function SearchBox({ className }: { className?: string }) {
   };
 
   return (
-    <form role="search" className={className || "flex items-center gap-1 min-w-0"} onSubmit={submit}>
+    <form role="search" className={className || "flex shrink-0 items-center gap-1"} onSubmit={submit}>
       <label className="sr-only" htmlFor={inputId}>Search the realm</label>
       <input
         id={inputId}
-        className="form-input py-1.5 text-sm w-28 sm:w-36 lg:w-44 min-h-11"
+        className="form-input py-1.5 text-sm w-24 lg:w-36 xl:w-44 min-h-11"
         placeholder="Search"
         value={q}
         onChange={(event) => setQ(event.target.value)}

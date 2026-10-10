@@ -33,6 +33,9 @@ const nextConfig: NextConfig = {
     return [
       { source: "/cities", destination: "/factions" },
       { source: "/cities/:path*", destination: "/factions/:path*" },
+      { source: "/:path+/favicon.ico", destination: "/favicon.ico" },
+      { source: "/:path+/apple-touch-icon.png", destination: "/apple-touch-icon.png" },
+      { source: "/:path+/apple-touch-icon-precomposed.png", destination: "/apple-touch-icon-precomposed.png" },
     ];
   },
 };
