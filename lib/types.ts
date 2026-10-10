@@ -218,6 +218,27 @@ export interface WikiEntry {
   updatedAt?: Timestamp;
 }
 
+export const PIN_CATEGORIES = ["capital", "outpost", "landmark", "other"] as const;
+
+export type PinCategory = (typeof PIN_CATEGORIES)[number];
+
+export const PIN_CATEGORY_LABELS: Record<PinCategory, string> = {
+  capital: "Capital",
+  outpost: "Outpost",
+  landmark: "Landmark",
+  other: "Other",
+};
+
+export interface MapPoint {
+  nx: number;
+  ny: number;
+}
+
+export interface CityBorder {
+  cityId: string;
+  points: MapPoint[];
+}
+
 export interface MapPin {
   id: string;
   title: string;
@@ -230,6 +251,7 @@ export interface MapPin {
   wikiEntryIds?: string[];
   cityId?: string | null;
   note?: string;
+  category?: PinCategory;
 }
 
 export interface DirectMessage {

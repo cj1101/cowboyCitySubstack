@@ -98,6 +98,7 @@ export function MapBoard({
           onSubmit={async (event) => {
             event.preventDefault();
             setBusy(true);
+            setError("");
             try {
               await onAddPin({
                 title: title.trim(),
@@ -114,6 +115,9 @@ export function MapBoard({
               setWikiEntryId("");
               setX("");
               setZ("");
+              setNotice("Pin saved.");
+            } catch (err) {
+              setError(actionError(err, "Could not save that pin."));
             } finally {
               setBusy(false);
             }
@@ -139,7 +143,19 @@ export function MapBoard({
               {pin.postId ? <Link className="ml-2 text-accent-gold" href={`/posts/${pin.postId}`}>Post</Link> : null}
             </span>
             {canEdit && (
-              <button type="button" className="text-danger" onClick={() => onDeletePin(pin.id)}>Remove</button>
+              <button
+                type="button"
+                className="text-danger"
+                onClick={() => {
+                  setError("");
+                  setNotice("");
+                  onDeletePin(pin.id)
+                    .then(() => setNotice("Pin removed."))
+                    .catch((err) => setError(actionError(err, "Could not remove that pin.")));
+                }}
+              >
+                Remove
+              </button>
             )}
           </li>
         ))}

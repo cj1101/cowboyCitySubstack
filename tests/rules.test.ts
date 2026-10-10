@@ -9,6 +9,7 @@ import {
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -586,6 +587,89 @@ async function main() {
   await assertFails(listAll(ref(treatyFriend.storage(), "posts/pact-post")));
   await assertSucceeds(listAll(ref(treatySheriff.storage(), "posts/pact-post")));
   console.log("ok treaty create and city media");
+
+  const border = {
+    cityId: "city1",
+    updatedAt: Timestamp.now(),
+    points: [
+      { nx: 0.2, ny: 0.2 },
+      { nx: 0.4, ny: 0.25 },
+      { nx: 0.35, ny: 0.45 },
+    ],
+  };
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "borders", "city1"), border));
+  await assertSucceeds(getDoc(doc(treatyVisitor.firestore(), "realm_map", "overview", "borders", "city1")));
+  const lurker = env.authenticatedContext("lurker", { email: "lurker@realm.test" });
+  await assertSucceeds(getDocs(collection(lurker.firestore(), "realm_map", "overview", "borders")));
+  await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "realm_map", "overview", "borders", "city1")));
+  await assertFails(setDoc(doc(treatyOther.firestore(), "realm_map", "overview", "borders", "city1"), {
+    ...border,
+    points: [
+      { nx: 0.1, ny: 0.1 },
+      { nx: 0.2, ny: 0.1 },
+      { nx: 0.2, ny: 0.2 },
+    ],
+  }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "borders", "city1"), {
+    ...border,
+    points: [
+      { nx: 0.2, ny: 0.2 },
+      { nx: 1.4, ny: 0.25 },
+      { nx: 0.35, ny: 0.45 },
+    ],
+  }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "borders", "city1"), {
+    cityId: "city1",
+    updatedAt: Timestamp.now(),
+    points: [
+      { nx: 0.2, ny: 0.2 },
+      { nx: 0.4, ny: 0.25 },
+    ],
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "realm_map", "overview", "borders", "city2"), {
+    ...border,
+    cityId: "city2",
+  }));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "realm_map", "overview", "borders", "city3"), {
+    ...border,
+    cityId: "city3",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "realm_map", "overview", "borders", "city1"), border));
+  await assertSucceeds(deleteDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "borders", "city1")));
+  await assertFails(deleteDoc(doc(treatyVisitor.firestore(), "realm_map", "overview", "borders", "city2")));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "realm_map", "overview", "pins", "keep"), {
+    title: "Cascadia",
+    nx: 0.22,
+    ny: 0.41,
+    category: "capital",
+    cityId: "city1",
+    note: "",
+  }));
+  await assertFails(setDoc(doc(treatySheriff.firestore(), "realm_map", "overview", "pins", "bad"), {
+    title: "Bad",
+    nx: 0.22,
+    ny: 0.41,
+    category: "castle",
+  }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "pins", "member"), {
+    title: "Member pin",
+    nx: 0.22,
+    ny: 0.41,
+    category: "capital",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "factions", "city1", "pins", "outpost"), {
+    title: "Watchtower",
+    nx: 0.5,
+    ny: 0.5,
+    category: "outpost",
+  }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "factions", "city1", "pins", "bad-kind"), {
+    title: "Watchtower",
+    nx: 0.5,
+    ny: 0.5,
+    category: "banner",
+  }));
+  console.log("ok borders and pin categories");
 
   await env.cleanup();
   assert.ok(true);
