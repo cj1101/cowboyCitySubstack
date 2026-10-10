@@ -5,7 +5,7 @@ import Link from "next/link";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
 import { getAllFactions } from "@/lib/firestore/factions";
 import { TREATY_TYPE_LABELS } from "@/lib/treaties/machine";
-import { actionError } from "@/lib/async";
+import { actionError, withTimeout } from "@/lib/async";
 import { LoadNotice } from "@/components/ui/LoadNotice";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 import type { Faction } from "@/lib/types";
@@ -14,12 +14,13 @@ export default function TreatiesPage() {
   const [treaties, setTreaties] = useState<StoredTreaty[]>([]);
   const [cities, setCities] = useState<Faction[]>([]);
   const [error, setError] = useState("");
-  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     setError("");
-    Promise.all([listActiveTreaties(), getAllFactions()])
+    setLoading(true);
+    withTimeout(Promise.all([listActiveTreaties(), getAllFactions()]))
       .then(([items, factions]) => {
         if (cancelled) return;
         setTreaties(items);
@@ -27,11 +28,14 @@ export default function TreatiesPage() {
       })
       .catch((err) => {
         if (!cancelled) setError(actionError(err, "Could not load treaties."));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, []);
 
   const nameOf = (id: string) => cities.find((city) => city.id === id)?.name || "City";
 
@@ -48,8 +52,9 @@ export default function TreatiesPage() {
             <Link href="/treaties/new" className="btn text-sm px-4 py-2 min-h-11">Propose</Link>
           </div>
         </div>
-        <LoadNotice message={error} onRetry={() => setAttempt((value) => value + 1)} />
-        {!error && treaties.length === 0 ? (
+        <LoadNotice message={error} onRetry={() => window.location.reload()} />
+        {loading && !error ? <p className="text-text-muted">Loading treaties…</p> : null}
+        {!loading && !error && treaties.length === 0 ? (
           <p className="text-text-muted">No active treaties yet.</p>
         ) : (
           treaties.map((treaty) => (

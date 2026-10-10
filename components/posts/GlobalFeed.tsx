@@ -12,6 +12,7 @@ import {
   publishDueScheduledPosts,
 } from "@/lib/firestore/posts";
 import { getFollowedCityIds } from "@/lib/firestore/follows";
+import { withTimeout } from "@/lib/async";
 import type { Character, Faction, Post } from "@/lib/types";
 
 export function GlobalFeed() {
@@ -27,7 +28,6 @@ export function GlobalFeed() {
   const [followed, setFollowed] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!user) return;
@@ -48,7 +48,7 @@ export function GlobalFeed() {
     setLoading(true);
     setError(null);
 
-    getPosts({ factionId: factionFilter || null })
+    withTimeout(getPosts({ factionId: factionFilter || null }))
       .then(async (fetched) => {
         setPosts(fetched);
         const fMap = await getFactionsMap(fetched.map((p) => p.factionId));
@@ -61,7 +61,7 @@ export function GlobalFeed() {
         setError("Could not load the feed. Check your connection and try again.");
       })
       .finally(() => setLoading(false));
-  }, [user, authLoading, factionFilter, attempt]);
+  }, [user, authLoading, factionFilter]);
 
   if (authLoading) {
     return (
@@ -141,7 +141,7 @@ export function GlobalFeed() {
         {error && (
           <div className="glass-panel p-6 text-center space-y-3" role="alert">
             <p className="font-bold">{error}</p>
-            <button type="button" className="btn text-sm px-4 py-2 min-h-11" onClick={() => setAttempt((value) => value + 1)}>
+            <button type="button" className="btn text-sm px-4 py-2 min-h-11" onClick={() => window.location.reload()}>
               Retry
             </button>
           </div>

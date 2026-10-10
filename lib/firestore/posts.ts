@@ -5,6 +5,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   orderBy,
   query,
   serverTimestamp,
@@ -128,9 +129,10 @@ function postCollectionFor(status: PostStatus | undefined): string {
   return isPrivateStatus(status) ? DRAFTS_COLLECTION : POSTS_COLLECTION;
 }
 
-async function fetchPostQuery(constraints: QueryConstraint[]): Promise<Post[]> {
+async function fetchPostQuery(constraints: QueryConstraint[], fromServer = false): Promise<Post[]> {
   const db = getClientDb();
-  const snap = await getDocs(query(collection(db, POSTS_COLLECTION), ...constraints));
+  const read = fromServer ? getDocsFromServer : getDocs;
+  const snap = await read(query(collection(db, POSTS_COLLECTION), ...constraints));
   return snap.docs.map((d) => docToPost(d.id, d.data()));
 }
 
@@ -145,11 +147,11 @@ export async function getPosts(options?: {
       fetchPostQuery([
         where("cityIds", "array-contains", cityId),
         orderBy("createdAt", "desc"),
-      ]),
+      ], true),
       fetchPostQuery([
         where("factionId", "==", cityId),
         orderBy("createdAt", "desc"),
-      ]),
+      ], true),
     ]);
     const byId = new Map<string, Post>();
     for (const post of [...tagged, ...primary]) byId.set(post.id, post);
@@ -158,7 +160,7 @@ export async function getPosts(options?: {
       (a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0)
     );
   } else {
-    posts = await fetchPostQuery([orderBy("createdAt", "desc")]);
+    posts = await fetchPostQuery([orderBy("createdAt", "desc")], true);
   }
 
   posts = posts.filter((post) => !isPrivateStatus(post.status));
@@ -212,9 +214,9 @@ export async function getMyPostsByStatus(
     return (await fetchPostQuery([
       where("authorUid", "==", authorUid),
       orderBy("createdAt", "desc"),
-    ])).filter((post) => !isPrivateStatus(post.status));
+    ], true)).filter((post) => !isPrivateStatus(post.status));
   }
-  const snap = await getDocs(query(
+  const snap = await getDocsFromServer(query(
     collection(db, DRAFTS_COLLECTION),
     where("authorUid", "==", authorUid),
     where("status", "==", status),

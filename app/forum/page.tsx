@@ -5,7 +5,7 @@ import Link from "next/link";
 import { listThreads, type ForumThread } from "@/lib/firestore/forum";
 import { getAllFactions } from "@/lib/firestore/factions";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
-import { actionError } from "@/lib/async";
+import { actionError, withTimeout } from "@/lib/async";
 import { LoadNotice } from "@/components/ui/LoadNotice";
 import type { Faction } from "@/lib/types";
 
@@ -16,12 +16,13 @@ export default function ForumPage() {
   const [cityFilter, setCityFilter] = useState("");
   const [treatyFilter, setTreatyFilter] = useState("");
   const [error, setError] = useState("");
-  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     setError("");
-    Promise.all([listThreads(), getAllFactions(), listActiveTreaties()])
+    setLoading(true);
+    withTimeout(Promise.all([listThreads(), getAllFactions(), listActiveTreaties()]))
       .then(([items, factions, treaties]) => {
         if (cancelled) return;
         setThreads(items);
@@ -30,11 +31,14 @@ export default function ForumPage() {
       })
       .catch((err) => {
         if (!cancelled) setError(actionError(err, "Could not load the forum."));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, []);
 
   const visible = threads.filter((thread) => {
     if (cityFilter && thread.cityId !== cityFilter) return false;
@@ -62,8 +66,9 @@ export default function ForumPage() {
             {Object.entries(treatyNames).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
           </select>
         </div>
-        <LoadNotice message={error} onRetry={() => setAttempt((value) => value + 1)} />
-        {!error && visible.length === 0 ? <p className="text-text-muted">No threads yet.</p> : null}
+        <LoadNotice message={error} onRetry={() => window.location.reload()} />
+        {loading && !error ? <p className="text-text-muted">Loading threads…</p> : null}
+        {!loading && !error && visible.length === 0 ? <p className="text-text-muted">No threads yet.</p> : null}
         {!error && visible.map((thread) => (
           <article key={thread.id} className="glass-panel p-5">
             <Link href={`/forum/${thread.id}`} className="text-xl font-bold text-accent-gold">{thread.title}</Link>
