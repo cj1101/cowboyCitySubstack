@@ -9,6 +9,9 @@ import type { Faction } from "@/lib/types";
 export function CityPanel({ faction, isOwner }: { faction: Faction; isOwner: boolean }) {
   const { user } = useAuth();
   const [following, setFollowing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [followError, setFollowError] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -18,21 +21,32 @@ export function CityPanel({ faction, isOwner }: { faction: Faction; isOwner: boo
   }, [user, faction.id]);
 
   const toggleFollow = async () => {
-    if (!user) return;
-    if (following) {
-      await unfollowCity(user.uid, faction.id);
-      setFollowing(false);
-    } else {
-      await followCity(user.uid, faction.id);
-      setFollowing(true);
+    if (!user || busy) return;
+    setBusy(true);
+    setFollowError("");
+    setNotice("");
+    try {
+      if (following) {
+        await unfollowCity(user.uid, faction.id);
+        setFollowing(false);
+        setNotice("Unfollowed this city.");
+      } else {
+        await followCity(user.uid, faction.id);
+        setFollowing(true);
+        setNotice("Following this city.");
+      }
+    } catch (error) {
+      setFollowError(error instanceof Error ? error.message : "Could not update follow.");
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <section className="glass-panel p-6 space-y-4">
       <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn btn-secondary text-sm px-4 py-2" onClick={toggleFollow}>
-          {following ? "Following" : "Follow city"}
+        <button type="button" className="btn btn-secondary text-sm px-4 py-2" onClick={toggleFollow} disabled={busy} aria-busy={busy}>
+          {busy ? "Saving…" : following ? "Following" : "Follow city"}
         </button>
         <Link href={`/cities/${faction.slug}/map`} className="btn btn-secondary text-sm px-4 py-2">
           Map
@@ -46,6 +60,8 @@ export function CityPanel({ faction, isOwner }: { faction: Faction; isOwner: boo
           </Link>
         )}
       </div>
+      {notice && <p className="text-sm font-bold text-accent-gold" role="status">{notice}</p>}
+      {followError && <p className="text-sm font-bold" role="alert">{followError}</p>}
       {(faction.description || faction.bio) && (
         <p className="text-text-light whitespace-pre-wrap">{faction.description || faction.bio}</p>
       )}

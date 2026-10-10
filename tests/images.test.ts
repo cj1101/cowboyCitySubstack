@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { asUploadError, isDisplayableImageUrl, UPLOAD_FAILED_MESSAGE } from "../lib/images";
+import { asUploadError, isDisplayableImageUrl, shouldOptimizeImage, UPLOAD_FAILED_MESSAGE } from "../lib/images";
 
 assert.equal(isDisplayableImageUrl("/realm-map.jpg"), true);
 assert.equal(
@@ -18,5 +18,9 @@ assert.equal(isDisplayableImageUrl(""), false);
 assert.equal(asUploadError(new Error("Firebase Storage: permission denied")).message, UPLOAD_FAILED_MESSAGE);
 assert.equal(asUploadError(new Error("Images must be under 12 MB before upload.")).message, "Images must be under 12 MB before upload.");
 assert.equal(isDisplayableImageUrl("http://127.0.0.1:9199/v0/b/cowboycityrealm.firebasestorage.app/o/factions%2Fa%2Fmap.jpg?alt=media&token=abc"), true);
+assert.equal(shouldOptimizeImage("https://mc-heads.net/avatar/Notch"), true);
+assert.equal(shouldOptimizeImage("https://firebasestorage.googleapis.com/v0/b/cowboycityrealm/o/a.jpg"), true);
+assert.equal(shouldOptimizeImage("/demo/banner.png"), true);
+assert.equal(shouldOptimizeImage("http://127.0.0.1:9199/v0/b/cowboycityrealm/o/a.jpg"), false);
 
 console.log("image url tests passed");

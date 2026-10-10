@@ -96,6 +96,10 @@ export interface Faction {
   description?: string;
   lore?: string;
   mapImageUrl?: string;
+  motto?: string;
+  population?: number | null;
+  foundedOn?: string | null;
+  gallery?: string[];
   liveHtml?: string;
   pendingHtml?: string;
   htmlStatus?: HtmlStatus;
@@ -114,6 +118,10 @@ export interface FactionInput {
   description?: string;
   lore?: string;
   mapImageUrl?: string;
+  motto?: string | null;
+  population?: number | null;
+  foundedOn?: string | null;
+  gallery?: string[];
 }
 
 export interface Character {

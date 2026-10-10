@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { PersonName } from "@/components/profile/PersonName";
 import { ensureCityOwnerClaim, getAllFactions } from "@/lib/firestore/factions";
 import {
   addTreatyComment,
@@ -211,7 +212,7 @@ export default function TreatyPage() {
           <h2 className="text-xl font-bold text-accent-gold">Comments</h2>
           {comments.map((item) => (
             <article key={item.id} className="border-b border-primary-brown pb-2">
-              <p className="text-sm font-bold">{item.authorName}</p>
+              <p className="text-sm font-bold"><PersonName uid={item.authorUid} name={item.authorName} /></p>
               <p className="whitespace-pre-wrap">{item.body}</p>
             </article>
           ))}

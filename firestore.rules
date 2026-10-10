@@ -105,6 +105,60 @@ service cloud.firestore {
           .hasAny(['liveHtml', 'pendingHtml', 'htmlStatus', 'htmlSubmittedAt', 'htmlReviewedAt', 'ownerUids']);
     }
 
+    // Civic fields live on the city document. Owners may set or clear them.
+    function validCityFacts() {
+      return (
+        (
+          !request.resource.data.keys().hasAny(['population']) ||
+          request.resource.data.population == null ||
+          (
+            request.resource.data.population is int &&
+            request.resource.data.population >= 0 &&
+            request.resource.data.population <= 1000000000
+          )
+        ) &&
+        (
+          !request.resource.data.keys().hasAny(['motto']) ||
+          request.resource.data.motto == null ||
+          (
+            request.resource.data.motto is string &&
+            request.resource.data.motto.size() <= 180
+          )
+        ) &&
+        (
+          !request.resource.data.keys().hasAny(['foundedOn']) ||
+          request.resource.data.foundedOn == null ||
+          (
+            request.resource.data.foundedOn is string &&
+            request.resource.data.foundedOn.size() <= 32
+          )
+        ) &&
+        (
+          !request.resource.data.keys().hasAny(['gallery']) ||
+          (
+            request.resource.data.gallery is list &&
+            request.resource.data.gallery.size() <= 24
+          )
+        )
+      );
+    }
+
+    function validMinecraftName() {
+      return !request.resource.data.keys().hasAny(['minecraftUsername']) ||
+        request.resource.data.minecraftUsername == null ||
+        (
+          request.resource.data.minecraftUsername is string &&
+          (
+            request.resource.data.minecraftUsername.size() == 0 ||
+            (
+              request.resource.data.minecraftUsername.size() >= 3 &&
+              request.resource.data.minecraftUsername.size() <= 16 &&
+              request.resource.data.minecraftUsername.matches('^[A-Za-z0-9_]+$')
+            )
+          )
+        );
+    }
+
     function ownerManagingCoOwners(factionId) {
       return isFactionOwner(factionId) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUids']) &&
@@ -231,14 +285,15 @@ service cloud.firestore {
         request.resource.data.isAdmin == false &&
         request.resource.data.status in ['pending', 'approved'] &&
         request.resource.data.email is string &&
-        request.resource.data.email.lower() == authEmail();
+        request.resource.data.email.lower() == authEmail() &&
+        validMinecraftName();
       allow update: if isSignedIn() && (
         (isAdmin() && request.auth.uid != uid && validStatus(request.resource.data.status)) ||
         selfPromoteAllowlisted(uid) ||
         acceptOwnInvite(uid) ||
         claimOpenMembership(uid) ||
         claimCityOwner(uid) ||
-        (request.auth.uid == uid && keepsIdentity())
+        (request.auth.uid == uid && keepsIdentity() && validMinecraftName())
       );
       allow delete: if isAdmin() && request.auth.uid != uid;
 
@@ -275,11 +330,16 @@ service cloud.firestore {
         request.resource.data.name is string &&
         request.resource.data.slug is string &&
         request.resource.data.name.size() > 0 &&
-        request.resource.data.name.size() <= 80;
+        request.resource.data.name.size() <= 80 &&
+        validCityFacts();
       allow update: if isAdmin() || (
         isMember() &&
         ownsListedCity(factionId) &&
-        (ownerUpdatingProfile() || ownerSubmittingHtml() || ownerManagingCoOwners(factionId))
+        (
+          (ownerUpdatingProfile() && validCityFacts()) ||
+          ownerSubmittingHtml() ||
+          ownerManagingCoOwners(factionId)
+        )
       );
       allow delete: if isAdmin();
 
