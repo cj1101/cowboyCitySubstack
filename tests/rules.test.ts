@@ -18,7 +18,7 @@ import {
   Timestamp,
   updateDoc,
 } from "firebase/firestore";
-import { getBytes, ref, uploadString } from "firebase/storage";
+import { getBytes, listAll, ref, uploadString } from "firebase/storage";
 
 const PROJECT_ID = "cowboycityrealm";
 
@@ -576,7 +576,15 @@ async function main() {
   await assertSucceeds(uploadString(ref(treatyFriend.storage(), "posts/pact-post/clip.mp4"), "video", "raw", {
     contentType: "video/mp4",
   }));
-  await assertSucceeds(getBytes(ref(env.unauthenticatedContext().storage(), "factions/city1/map.jpg")));
+  await assertFails(getBytes(ref(env.unauthenticatedContext().storage(), "factions/city1/map.jpg")));
+  await assertSucceeds(getBytes(ref(treatyFriend.storage(), "factions/city1/map.jpg")));
+  await assertFails(getBytes(ref(env.unauthenticatedContext().storage(), "posts/pact-post/clip.mp4")));
+  await assertSucceeds(getBytes(ref(treatyOther.storage(), "posts/pact-post/clip.mp4")));
+  await assertFails(listAll(ref(env.unauthenticatedContext().storage(), "factions/city1")));
+  await assertFails(listAll(ref(treatyFriend.storage(), "factions/city1")));
+  await assertSucceeds(listAll(ref(treatySheriff.storage(), "factions/city1")));
+  await assertFails(listAll(ref(treatyFriend.storage(), "posts/pact-post")));
+  await assertSucceeds(listAll(ref(treatySheriff.storage(), "posts/pact-post")));
   console.log("ok treaty create and city media");
 
   await env.cleanup();
