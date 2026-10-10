@@ -162,6 +162,31 @@ export type Stance = "for" | "against" | "neutral";
 
 export type ReactionType = "agrees" | "disputes" | "witnessed";
 
+/** One row per person per emoji. Heart is the like; the rest are reactions. */
+export const EMOJI_REACTIONS = [
+  { id: "heart", label: "Like", glyph: "❤️" },
+  { id: "pickaxe", label: "Pickaxe", glyph: "⛏️" },
+  { id: "diamond", label: "Diamond", glyph: "💎" },
+  { id: "emerald", label: "Emerald", glyph: "💚" },
+  { id: "blaze", label: "Blaze", glyph: "🔥" },
+  { id: "crown", label: "Crown", glyph: "👑" },
+] as const;
+
+export type EmojiReactionId = (typeof EMOJI_REACTIONS)[number]["id"];
+
+export interface EmojiReaction {
+  uid: string;
+  emoji: EmojiReactionId;
+}
+
+export interface PostComment {
+  id: string;
+  authorUid: string;
+  authorName: string;
+  body: string;
+  createdAt?: Timestamp;
+}
+
 export interface Reply {
   id: string;
   factionId: string;
@@ -284,7 +309,12 @@ export type NotificationType =
   | "reply"
   | "dm"
   | "approval"
-  | "treaty";
+  | "treaty"
+  | "reaction"
+  | "comment";
+
+/** Extra detail for type "treaty". Invites, counters, and ratifications stay one notice type. */
+export type TreatyNoticeKind = "invite" | "counter" | "ratified";
 
 export interface AppNotification {
   id: string;
@@ -294,6 +324,7 @@ export interface AppNotification {
   href: string;
   read: boolean;
   actorUid?: string;
+  kind?: string;
   createdAt?: Timestamp;
 }
 

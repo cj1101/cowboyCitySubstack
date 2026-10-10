@@ -12,6 +12,8 @@ import { PostTypeBadge } from "@/components/posts/PostTypeBadge";
 import { DebateThread } from "@/components/debates/DebateThread";
 import { ReactionBar } from "@/components/reactions/ReactionBar";
 import { PersonName } from "@/components/profile/PersonName";
+import { EmojiReactionBar } from "@/components/reactions/EmojiReactionBar";
+import { PostComments } from "@/components/posts/PostComments";
 import { getClientDb } from "@/lib/firebase";
 import {
   getCharacter,
@@ -253,6 +255,11 @@ export default function PostDetailPage() {
               ))}
             </div>
           )}
+
+          <EmojiReactionBar target={{ kind: "post", postId: post.id, authorUid: post.authorUid, title: post.title }} />
+          <div className="mt-4">
+            <PostComments postId={post.id} postAuthorUid={post.authorUid} postTitle={post.title} anchor="comments" />
+          </div>
 
           <ReactionBar postId={post.id} />
 

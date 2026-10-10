@@ -870,6 +870,167 @@ async function main() {
   }));
   console.log("ok treaty break, renewal, and search tokens");
 
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "posts", "feed1"), {
+    type: "lore",
+    factionId: "city1",
+    authorUid: "friend",
+    title: "Lanterns",
+    body: "The dock is lit.",
+    cityIds: ["city1"],
+    referencedPostIds: [],
+    spoiler: false,
+    pinned: false,
+    status: "published",
+  }));
+  const comment = {
+    authorUid: "visitor",
+    authorName: "Visitor",
+    body: "Those lanterns are bright.",
+    createdAt: Timestamp.now(),
+  };
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "comments", "c1"), comment));
+  await assertSucceeds(getDocs(collection(treatyOther.firestore(), "posts", "feed1", "comments")));
+  await assertFails(getDocs(collection(env.unauthenticatedContext().firestore(), "posts", "feed1", "comments")));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "comments", "empty"), {
+    ...comment,
+    body: "",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "comments", "stolen"), {
+    ...comment,
+    authorUid: "other",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "missing", "comments", "c1"), comment));
+  await assertFails(updateDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "comments", "c1"), {
+    body: "Changed.",
+  }));
+  await assertFails(deleteDoc(doc(treatyOther.firestore(), "posts", "feed1", "comments", "c1")));
+  await assertSucceeds(deleteDoc(doc(treatySheriff.firestore(), "posts", "feed1", "comments", "c1")));
+  await assertSucceeds(setDoc(doc(treatyOther.firestore(), "posts", "feed1", "comments", "c2"), {
+    authorUid: "other",
+    authorName: "Other",
+    body: "I can see them from the ridge.",
+    createdAt: Timestamp.now(),
+  }));
+  await assertSucceeds(deleteDoc(doc(treatyOther.firestore(), "posts", "feed1", "comments", "c2")));
+
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_heart"), {
+    uid: "visitor",
+    emoji: "heart",
+  }));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_diamond"), {
+    uid: "visitor",
+    emoji: "diamond",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_heart"), {
+    uid: "visitor",
+    emoji: "heart",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_sword"), {
+    uid: "visitor",
+    emoji: "sword",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "other_heart"), {
+    uid: "other",
+    emoji: "heart",
+  }));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_heart"), {
+    uid: "visitor",
+    emoji: "diamond",
+  }));
+  await assertFails(updateDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_diamond"), {
+    emoji: "crown",
+  }));
+  await assertSucceeds(getDoc(doc(treatyOther.firestore(), "posts", "feed1", "emoji_reactions", "visitor_diamond")));
+  await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "posts", "feed1", "emoji_reactions", "visitor_diamond")));
+  await assertFails(deleteDoc(doc(treatyOther.firestore(), "posts", "feed1", "emoji_reactions", "visitor_diamond")));
+  await assertSucceeds(deleteDoc(doc(treatyVisitor.firestore(), "posts", "feed1", "emoji_reactions", "visitor_heart")));
+  await assertSucceeds(deleteDoc(doc(treatySheriff.firestore(), "posts", "feed1", "emoji_reactions", "visitor_diamond")));
+  await assertFails(setDoc(doc(treatyVisitor.firestore(), "posts", "missing", "emoji_reactions", "visitor_heart"), {
+    uid: "visitor",
+    emoji: "heart",
+  }));
+
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "threads", "dock", "replies", "r1"), {
+    body: "After the tide.",
+    imageUrls: [],
+    authorUid: "friend",
+  }));
+  await assertSucceeds(setDoc(
+    doc(treatyOther.firestore(), "threads", "dock", "replies", "r1", "emoji_reactions", "other_crown"),
+    { uid: "other", emoji: "crown" }
+  ));
+  await assertFails(setDoc(
+    doc(treatyVisitor.firestore(), "threads", "dock", "replies", "r1", "emoji_reactions", "other_crown"),
+    { uid: "other", emoji: "crown" }
+  ));
+  await assertFails(setDoc(
+    doc(treatyVisitor.firestore(), "threads", "dock", "replies", "missing", "emoji_reactions", "visitor_blaze"),
+    { uid: "visitor", emoji: "blaze" }
+  ));
+  await assertSucceeds(deleteDoc(
+    doc(treatyOther.firestore(), "threads", "dock", "replies", "r1", "emoji_reactions", "other_crown")
+  ));
+  await assertFails(getDocs(collection(
+    env.unauthenticatedContext().firestore(),
+    "threads",
+    "dock",
+    "replies",
+    "r1",
+    "emoji_reactions"
+  )));
+
+  const notice = {
+    recipientUid: "other",
+    read: false,
+    summary: "You're invited to ratify Harbor Accord.",
+    href: "/treaties/harbor",
+    createdAt: Timestamp.now(),
+  };
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "notifications", "n1"), {
+    ...notice,
+    type: "treaty",
+    kind: "invite",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "notifications", "n2"), {
+    ...notice,
+    type: "reaction",
+    summary: "Visitor reacted ❤️ to Lanterns",
+    href: "/posts/feed1",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "notifications", "n3"), {
+    ...notice,
+    type: "comment",
+    summary: "Visitor commented on Lanterns",
+    href: "/posts/feed1#comments",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "notifications", "n4"), {
+    ...notice,
+    type: "treaty",
+    kind: "counter",
+    summary: "Counter-proposal on Harbor Accord.",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "notifications", "n5"), {
+    ...notice,
+    type: "treaty",
+    kind: "ratified",
+    summary: "Harbor Accord is ratified and now active.",
+  }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "notifications", "bad-type"), {
+    ...notice,
+    type: "alert",
+  }));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "notifications", "bad-kind"), {
+    ...notice,
+    type: "treaty",
+    kind: "x".repeat(41),
+  }));
+  await assertFails(getDoc(doc(treatyVisitor.firestore(), "notifications", "n1")));
+  await assertSucceeds(getDoc(doc(treatyOther.firestore(), "notifications", "n1")));
+  await assertFails(updateDoc(doc(treatyVisitor.firestore(), "notifications", "n1"), { read: true }));
+  await assertSucceeds(updateDoc(doc(treatyOther.firestore(), "notifications", "n1"), { read: true }));
+  await assertFails(updateDoc(doc(treatyOther.firestore(), "notifications", "n2"), { summary: "rewritten" }));
+  console.log("ok social interactions");
+
   await env.cleanup();
   assert.ok(true);
   console.log("rules tests passed");

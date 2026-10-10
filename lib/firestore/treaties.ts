@@ -301,7 +301,8 @@ export async function createTreaty(
   ]));
   void notifyMany(readerUids, {
     type: "treaty",
-    summary: `${revision.name} is waiting on a response.`,
+    kind: "invite",
+    summary: `You're invited to ratify “${revision.name}”.`,
     href: `/treaties/${ref.id}`,
     actorUid: uid,
   });
@@ -362,14 +363,18 @@ async function persistResponse(
     note: response?.note || "",
     updatedAt: serverTimestamp(),
   });
+  const kind = decision === "counter" ? "counter" : decision === "accept" ? "ratified" : undefined;
   const summary =
     decision === "counter"
-      ? `${revision.name} has a new revision to ratify.`
+      ? `Counter-proposal on “${revision.name}”.`
       : decision === "accept" && status === "active"
-        ? `${revision.name} is now active.`
-        : `${revision.name}: a city ${decision === "accept" ? "ratified" : decision === "decline" ? "declined" : "withdrew"}.`;
+        ? `“${revision.name}” is ratified and now active.`
+        : decision === "accept"
+          ? `A city ratified “${revision.name}”.`
+          : `${revision.name}: a city ${decision === "decline" ? "declined" : "withdrew"}.`;
   await notifyMany(readerUids, {
     type: "treaty",
+    kind,
     summary,
     href: `/treaties/${treatyId}`,
     actorUid: uid,

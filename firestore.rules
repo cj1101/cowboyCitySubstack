@@ -387,6 +387,19 @@ service cloud.firestore {
         (isMember() && isFactionOwner(resource.data.factionId));
     }
 
+    function emojiReactionCreate(reactionId) {
+      return isMember() &&
+        request.resource.data.keys().hasOnly(['uid', 'emoji']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.emoji is string &&
+        request.resource.data.emoji in ['heart', 'pickaxe', 'diamond', 'emerald', 'blaze', 'crown'] &&
+        reactionId == request.auth.uid + '_' + request.resource.data.emoji;
+    }
+
+    function emojiReactionDelete() {
+      return isAdmin() || (isMember() && resource.data.uid == request.auth.uid);
+    }
+
     match /posts/{postId} {
       // Missing status is a legacy published post. Drafts live in /drafts so this
       // collection can be listed without a status filter.
@@ -422,6 +435,30 @@ service cloud.firestore {
           request.auth.uid == uid &&
           request.resource.data.type in ['agrees', 'disputes', 'witnessed'];
         allow delete: if isMember() && (request.auth.uid == uid || isAdmin());
+      }
+
+      // One document per person per emoji. The id is uid + "_" + emoji.
+      match /emoji_reactions/{reactionId} {
+        allow read: if isMember();
+        allow create: if emojiReactionCreate(reactionId) &&
+          exists(/databases/$(database)/documents/posts/$(postId));
+        allow delete: if emojiReactionDelete();
+      }
+
+      match /comments/{commentId} {
+        allow read: if isMember();
+        allow create: if isMember() &&
+          exists(/databases/$(database)/documents/posts/$(postId)) &&
+          request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'body', 'createdAt']) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.authorName is string &&
+          request.resource.data.authorName.size() > 0 &&
+          request.resource.data.authorName.size() <= 80 &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() > 0 &&
+          request.resource.data.body.size() <= 2000 &&
+          request.resource.data.createdAt is timestamp;
+        allow delete: if isAdmin() || (isMember() && resource.data.authorUid == request.auth.uid);
       }
     }
 
@@ -564,7 +601,11 @@ service cloud.firestore {
       allow create: if isMember() &&
         request.resource.data.recipientUid is string &&
         request.resource.data.read == false &&
-        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval', 'treaty'] &&
+        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval', 'treaty', 'reaction', 'comment'] &&
+        (!('kind' in request.resource.data) ||
+          (request.resource.data.kind is string &&
+            request.resource.data.kind.size() > 0 &&
+            request.resource.data.kind.size() <= 40)) &&
         request.resource.data.summary is string &&
         request.resource.data.summary.size() <= 500 &&
         request.resource.data.href is string;
@@ -804,6 +845,13 @@ service cloud.firestore {
           request.resource.data.imageUrls is list &&
           request.resource.data.imageUrls.size() <= 4;
         allow delete: if isAdmin() || (isMember() && resource.data.authorUid == request.auth.uid);
+
+        match /emoji_reactions/{reactionId} {
+          allow read: if isMember();
+          allow create: if emojiReactionCreate(reactionId) &&
+            exists(/databases/$(database)/documents/threads/$(threadId)/replies/$(replyId));
+          allow delete: if emojiReactionDelete();
+        }
       }
     }
   }
