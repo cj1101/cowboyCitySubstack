@@ -135,13 +135,13 @@ export function NavBar() {
   return (
     <>
       <nav className="hud">
-        <Link href="/" className="realm-wordmark inline-flex items-center min-w-0" aria-label="Cowboy City home">
+        <Link href="/" className="realm-wordmark inline-flex items-center shrink-0" aria-label="Cowboy City home">
           <RealmWordmark compact className="sm:hidden" />
           <RealmWordmark className="hidden sm:block" />
         </Link>
 
         {user && member && (
-          <div className="hidden md:flex items-center gap-4 min-w-0">
+          <div className="nav-links hidden md:flex">
             {NAV_LINKS.filter((link) => link.href !== "/" && link.href !== "/search").map((link) => (
               <Link key={link.href} href={link.href} className={navClass(link.href)}>
                 {link.label}
@@ -156,7 +156,7 @@ export function NavBar() {
           </div>
         )}
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="nav-actions">
           {user && member && (
             <NotificationBell
               uid={user.uid}

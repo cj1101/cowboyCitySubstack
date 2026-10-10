@@ -31,7 +31,7 @@ export function FactionSwitcher({ compact = false }: FactionSwitcherProps) {
 
   const selectClass = compact
     ? "form-input text-sm py-1.5 px-2 w-full"
-    : "form-input text-sm py-1.5 px-2 w-auto max-w-[140px]";
+    : "form-input text-sm py-1.5 px-2 w-auto max-w-[7.5rem] xl:max-w-[140px]";
 
   const wrapperClass = compact
     ? "flex flex-col gap-2"
@@ -40,7 +40,7 @@ export function FactionSwitcher({ compact = false }: FactionSwitcherProps) {
   return (
     <div className={wrapperClass}>
       {!compact && (
-        <label className="text-text-muted text-xs uppercase tracking-wide whitespace-nowrap">
+        <label className="hidden xl:inline text-text-muted text-xs uppercase tracking-wide whitespace-nowrap">
           Post as
         </label>
       )}
