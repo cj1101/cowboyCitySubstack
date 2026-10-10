@@ -16,7 +16,7 @@ import {
 import { listActiveTreaties } from "@/lib/firestore/treaties";
 import { getAllWikiEntries } from "@/lib/firestore/wikiEntries";
 import { uploadMapImage } from "@/lib/storage/uploads";
-import { withTimeout } from "@/lib/async";
+import { actionError, withTimeout } from "@/lib/async";
 import type { Faction, MapPin, WikiEntry } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 
@@ -29,6 +29,7 @@ export default function RealmMapPage() {
   const [cities, setCities] = useState<Faction[]>([]);
   const [wikiEntries, setWikiEntries] = useState<WikiEntry[]>([]);
   const [treaties, setTreaties] = useState<StoredTreaty[]>([]);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     Promise.all([getRealmMap(), getRealmPins(), getAllFactions(), getAllWikiEntries(), listActiveTreaties()])
@@ -38,12 +39,18 @@ export default function RealmMapPage() {
         setCities(factionList);
         setWikiEntries(entries);
         setTreaties(active);
+        setLoadError("");
       })
-      .catch(() => undefined);
+      .catch((error) => setLoadError(actionError(error, "Could not load the realm map.")));
   }, []);
 
   return (
-    <div className="h-[calc(100dvh-var(--app-nav)-var(--app-tabs))]">
+    <div className="relative h-[calc(100dvh-var(--app-nav)-var(--app-tabs))]">
+      {loadError && (
+        <p className="absolute left-3 right-3 top-20 z-40 glass-panel px-3 py-2 text-sm font-bold" role="alert">
+          {loadError}
+        </p>
+      )}
       <RealmMap
         imageUrl={imageUrl}
         pins={pins}
