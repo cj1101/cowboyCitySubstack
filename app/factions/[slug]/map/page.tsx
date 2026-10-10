@@ -48,11 +48,11 @@ export default function CityMapPage() {
               setCity({ ...city, mapImageUrl: url });
             }}
             onAddPin={async (pin) => {
-              await addCityPin(city.id, pin);
+              await withTimeout(addCityPin(city.id, pin));
               setPins(await getCityPins(city.id));
             }}
             onDeletePin={async (pinId) => {
-              await deleteCityPin(city.id, pinId);
+              await withTimeout(deleteCityPin(city.id, pinId));
               setPins(await getCityPins(city.id));
             }}
           />

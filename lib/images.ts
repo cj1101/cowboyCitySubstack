@@ -5,6 +5,19 @@ const REMOTE_IMAGE_HOST =
 export const UPLOAD_FAILED_MESSAGE =
   "Upload failed. The image was not stored.";
 
+/** Firebase Storage errors carry a code such as storage/unauthorized. */
+export function firebaseStorageCode(error: unknown): string | null {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = String((error as { code?: unknown }).code || "");
+    if (code.startsWith("storage/")) return code;
+  }
+  if (error instanceof Error) {
+    const match = error.message.match(/\(storage\/[a-z0-9-]+\)/);
+    if (match) return match[0].slice(1, -1);
+  }
+  return null;
+}
+
 export function isDisplayableImageUrl(url: string | null | undefined): boolean {
   if (!url) return false;
   if (url.startsWith("blob:")) return true;
@@ -12,17 +25,15 @@ export function isDisplayableImageUrl(url: string | null | undefined): boolean {
   return REMOTE_IMAGE_HOST.test(url);
 }
 
-/** Keep validation errors. Turn storage/network failures into one clear sentence. */
+/** Keep validation errors. Storage failures keep the Firebase code, such as storage/unauthorized. */
 export function asUploadError(error: unknown): Error {
+  const code = firebaseStorageCode(error);
+  if (code) {
+    return new Error(`Upload failed (${code}). The image was not stored.`);
+  }
   if (error instanceof Error) {
-    if (
-      /must be under|Only photos|Only images|Could not read|Could not capture|already taken|must be signed/i.test(
-        error.message
-      )
-    ) {
-      return error;
-    }
-    if (error.message === UPLOAD_FAILED_MESSAGE) return error;
+    if (error.message === UPLOAD_FAILED_MESSAGE || error.message.startsWith("Upload failed (")) return error;
+    if (!/Firebase Storage:/i.test(error.message)) return error;
   }
   return new Error(UPLOAD_FAILED_MESSAGE);
 }

@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   limit,
   orderBy,
   query,
@@ -107,7 +108,7 @@ export async function createThread(input: {
 }
 
 export async function listThreads(): Promise<ForumThread[]> {
-  const snap = await getDocs(
+  const snap = await getDocsFromServer(
     query(collection(getClientDb(), "threads"), orderBy("lastActivityAt", "desc"), limit(50))
   );
   return snap.docs.map((item) => toThread(item.id, item.data()));

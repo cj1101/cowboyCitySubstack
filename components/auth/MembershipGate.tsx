@@ -62,12 +62,12 @@ export function MembershipGate({ children }: { children: ReactNode }) {
       <div className="wood-texture min-h-[calc(100vh-4rem)] flex items-center justify-center p-6">
         <div className="glass-panel p-8 max-w-lg w-full text-center space-y-4">
           <h1 className="text-3xl font-bold text-accent-gold">
-            {claimFailed ? "Approval did not go through" : "Waiting for the Sheriff"}
+            {claimFailed ? "Could not open your membership" : "Membership is not open"}
           </h1>
           <p className="text-text-muted">
             {claimFailed
-              ? "Firestore refused the membership update. Nothing is retrying on its own. You can try once more, or ask a sheriff."
-              : "Your request to join is in. Posting and the feed stay closed until a sheriff approves you."}
+              ? "Firestore refused the membership update. Nothing is retrying on its own. You can try once more."
+              : "This account is signed in, but it cannot use the realm yet."}
           </p>
           <p className="text-sm text-text-light">
             Signed in as <span className="text-accent-gold">{profile?.email || user.email}</span>

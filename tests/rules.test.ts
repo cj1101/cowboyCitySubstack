@@ -9,6 +9,7 @@ import {
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -284,6 +285,28 @@ async function main() {
     })
   );
   console.log("ok storage approval");
+
+  // Paths the client actually writes, with the content types uploadBytes sends.
+  await assertSucceeds(uploadString(ref(approvedStorage.storage(), "users/friend/avatar.jpg"), "avatar", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(approvedStorage.storage(), "users/charles/avatar.jpg"), "nope", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(approvedStorage.storage(), "users/friend/avatar.jpg"), "txt", "raw", {
+    contentType: "text/plain",
+  }));
+  await assertSucceeds(uploadString(ref(approvedStorage.storage(), "threads/dock/1.jpg"), "thread", "raw", {
+    contentType: "image/jpeg",
+  }));
+  const rootStorage = env.authenticatedContext("charles", { email: "charlie@suarezhouse.net" });
+  await assertSucceeds(uploadString(ref(rootStorage.storage(), "realm/overview.jpg"), "map", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(approvedStorage.storage(), "realm/overview.jpg"), "map", "raw", {
+    contentType: "image/jpeg",
+  }));
+  console.log("ok client upload paths");
 
   await env.clearFirestore();
   await seedUser(env, "friend", {
@@ -586,6 +609,50 @@ async function main() {
   await assertFails(listAll(ref(treatyFriend.storage(), "posts/pact-post")));
   await assertSucceeds(listAll(ref(treatySheriff.storage(), "posts/pact-post")));
   console.log("ok treaty create and city media");
+
+  // Same payload the realm map sends. The parent realm_map/overview doc is absent on purpose.
+  const clientPin = {
+    title: "North gate",
+    note: "A saved pin",
+    nx: 0.42,
+    ny: 0.18,
+    cityId: "city1",
+    wikiEntryIds: [] as string[],
+    wikiEntryId: null,
+    postId: null,
+    x: null,
+    z: null,
+  };
+  await assertFails(
+    addDoc(collection(treatyFriend.firestore(), "realm_map", "overview", "pins"), clientPin)
+  );
+  await seedUser(env, "root-only", {
+    email: "cjtheswimmer1101@gmail.com",
+    status: "approved",
+    isAdmin: false,
+  });
+  const rootOnly = env.authenticatedContext("root-only", { email: "cjtheswimmer1101@gmail.com" });
+  const created = await assertSucceeds(
+    addDoc(collection(rootOnly.firestore(), "realm_map", "overview", "pins"), clientPin)
+  );
+  await assertFails(
+    addDoc(collection(rootOnly.firestore(), "realm_map", "overview", "pins"), { ...clientPin, title: "" })
+  );
+  const pinList = await assertSucceeds(
+    getDocs(collection(treatyFriend.firestore(), "realm_map", "overview", "pins"))
+  );
+  assert.equal(pinList.docs.length, 1);
+  assert.equal(pinList.docs[0].id, created.id);
+  assert.equal(pinList.docs[0].data().title, "North gate");
+  assert.equal(pinList.docs[0].data().nx, 0.42);
+  assert.equal(pinList.docs[0].data().ny, 0.18);
+  await assertSucceeds(
+    getDoc(doc(treatySheriff.firestore(), "realm_map", "overview", "pins", created.id))
+  );
+  await assertFails(
+    deleteDoc(doc(treatyFriend.firestore(), "realm_map", "overview", "pins", created.id))
+  );
+  console.log("ok realm map pins");
 
   await env.cleanup();
   assert.ok(true);

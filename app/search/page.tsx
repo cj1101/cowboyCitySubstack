@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getAllFactions, getPosts } from "@/lib/firestore/posts";
 import { getAllWikiEntries } from "@/lib/firestore/wikiEntries";
+import { actionError, withTimeout } from "@/lib/async";
+import { LoadNotice } from "@/components/ui/LoadNotice";
 import type { Faction, Post, WikiEntry } from "@/lib/types";
 
 export default function SearchPage() {
@@ -11,17 +13,26 @@ export default function SearchPage() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [cities, setCities] = useState<Faction[]>([]);
   const [entries, setEntries] = useState<WikiEntry[]>([]);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const initial = new URLSearchParams(window.location.search).get("q");
     if (initial) setQ(initial);
-    Promise.all([getPosts(), getAllFactions(), getAllWikiEntries()])
+    let cancelled = false;
+    setError("");
+    withTimeout(Promise.all([getPosts(), getAllFactions(), getAllWikiEntries()]))
       .then(([postList, cityList, entryList]) => {
+        if (cancelled) return;
         setPosts(postList);
         setCities(cityList);
         setEntries(entryList);
       })
-      .catch(() => undefined);
+      .catch((err) => {
+        if (!cancelled) setError(actionError(err, "Could not load search."));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const needle = q.trim().toLowerCase();
@@ -35,7 +46,12 @@ export default function SearchPage() {
       <div className="max-w-3xl mx-auto space-y-6">
         <h1 className="text-3xl font-bold text-accent-gold">Search the realm</h1>
         <input className="form-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Posts, cities, wiki" />
-        {needle && (
+        <LoadNotice message={error} onRetry={() => {
+          const url = new URL(window.location.href);
+          if (q.trim()) url.searchParams.set("q", q.trim());
+          window.location.assign(url.toString());
+        }} />
+        {needle && !error && (
           <>
             <section>
               <h2 className="text-accent-gold font-bold mb-2">Cities</h2>

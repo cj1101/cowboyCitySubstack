@@ -4,6 +4,7 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  getDocsFromServer,
   query,
   serverTimestamp,
   updateDoc,
@@ -37,7 +38,7 @@ export async function getWikiEntriesForCity(cityId: string): Promise<WikiEntry[]
 }
 
 export async function getAllWikiEntries(): Promise<WikiEntry[]> {
-  const snap = await getDocs(collection(getClientDb(), "wiki_entries"));
+  const snap = await getDocsFromServer(collection(getClientDb(), "wiki_entries"));
   return snap.docs.map((d) => toEntry(d.id, d.data()));
 }
 
