@@ -73,6 +73,16 @@ service cloud.firestore {
         get(factionMemberPath(request.auth.uid, factionId)).data.role == 'owner';
     }
 
+    // ownerUids is what the city page shows. Some cities were saved with that
+    // list before the membership document existed, so either proof is enough.
+    function ownsListedCity(cityId) {
+      return isFactionOwner(cityId) || (
+        cityId is string &&
+        exists(/databases/$(database)/documents/factions/$(cityId)) &&
+        get(/databases/$(database)/documents/factions/$(cityId)).data.get('ownerUids', []).hasAny([request.auth.uid])
+      );
+    }
+
     function isFactionMember(factionId) {
       return isSignedIn() && exists(factionMemberPath(request.auth.uid, factionId));
     }
@@ -268,7 +278,7 @@ service cloud.firestore {
         request.resource.data.name.size() <= 80;
       allow update: if isAdmin() || (
         isMember() &&
-        isFactionOwner(factionId) &&
+        ownsListedCity(factionId) &&
         (ownerUpdatingProfile() || ownerSubmittingHtml() || ownerManagingCoOwners(factionId))
       );
       allow delete: if isAdmin();
@@ -489,7 +499,7 @@ service cloud.firestore {
 
     function validNewTreaty() {
       return isMember() &&
-        isFactionOwner(request.resource.data.proposerCityId) &&
+        ownsListedCity(request.resource.data.proposerCityId) &&
         request.resource.data.authorUid == request.auth.uid &&
         request.resource.data.currentRevision == 1 &&
         request.resource.data.status == 'pending' &&
@@ -516,7 +526,7 @@ service cloud.firestore {
     }
 
     function partyAccept() {
-      return isFactionOwner(request.resource.data.lastActionCityId) &&
+      return ownsListedCity(request.resource.data.lastActionCityId) &&
         cityMayAct(request.resource.data.lastActionCityId) &&
         request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['partyCityIds', 'status', 'updatedAt', 'lastActionCityId', 'partyOwnerUids', 'readerUids']) &&
@@ -529,7 +539,7 @@ service cloud.firestore {
     }
 
     function partyRemove() {
-      return isFactionOwner(request.resource.data.lastActionCityId) &&
+      return ownsListedCity(request.resource.data.lastActionCityId) &&
         request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['partyCityIds', 'status', 'updatedAt', 'lastActionCityId', 'partyOwnerUids', 'readerUids']) &&
         resource.data.partyCityIds.hasAll(request.resource.data.partyCityIds) &&
@@ -542,7 +552,7 @@ service cloud.firestore {
     }
 
     function counterRevision() {
-      return isFactionOwner(request.resource.data.lastActionCityId) &&
+      return ownsListedCity(request.resource.data.lastActionCityId) &&
         cityMayAct(request.resource.data.lastActionCityId) &&
         request.resource.data.currentRevision == resource.data.currentRevision + 1 &&
         request.resource.data.partyCityIds.size() == 1 &&
@@ -577,7 +587,7 @@ service cloud.firestore {
         allow read: if canReadTreaty(treatyId);
         allow create: if isAdmin() || (
           isMember() &&
-          isFactionOwner(request.resource.data.authorCityId) &&
+          ownsListedCity(request.resource.data.authorCityId) &&
           request.resource.data.authorUid == request.auth.uid &&
           request.resource.data.number is int &&
           request.resource.data.number == int(revId) &&
@@ -596,7 +606,7 @@ service cloud.firestore {
         allow read: if canReadTreaty(treatyId);
         allow create, update: if isMember() &&
           request.resource.data.cityId is string &&
-          isFactionOwner(request.resource.data.cityId) &&
+          ownsListedCity(request.resource.data.cityId) &&
           request.resource.data.uid == request.auth.uid &&
           request.resource.data.decision in ['accept', 'decline', 'counter', 'withdraw'] &&
           request.resource.data.revision == treatyData(treatyId).currentRevision &&
@@ -620,7 +630,7 @@ service cloud.firestore {
         allow read: if canReadTreaty(treatyId);
         allow create, update: if isMember() &&
           (isAdmin() ||
-            isFactionOwner(treatyData(treatyId).proposerCityId) ||
+            ownsListedCity(treatyData(treatyId).proposerCityId) ||
             request.auth.uid in treatyData(treatyId).partyOwnerUids) &&
           request.resource.data.title is string &&
           request.resource.data.title.size() > 0 &&
@@ -628,7 +638,7 @@ service cloud.firestore {
           request.resource.data.body is string &&
           request.resource.data.body.size() <= 20000;
         allow delete: if isAdmin() ||
-          (isMember() && isFactionOwner(treatyData(treatyId).proposerCityId));
+          (isMember() && ownsListedCity(treatyData(treatyId).proposerCityId));
       }
     }
 

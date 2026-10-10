@@ -20,6 +20,8 @@ import { CityPanel } from "@/components/cities/CityPanel";
 
 import { CityTreaties } from "@/components/treaties/CityTreaties";
 
+import { CityMapCard } from "@/components/cities/CityMapCard";
+
 import { getFactionBySlug, isFactionOwner } from "@/lib/firestore/factions";
 
 import { getCharactersForFaction } from "@/lib/firestore/characters";
@@ -75,6 +77,16 @@ export default function FactionProfilePageClient() {
   const [feedLoading, setFeedLoading] = useState(false);
 
   const [error, setError] = useState("");
+
+  const [uploadFailed, setUploadFailed] = useState(false);
+
+
+
+  useEffect(() => {
+
+    setUploadFailed(new URLSearchParams(window.location.search).get("upload") === "failed");
+
+  }, []);
 
 
 
@@ -236,7 +248,7 @@ export default function FactionProfilePageClient() {
 
             background: faction.bannerUrl
 
-              ? `url(${faction.bannerUrl}) center/cover`
+              ? `url("${faction.bannerUrl.replace(/"/g, "")}") center/cover`
 
               : `linear-gradient(135deg, ${primary} 0%, ${secondary} 100%)`,
 
@@ -418,7 +430,7 @@ export default function FactionProfilePageClient() {
 
           background: faction.bannerUrl
 
-            ? `url(${faction.bannerUrl}) center/cover`
+            ? `url("${faction.bannerUrl.replace(/"/g, "")}") center/cover`
 
             : `linear-gradient(135deg, ${primary} 0%, ${secondary} 100%)`,
 
@@ -661,6 +673,14 @@ export default function FactionProfilePageClient() {
             <CityPanel faction={faction} isOwner={isOwner} />
 
             <CityTreaties cityId={faction.id} />
+
+            {uploadFailed && (
+
+              <p className="text-sm font-bold mb-4" role="alert">Upload failed. The image was not stored. The city was still created.</p>
+
+            )}
+
+            <CityMapCard city={faction} />
 
 
 

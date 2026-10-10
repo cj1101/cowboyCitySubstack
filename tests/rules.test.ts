@@ -18,7 +18,7 @@ import {
   Timestamp,
   updateDoc,
 } from "firebase/firestore";
-import { ref, uploadString } from "firebase/storage";
+import { getBytes, ref, uploadString } from "firebase/storage";
 
 const PROJECT_ID = "cowboycityrealm";
 
@@ -461,6 +461,123 @@ async function main() {
     replyCount: 0,
   }));
   console.log("ok treaties and forum");
+
+  const clientTreaty = {
+    name: "Cedar Pact",
+    type: "alliance",
+    nature: "Share the harbor",
+    terms: "No tolls",
+    purpose: "Keep the cedar moving",
+    open: false,
+    status: "pending",
+    proposerCityId: "city1",
+    authorUid: "friend",
+    currentRevision: 1,
+    inviteeCityIds: ["city2"],
+    partyCityIds: ["city1"],
+    readerUids: ["friend", "other"],
+    partyOwnerUids: ["friend"],
+    color: "#169C9C",
+    lastActionCityId: "city1",
+  };
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "pact"), clientTreaty));
+  await assertFails(setDoc(doc(treatyFriend.firestore(), "treaties", "pact", "revisions", "1"), {
+    number: 1,
+    authorCityId: "city1",
+    name: "Cedar Pact",
+    note: "",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "pact", "revisions", "1"), {
+    number: 1,
+    authorCityId: "city1",
+    authorUid: "friend",
+    name: "Cedar Pact",
+    type: "alliance",
+    nature: "Share the harbor",
+    terms: "No tolls",
+    purpose: "Keep the cedar moving",
+    open: false,
+    inviteeCityIds: ["city2"],
+    note: "",
+  }));
+  await assertSucceeds(setDoc(doc(treatyFriend.firestore(), "treaties", "pact", "responses", "city1_1"), {
+    cityId: "city1",
+    revision: 1,
+    decision: "accept",
+    uid: "friend",
+    note: "",
+  }));
+  await assertFails(setDoc(doc(treatyOther.firestore(), "treaties", "stolen"), {
+    ...clientTreaty,
+    authorUid: "other",
+    proposerCityId: "city1",
+    readerUids: ["other"],
+    partyOwnerUids: ["other"],
+    partyCityIds: ["city1"],
+    lastActionCityId: "city1",
+  }));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "factions", "city3"), {
+    name: "Listed Only",
+    slug: "listed-only",
+    ownerUids: ["visitor"],
+    colors: { primary: "#169C9C", secondary: "#FED83D" },
+  }));
+  await assertSucceeds(setDoc(doc(treatyVisitor.firestore(), "treaties", "listed"), {
+    ...clientTreaty,
+    name: "Listed Pact",
+    proposerCityId: "city3",
+    authorUid: "visitor",
+    inviteeCityIds: ["city2"],
+    partyCityIds: ["city3"],
+    readerUids: ["visitor", "other"],
+    partyOwnerUids: ["visitor"],
+    lastActionCityId: "city3",
+    purpose: "A pact from a listed owner",
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "factions", "sheriff-city"), {
+    name: "Sheriffburg",
+    slug: "sheriffburg",
+    ownerUids: ["charles"],
+    colors: { primary: "#169C9C", secondary: "#FED83D" },
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "faction_members", "charles_sheriff-city"), {
+    uid: "charles",
+    factionId: "sheriff-city",
+    role: "owner",
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "treaties", "admin-pact"), {
+    ...clientTreaty,
+    name: "Sheriff Pact",
+    proposerCityId: "sheriff-city",
+    authorUid: "charles",
+    inviteeCityIds: ["city1"],
+    partyCityIds: ["sheriff-city"],
+    readerUids: ["charles", "friend"],
+    partyOwnerUids: ["charles"],
+    lastActionCityId: "sheriff-city",
+    purpose: "An admin owner can propose",
+  }));
+  await assertSucceeds(setDoc(doc(treatySheriff.firestore(), "treaties", "admin-pact", "revisions", "1"), {
+    number: 1,
+    authorCityId: "sheriff-city",
+    authorUid: "charles",
+    name: "Sheriff Pact",
+    note: "",
+  }));
+  await assertSucceeds(uploadString(ref(treatyFriend.storage(), "factions/city1/map.jpg"), "map", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertFails(uploadString(ref(treatyOther.storage(), "factions/city1/map.jpg"), "nope", "raw", {
+    contentType: "image/jpeg",
+  }));
+  await assertSucceeds(uploadString(ref(treatyFriend.storage(), "factions/city1/clip.mp4"), "video", "raw", {
+    contentType: "video/mp4",
+  }));
+  await assertSucceeds(uploadString(ref(treatyFriend.storage(), "posts/pact-post/clip.mp4"), "video", "raw", {
+    contentType: "video/mp4",
+  }));
+  await assertSucceeds(getBytes(ref(env.unauthenticatedContext().storage(), "factions/city1/map.jpg")));
+  console.log("ok treaty create and city media");
 
   await env.cleanup();
   assert.ok(true);

@@ -13,6 +13,8 @@ import {
   type Timestamp,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { withTimeout } from "@/lib/async";
+import { ensureOwnerMembership, getFactionMembers } from "@/lib/firestore/factions";
 import { notifyMany } from "@/lib/firestore/notifications";
 import type { Faction } from "@/lib/types";
 import {
@@ -167,6 +169,19 @@ function parentPatch(record: TreatyRecord, previous: StoredTreaty, uid: string, 
   };
 }
 
+async function readerUidsFor(uid: string, cityIds: string[], factions: Faction[]): Promise<string[]> {
+  const listed = ownersOf(factions, cityIds);
+  const thin = cityIds.filter((id) => {
+    const city = factions.find((item) => item.id === id);
+    return !city || city.ownerUids.length === 0;
+  });
+  const lookedUp = await Promise.all(
+    thin.map((id) => getFactionMembers(id).catch(() => []))
+  );
+  const owners = lookedUp.flat().filter((member) => member.role === "owner").map((member) => member.uid);
+  return [...new Set([uid, ...listed, ...owners])];
+}
+
 export async function createTreaty(
   uid: string,
   draft: TreatyDraft,
@@ -174,10 +189,19 @@ export async function createTreaty(
 ): Promise<string> {
   const record = proposeTreaty(draft);
   const revision = currentRevision(record);
-  const readerUids = ownersOf(factions, [draft.proposerCityId, ...revision.inviteeCityIds]);
-  const partyOwnerUids = ownersOf(factions, [draft.proposerCityId]);
-  const ref = doc(collection(getClientDb(), "treaties"));
-  await setDoc(ref, {
+  try {
+    await withTimeout(ensureOwnerMembership(uid, draft.proposerCityId), 8000);
+  } catch (error) {
+    if (error instanceof Error && /permission|insufficient|owners/i.test(error.message)) {
+      throw new Error("Only a city's owners can propose a treaty.");
+    }
+    throw error;
+  }
+  const readerUids = await readerUidsFor(uid, [draft.proposerCityId, ...revision.inviteeCityIds], factions);
+  const partyOwnerUids = [...new Set([uid, ...ownersOf(factions, [draft.proposerCityId])])];
+  const db = getClientDb();
+  const ref = doc(collection(db, "treaties"));
+  await withTimeout(setDoc(ref, {
     name: revision.name,
     type: revision.type,
     nature: revision.nature,
@@ -196,20 +220,23 @@ export async function createTreaty(
     lastActionCityId: draft.proposerCityId,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
-  await setDoc(doc(getClientDb(), "treaties", ref.id, "revisions", "1"), {
-    ...revision,
-    createdAt: serverTimestamp(),
-  });
-  await setDoc(doc(getClientDb(), "treaties", ref.id, "responses", draft.proposerCityId), {
-    cityId: draft.proposerCityId,
-    revision: 1,
-    decision: "accept",
-    uid,
-    note: "",
-    updatedAt: serverTimestamp(),
-  });
-  await notifyMany(readerUids, {
+  }));
+  await withTimeout(Promise.all([
+    setDoc(doc(db, "treaties", ref.id, "revisions", "1"), {
+      ...revision,
+      authorUid: uid,
+      createdAt: serverTimestamp(),
+    }),
+    setDoc(doc(db, "treaties", ref.id, "responses", `${draft.proposerCityId}_1`), {
+      cityId: draft.proposerCityId,
+      revision: 1,
+      decision: "accept",
+      uid,
+      note: "",
+      updatedAt: serverTimestamp(),
+    }),
+  ]));
+  void notifyMany(readerUids, {
     type: "treaty",
     summary: `${revision.name} is waiting on a response.`,
     href: `/treaties/${ref.id}`,
@@ -241,6 +268,7 @@ async function persistResponse(
   if (decision === "counter") {
     await setDoc(doc(db, "treaties", treatyId, "revisions", String(revision.number)), {
       ...revision,
+      authorUid: uid,
       createdAt: serverTimestamp(),
     });
     await updateDoc(doc(db, "treaties", treatyId), {

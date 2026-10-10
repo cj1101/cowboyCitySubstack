@@ -38,6 +38,7 @@ export default function TreatyPage() {
   const [error, setError] = useState("");
   const [missing, setMissing] = useState(false);
   const [comment, setComment] = useState("");
+  const [commenting, setCommenting] = useState(false);
   const [counterNote, setCounterNote] = useState("");
   const [counterTerms, setCounterTerms] = useState("");
   const [wikiTitle, setWikiTitle] = useState("");
@@ -105,10 +106,18 @@ export default function TreatyPage() {
 
   const sendComment = async (event: FormEvent) => {
     event.preventDefault();
-    if (!user || !comment.trim()) return;
-    await addTreatyComment(treaty.id, user.uid, profile?.displayName || "Member", comment.trim());
-    setComment("");
-    load();
+    if (!user || !comment.trim() || commenting) return;
+    setCommenting(true);
+    setError("");
+    try {
+      await addTreatyComment(treaty.id, user.uid, profile?.displayName || "Member", comment.trim());
+      setComment("");
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not post that comment.");
+    } finally {
+      setCommenting(false);
+    }
   };
 
   return (
@@ -209,7 +218,7 @@ export default function TreatyPage() {
           {user && (
             <form onSubmit={sendComment} className="space-y-2">
               <textarea className="form-input" rows={3} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Write a comment" />
-              <button className="btn text-sm px-3 py-1.5" type="submit">Post comment</button>
+              <button className="btn text-sm px-3 py-1.5" type="submit" disabled={commenting}>{commenting ? "Posting…" : "Post comment"}</button>
             </form>
           )}
         </section>

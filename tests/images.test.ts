@@ -16,6 +16,7 @@ assert.equal(isDisplayableImageUrl("http://cowboycityrealm.firebasestorage.app/a
 assert.equal(isDisplayableImageUrl(""), false);
 
 assert.equal(asUploadError(new Error("Firebase Storage: permission denied")).message, UPLOAD_FAILED_MESSAGE);
-assert.equal(asUploadError(new Error("Images must be under 8 MB before upload.")).message, "Images must be under 8 MB before upload.");
+assert.equal(asUploadError(new Error("Images must be under 12 MB before upload.")).message, "Images must be under 12 MB before upload.");
+assert.equal(isDisplayableImageUrl("http://127.0.0.1:9199/v0/b/cowboycityrealm.firebasestorage.app/o/factions%2Fa%2Fmap.jpg?alt=media&token=abc"), true);
 
 console.log("image url tests passed");

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { RealmMark } from "@/components/brand/RealmMark";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
 import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
@@ -71,7 +72,10 @@ export function NavBar() {
   if (loading) {
     return (
       <nav className="hud">
-        <span className="hud-title">Cowboy City & The Realm</span>
+        <span className="inline-flex items-center gap-2">
+          <RealmMark className="w-8 h-8 border-2 border-ink" />
+          <span className="hud-title">Cowboy City</span>
+        </span>
         <span className="text-text-muted text-sm">Loading…</span>
       </nav>
     );
@@ -81,11 +85,9 @@ export function NavBar() {
     <>
       <nav className="hud">
         <div className="flex items-center gap-3 sm:gap-6 min-w-0">
-          <Link
-            href="/"
-            className="hud-title hover:text-accent-gold transition-colors truncate"
-          >
-            Cowboy City & The Realm
+          <Link href="/" className="inline-flex items-center gap-2 min-w-0 hover:opacity-80">
+            <RealmMark className="w-8 h-8 shrink-0 border-2 border-ink" />
+            <span className="hud-title truncate">Cowboy City</span>
           </Link>
           {user && member && (
             <div className="hidden md:flex items-center gap-4">

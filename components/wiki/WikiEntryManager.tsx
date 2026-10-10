@@ -6,6 +6,7 @@ import { TipTapEditor } from "@/components/editor/TipTapEditor";
 import type { WikiEntry, WikiEntryKind } from "@/lib/types";
 import { WIKI_ENTRY_KINDS } from "@/lib/types";
 import { slugify } from "@/lib/utils/slug";
+import { actionError, withTimeout } from "@/lib/async";
 
 export function WikiEntryManager({
   cityId,
@@ -21,6 +22,8 @@ export function WikiEntryManager({
   const [editing, setEditing] = useState<Partial<WikiEntry> | null>(null);
   const [columns, setColumns] = useState("GDP|Population");
   const [rows, setRows] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const load = () => {
     getWikiEntriesForCity(cityId).then(setEntries).catch(() => setEntries([]));
@@ -64,19 +67,27 @@ export function WikiEntryManager({
                   rows: rows.split("\n").map((row) => row.split("|").map((cell) => cell.trim())).filter((row) => row.some(Boolean)),
                 }
               : null;
-            await saveWikiEntry({
-              id: editing.id,
-              cityId,
-              citySlug,
-              kind: (editing.kind || "place") as WikiEntryKind,
-              title: editing.title || "Untitled",
-              slug: editing.slug || slugify(editing.title || "entry"),
-              summary: editing.summary || "",
-              body: editing.body || "",
-              stats,
-            });
-            setEditing(null);
-            load();
+            setSaving(true);
+            setSaveError("");
+            try {
+              await withTimeout(saveWikiEntry({
+                id: editing.id,
+                cityId,
+                citySlug,
+                kind: (editing.kind || "place") as WikiEntryKind,
+                title: editing.title || "Untitled",
+                slug: editing.slug || slugify(editing.title || "entry"),
+                summary: editing.summary || "",
+                body: editing.body || "",
+                stats,
+              }));
+              setEditing(null);
+              load();
+            } catch (error) {
+              setSaveError(actionError(error, "Could not save that entry."));
+            } finally {
+              setSaving(false);
+            }
           }}
         >
           <div className="grid sm:grid-cols-2 gap-3">
@@ -93,8 +104,9 @@ export function WikiEntryManager({
             <input className="form-input mb-2" value={columns} onChange={(e) => setColumns(e.target.value)} placeholder="GDP|Population" />
             <textarea className="form-input" rows={4} value={rows} onChange={(e) => setRows(e.target.value)} placeholder={"Cowboy City|900|12000\nCascadia|400|8000"} />
           </div>
+          {saveError && <p className="text-sm font-bold" role="alert">{saveError}</p>}
           <div className="flex gap-2">
-            <button className="btn text-sm px-4 py-2" type="submit">Save entry</button>
+            <button className="btn text-sm px-4 py-2" type="submit" disabled={saving}>{saving ? "Saving…" : "Save entry"}</button>
             <button className="btn btn-secondary text-sm px-4 py-2" type="button" onClick={() => setEditing(null)}>Cancel</button>
           </div>
         </form>

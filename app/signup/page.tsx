@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { RealmMark } from "@/components/brand/RealmMark";
 
 export default function SignupPage() {
   const { user, loading, signUp } = useAuth();
@@ -58,7 +59,10 @@ export default function SignupPage() {
   return (
     <div className="wood-texture min-h-[calc(100vh-4rem)] flex items-center justify-center p-4 sm:p-8">
       <div className="glass-panel p-6 sm:p-10 max-w-md w-full">
-        <p className="text-center text-sm font-bold tracking-wide text-ink mb-3">Cowboy City & The Realm</p>
+        <div className="flex flex-col items-center gap-3 mb-4">
+          <RealmMark className="w-16 h-16 border-4 border-ink" />
+          <p className="pixel-title text-center">Cowboy City & The Realm</p>
+        </div>
         <h1 className="text-3xl font-bold text-ink text-center mb-2">
           Join the Realm
         </h1>

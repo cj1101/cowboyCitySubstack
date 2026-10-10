@@ -55,6 +55,13 @@ service firebase.storage {
         firestore.get(/databases/(default)/documents/faction_members/$(memberDocId(request.auth.uid, factionId))).data.role == 'owner';
     }
 
+    function ownsListedCity(factionId) {
+      return isFactionOwner(factionId) || (
+        firestore.exists(/databases/(default)/documents/factions/$(factionId)) &&
+        firestore.get(/databases/(default)/documents/factions/$(factionId)).data.get('ownerUids', []).hasAny([request.auth.uid])
+      );
+    }
+
     function isImage(maxBytes) {
       return request.resource.size < maxBytes &&
         request.resource.contentType.matches('image/.*');
@@ -63,6 +70,10 @@ service firebase.storage {
     function isVideo(maxBytes) {
       return request.resource.size < maxBytes &&
         request.resource.contentType.matches('video/.*');
+    }
+
+    function isMedia(imageBytes, videoBytes) {
+      return isImage(imageBytes) || isVideo(videoBytes);
     }
 
     function postDoc(postId) {
@@ -76,24 +87,27 @@ service firebase.storage {
         isFactionOwner(postDoc(postId).data.factionId);
     }
 
+    // Reads are open so a browser <img> or <video> can load a download URL.
+    // The URL comes from getDownloadURL and is unguessable. Writes stay limited
+    // to signed-in owners (or the post's author).
     match /factions/{factionId}/{fileName} {
-      allow read: if isMember();
+      allow read: if true;
       allow write: if isMember() &&
-        (isFactionOwner(factionId) || isAdmin()) &&
-        isImage(15 * 1024 * 1024);
-      allow delete: if isMember() && (isFactionOwner(factionId) || isAdmin());
+        (ownsListedCity(factionId) || isAdmin()) &&
+        isMedia(15 * 1024 * 1024, 100 * 1024 * 1024);
+      allow delete: if isMember() && (ownsListedCity(factionId) || isAdmin());
     }
 
     match /posts/{postId}/{fileName} {
-      allow read: if isMember();
+      allow read: if true;
       allow write: if isMember() &&
         canWritePostMedia(postId) &&
-        (isImage(8 * 1024 * 1024) || isVideo(80 * 1024 * 1024));
+        isMedia(12 * 1024 * 1024, 100 * 1024 * 1024);
       allow delete: if isMember() && (isAdmin() || canWritePostMedia(postId));
     }
 
     match /characters/{characterId}/{fileName} {
-      allow read: if isMember();
+      allow read: if true;
       allow write: if isMember() &&
         isImage(5 * 1024 * 1024) &&
         firestore.exists(/databases/(default)/documents/characters/$(characterId)) &&
@@ -108,19 +122,19 @@ service firebase.storage {
     }
 
     match /users/{uid}/{fileName} {
-      allow read: if isMember() || (isSignedIn() && request.auth.uid == uid);
+      allow read: if true;
       allow write: if isSignedIn() && request.auth.uid == uid && isImage(5 * 1024 * 1024);
       allow delete: if isSignedIn() && (request.auth.uid == uid || isAdmin());
     }
 
     match /threads/{threadId}/{fileName} {
-      allow read: if isMember();
-      allow write: if isMember() && isImage(8 * 1024 * 1024);
+      allow read: if true;
+      allow write: if isMember() && isMedia(12 * 1024 * 1024, 100 * 1024 * 1024);
       allow delete: if isMember();
     }
 
     match /realm/{fileName} {
-      allow read: if isMember();
+      allow read: if true;
       allow write: if isAdmin() && isImage(15 * 1024 * 1024);
       allow delete: if isAdmin();
     }

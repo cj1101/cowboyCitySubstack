@@ -12,6 +12,8 @@ import {
 } from "@/lib/firestore/messages";
 import { getClientDb } from "@/lib/firebase";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { SubmitButton } from "@/components/ui/SubmitButton";
+import { actionError, withTimeout } from "@/lib/async";
 import { isBlockedStatus } from "@/lib/membership";
 import type { Conversation, DirectMessage } from "@/lib/types";
 
@@ -24,6 +26,8 @@ export default function MessagesPage() {
   const [selected, setSelected] = useState<string[]>([]);
   const [body, setBody] = useState("");
   const [reads, setReads] = useState<Record<string, number>>({});
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
 
   useEffect(() => {
     const existing = new URLSearchParams(window.location.search).get("c");
@@ -84,18 +88,27 @@ export default function MessagesPage() {
             className="space-y-2"
             onSubmit={async (event) => {
               event.preventDefault();
-              if (!body.trim() || selected.length === 0) return;
-              const id = await sendDirectMessage({
-                participantUids: [user.uid, ...selected],
-                senderUid: user.uid,
-                body,
-              });
-              setBody("");
-              setActiveId(id);
+              if (!body.trim() || selected.length === 0 || sending) return;
+              setSending(true);
+              setSendError("");
+              try {
+                const id = await withTimeout(sendDirectMessage({
+                  participantUids: [user.uid, ...selected],
+                  senderUid: user.uid,
+                  body,
+                }));
+                setBody("");
+                setActiveId(id);
+              } catch (error) {
+                setSendError(actionError(error, "Could not send that message."));
+              } finally {
+                setSending(false);
+              }
             }}
           >
             <textarea className="form-input" rows={3} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Message the selected people" />
-            <button className="btn text-sm px-4 py-2" type="submit">Send</button>
+            {sendError && <p className="text-sm font-bold" role="alert">{sendError}</p>}
+            <SubmitButton busy={sending} busyLabel="Sending…" className="btn text-sm px-4 py-2">Send</SubmitButton>
           </form>
           <ul className="space-y-2">
             {conversations.map((conversation) => {
@@ -127,17 +140,25 @@ export default function MessagesPage() {
               onSubmit={async (event) => {
                 event.preventDefault();
                 const conversation = conversations.find((item) => item.id === activeId);
-                if (!conversation || !body.trim()) return;
-                await sendDirectMessage({
-                  participantUids: conversation.participantUids,
-                  senderUid: user.uid,
-                  body,
-                });
-                setBody("");
+                if (!conversation || !body.trim() || sending) return;
+                setSending(true);
+                setSendError("");
+                try {
+                  await withTimeout(sendDirectMessage({
+                    participantUids: conversation.participantUids,
+                    senderUid: user.uid,
+                    body,
+                  }));
+                  setBody("");
+                } catch (error) {
+                  setSendError(actionError(error, "Could not send that message."));
+                } finally {
+                  setSending(false);
+                }
               }}
             >
               <input className="form-input" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write a message" />
-              <button className="btn text-sm px-4 py-2" type="submit">Send</button>
+              <SubmitButton busy={sending} busyLabel="Sending…" className="btn text-sm px-4 py-2">Send</SubmitButton>
             </form>
           )}
         </section>

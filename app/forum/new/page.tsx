@@ -8,6 +8,8 @@ import { createThread } from "@/lib/firestore/forum";
 import { getAllFactions } from "@/lib/firestore/factions";
 import { listActiveTreaties } from "@/lib/firestore/treaties";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
+import { actionError, withTimeout } from "@/lib/async";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 import type { Faction } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
@@ -40,7 +42,7 @@ export default function NewThreadPage() {
     setBusy(true);
     setError("");
     try {
-      const id = await createThread({
+      const id = await withTimeout(createThread({
         title,
         body,
         authorUid: user.uid,
@@ -48,11 +50,11 @@ export default function NewThreadPage() {
         cityId: cityId || null,
         treatyId: treatyId || null,
         files,
-      });
+      }), 20000);
       router.push(`/forum/${id}`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : UPLOAD_FAILED_MESSAGE;
-      setError(message === UPLOAD_FAILED_MESSAGE || /storage|upload/i.test(message) ? UPLOAD_FAILED_MESSAGE : message);
+      setError(actionError(err, UPLOAD_FAILED_MESSAGE));
+    } finally {
       setBusy(false);
     }
   };
@@ -80,7 +82,7 @@ export default function NewThreadPage() {
           {treaties.map((treaty) => <option key={treaty.id} value={treaty.id}>{treaty.name}</option>)}
         </select>
         {error && <p className="text-sm font-bold" role="alert">{error}</p>}
-        <button className="btn" disabled={busy} type="submit">{busy ? "Posting…" : "Post thread"}</button>
+        <SubmitButton busy={busy} busyLabel="Posting…">Post thread</SubmitButton>
       </form>
     </div>
   );

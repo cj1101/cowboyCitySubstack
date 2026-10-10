@@ -1,12 +1,13 @@
-/** Firebase Storage download hosts the site is allowed to render. */
+/** Firebase Storage download hosts the site is allowed to render, plus the local emulator. */
 const REMOTE_IMAGE_HOST =
-  /^https:\/\/(?:firebasestorage\.googleapis\.com|storage\.googleapis\.com|[a-z0-9-]+\.firebasestorage\.app|[a-z0-9-]+\.appspot\.com)\//i;
+  /^(?:https:\/\/(?:firebasestorage\.googleapis\.com|storage\.googleapis\.com|[a-z0-9-]+\.firebasestorage\.app|[a-z0-9-]+\.appspot\.com)|https?:\/\/(?:127\.0\.0\.1|localhost):9199)\//i;
 
 export const UPLOAD_FAILED_MESSAGE =
   "Upload failed. The image was not stored.";
 
 export function isDisplayableImageUrl(url: string | null | undefined): boolean {
   if (!url) return false;
+  if (url.startsWith("blob:")) return true;
   if (url.startsWith("/") && !url.startsWith("//")) return true;
   return REMOTE_IMAGE_HOST.test(url);
 }

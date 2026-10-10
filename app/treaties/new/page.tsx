@@ -9,6 +9,8 @@ import { createTreaty } from "@/lib/firestore/treaties";
 import { TREATY_TYPES, TREATY_TYPE_LABELS, type TreatyType } from "@/lib/treaties/machine";
 import type { Faction } from "@/lib/types";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
+import { SubmitButton } from "@/components/ui/SubmitButton";
+import { actionError, withTimeout } from "@/lib/async";
 
 export default function NewTreatyPage() {
   const { user, loading } = useAuth();
@@ -45,7 +47,7 @@ export default function NewTreatyPage() {
     setBusy(true);
     setError("");
     try {
-      const id = await createTreaty(user.uid, {
+      const id = await withTimeout(createTreaty(user.uid, {
         name,
         type,
         nature,
@@ -54,10 +56,11 @@ export default function NewTreatyPage() {
         open,
         inviteeCityIds: invitees,
         proposerCityId,
-      }, cities);
+      }, cities), 15000);
       router.push(`/treaties/${id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not propose that treaty.");
+      setError(actionError(err, "Could not propose that treaty."));
+    } finally {
       setBusy(false);
     }
   };
@@ -119,7 +122,7 @@ export default function NewTreatyPage() {
           ))}
         </fieldset>
         {error && <p className="text-sm font-bold" role="alert">{error}</p>}
-        <button className="btn" disabled={busy} type="submit">{busy ? "Sending…" : "Send proposal"}</button>
+        <SubmitButton busy={busy} busyLabel="Sending…">Send proposal</SubmitButton>
       </form>
     </div>
   );

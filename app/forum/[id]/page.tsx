@@ -7,6 +7,8 @@ import { useAuth } from "@/components/auth/AuthProvider";
 import { addReply, getThread, listReplies, type ForumReply, type ForumThread } from "@/lib/firestore/forum";
 import { StoredImage } from "@/components/media/StoredImage";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
+import { actionError, withTimeout } from "@/lib/async";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 import { ScreenStatus } from "@/components/layout/ScreenStatus";
 
 export default function ThreadPage() {
@@ -19,6 +21,7 @@ export default function ThreadPage() {
   const [quote, setQuote] = useState<ForumReply | null>(null);
   const [error, setError] = useState("");
   const [missing, setMissing] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const load = () => {
     if (!params.id) return;
@@ -39,8 +42,9 @@ export default function ThreadPage() {
     event.preventDefault();
     if (!user || !thread || !body.trim()) return;
     setError("");
+    setBusy(true);
     try {
-      await addReply({
+      await withTimeout(addReply({
         threadId: thread.id,
         body,
         authorUid: user.uid,
@@ -49,20 +53,16 @@ export default function ThreadPage() {
         quoteExcerpt: quote ? `${quote.authorName}: ${quote.body}` : "",
         files,
         replyCount: thread.replyCount,
-      });
+      }), 20000);
       setBody("");
       setFiles([]);
       setQuote(null);
       load();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "";
-      setError(
-        files.length > 0
-          ? message.includes("under")
-            ? message
-            : UPLOAD_FAILED_MESSAGE
-          : message || "Could not post that reply."
-      );
+      const message = actionError(err, "Could not post that reply.");
+      setError(files.length > 0 && !message.includes("under") && !message.includes("too long") ? UPLOAD_FAILED_MESSAGE : message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -106,7 +106,7 @@ export default function ThreadPage() {
             <textarea className="form-input" rows={4} value={body} onChange={(event) => setBody(event.target.value)} required placeholder="Reply" />
             <input className="form-input" type="file" accept="image/*" multiple onChange={(event) => setFiles([...(event.target.files || [])])} />
             {error && <p className="text-sm font-bold" role="alert">{error}</p>}
-            <button className="btn text-sm px-4 py-2" type="submit">Reply</button>
+            <SubmitButton busy={busy} busyLabel="Replying…" className="btn text-sm px-4 py-2">Reply</SubmitButton>
           </form>
         ) : (
           <p className="text-text-muted">Sign in to reply.</p>

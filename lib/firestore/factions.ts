@@ -10,6 +10,7 @@ import {
   serverTimestamp,
   writeBatch,
 } from "firebase/firestore";
+import { withTimeout } from "@/lib/async";
 import { getClientDb } from "@/lib/firebase";
 import type { Faction, FactionInput, FactionMember } from "@/lib/types";
 
@@ -76,7 +77,7 @@ export async function createFaction(
   const db = getClientDb();
   const factionRef = doc(collection(db, FACTIONS));
   const description = input.description ?? input.bio ?? "";
-  await setDoc(factionRef, {
+  await withTimeout(setDoc(factionRef, {
     name: input.name,
     slug: input.slug,
     colors: input.colors,
@@ -88,14 +89,14 @@ export async function createFaction(
     mapImageUrl: input.mapImageUrl ?? null,
     ownerUids: [creatorUid],
     createdAt: serverTimestamp(),
-  });
+  }));
 
-  await setDoc(doc(db, FACTION_MEMBERS, memberDocId(creatorUid, factionRef.id)), {
+  await withTimeout(setDoc(doc(db, FACTION_MEMBERS, memberDocId(creatorUid, factionRef.id)), {
     uid: creatorUid,
     factionId: factionRef.id,
     role: "owner",
-  });
-  await updateDoc(doc(db, "users", creatorUid), { ownsCity: true, proofCityId: factionRef.id });
+  }));
+  await withTimeout(updateDoc(doc(db, "users", creatorUid), { ownsCity: true, proofCityId: factionRef.id })).catch(() => undefined);
 
   return {
     id: factionRef.id,
@@ -114,6 +115,19 @@ export async function createFaction(
 
 export async function ensureCityOwnerClaim(uid: string, cityId: string): Promise<void> {
   await updateDoc(doc(getClientDb(), "users", uid), { ownsCity: true, proofCityId: cityId });
+}
+
+/** Makes sure the owner record the rules check actually exists before a city action. */
+export async function ensureOwnerMembership(uid: string, cityId: string): Promise<void> {
+  const db = getClientDb();
+  const memberRef = doc(db, FACTION_MEMBERS, memberDocId(uid, cityId));
+  const snap = await getDoc(memberRef);
+  if (!snap.exists()) {
+    await setDoc(memberRef, { uid, factionId: cityId, role: "owner" });
+  } else if (snap.data().role !== "owner") {
+    throw new Error("Only a city's owners can do that.");
+  }
+  await ensureCityOwnerClaim(uid, cityId).catch(() => undefined);
 }
 
 export async function updateFaction(
@@ -155,12 +169,8 @@ export async function getFactionsForUser(uid: string): Promise<Faction[]> {
   const factionIds = memberSnap.docs.map((d) => d.data().factionId as string);
   if (factionIds.length === 0) return [];
 
-  const factions: Faction[] = [];
-  for (const factionId of factionIds) {
-    const faction = await getFactionById(factionId);
-    if (faction) factions.push(faction);
-  }
-  return factions;
+  const factions = await Promise.all(factionIds.map((factionId) => getFactionById(factionId)));
+  return factions.filter((faction): faction is Faction => faction !== null);
 }
 
 export async function getFactionMembers(factionId: string): Promise<FactionMember[]> {

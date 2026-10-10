@@ -18,6 +18,7 @@ import {
 import { uploadPostGallery } from "@/lib/storage/uploads";
 import type { Character, Faction, Post, PostStatus, PostType } from "@/lib/types";
 import { POST_TYPES, POST_TYPE_LABELS } from "@/lib/types";
+import { actionError, withTimeout } from "@/lib/async";
 
 export default function NewPostPage() {
   const { user, profile, loading: authLoading } = useAuth();
@@ -106,7 +107,7 @@ export default function NewPostPage() {
     setError(null);
     try {
       const year = settlementYear ? Number(settlementYear) : null;
-      const postId = await createPost(
+      const postId = await withTimeout(createPost(
         {
           type,
           factionId,
@@ -126,13 +127,14 @@ export default function NewPostPage() {
           spoiler: spoiler || Boolean(contentWarning.trim()),
         },
         user.uid
-      );
+      ), 15000);
       if (files.length > 0) {
-        const media = await uploadPostGallery(postId, files);
-        await updatePostMedia(postId, media);
+        const media = await withTimeout(uploadPostGallery(postId, files), 60000);
+        await withTimeout(updatePostMedia(postId, media), 10000);
       }
+      router.push(status === "published" ? `/posts/${postId}` : "/drafts");
       if (status === "published") {
-        await fanOutNewPost({
+        void fanOutNewPost({
           id: postId,
           title: title.trim(),
           body,
@@ -141,13 +143,11 @@ export default function NewPostPage() {
           referencedPostIds: referenced,
           authorUid: user.uid,
         });
-        router.push(`/posts/${postId}`);
-      } else {
-        router.push("/drafts");
       }
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : "Failed to save the post.");
+      setError(actionError(err, "Failed to save the post."));
+    } finally {
       setSubmitting(false);
     }
   };
@@ -304,7 +304,7 @@ export default function NewPostPage() {
             </label>
           )}
           <div className="flex flex-wrap gap-3">
-            <button type="submit" className="btn" disabled={submitting}>Publish</button>
+            <button type="submit" className="btn" disabled={submitting} aria-busy={submitting}>{submitting ? "Publishing…" : "Publish"}</button>
             <button type="button" className="btn btn-secondary" disabled={submitting} onClick={() => publish("draft")}>Save draft</button>
             <button type="button" className="btn btn-secondary" disabled={submitting || !scheduleAt} onClick={() => publish("scheduled")}>Schedule</button>
           </div>

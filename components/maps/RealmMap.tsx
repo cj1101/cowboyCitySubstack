@@ -4,7 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Faction, MapPin, WikiEntry } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
+import { actionError } from "@/lib/async";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 
 type DraftPin = { nx: number; ny: number };
 
@@ -49,6 +51,8 @@ export function RealmMap({
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [frame, setFrame] = useState({ w: 0, h: 0 });
+  const [natural, setNatural] = useState({ w: 0, h: 0 });
   const [showTreaties, setShowTreaties] = useState(false);
   const [hiddenTreaties, setHiddenTreaties] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
@@ -57,16 +61,44 @@ export function RealmMap({
   const [selectedTreaty, setSelectedTreaty] = useState<string | null>(null);
   const [popupAt, setPopupAt] = useState<{ x: number; y: number } | null>(null);
   const [uploadError, setUploadError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [formError, setFormError] = useState("");
   const [cityId, setCityId] = useState("");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [wikiIds, setWikiIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const drag = useRef<{ x: number; y: number; panX: number; panY: number; moved: boolean } | null>(null);
   const pinDrag = useRef<{ id: string; moved: boolean } | null>(null);
+  const centeredFor = useRef("");
   const [livePins, setLivePins] = useState(pins);
 
   useEffect(() => {
     setLivePins(pins);
   }, [pins]);
+
+  useEffect(() => {
+    const node = viewportRef.current;
+    if (!node) return;
+    const measure = () => setFrame({ w: node.clientWidth, h: node.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  const fitted = useMemo(() => {
+    if (!frame.w || !frame.h || !natural.w || !natural.h) return null;
+    const contain = Math.min(frame.w / natural.w, frame.h / natural.h);
+    return { w: natural.w * contain, h: natural.h * contain };
+  }, [frame, natural]);
+
+  useEffect(() => {
+    if (!fitted || !frame.w || centeredFor.current === imageUrl) return;
+    centeredFor.current = imageUrl;
+    setScale(1);
+    setPan({ x: (frame.w - fitted.w) / 2, y: (frame.h - fitted.h) / 2 });
+  }, [fitted, frame.w, frame.h, imageUrl]);
 
   const cityById = useMemo(() => new Map(cities.map((city) => [city.id, city])), [cities]);
   const visibleTreaties = treaties.filter((treaty) => !hiddenTreaties.includes(treaty.id));
@@ -96,6 +128,12 @@ export function RealmMap({
     setPan({ x: ox - worldX * clamped, y: oy - worldY * clamped });
   };
 
+  const resetView = () => {
+    setScale(1);
+    if (fitted) setPan({ x: (frame.w - fitted.w) / 2, y: (frame.h - fitted.h) / 2 });
+    else setPan({ x: 0, y: 0 });
+  };
+
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -110,6 +148,7 @@ export function RealmMap({
   const openPin = (pinId: string, event: { clientX: number; clientY: number }) => {
     const viewport = viewportRef.current?.getBoundingClientRect();
     setSelectedTreaty(null);
+    setDraft(null);
     setSelectedPin(pinId);
     if (viewport) setPopupAt({ x: event.clientX - viewport.left + 8, y: event.clientY - viewport.top + 8 });
     const pin = livePins.find((item) => item.id === pinId);
@@ -118,51 +157,62 @@ export function RealmMap({
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <button type="button" className="btn btn-secondary text-sm px-3 py-1.5" onClick={() => zoomAt(
-          (viewportRef.current?.getBoundingClientRect().left || 0) + 200,
-          (viewportRef.current?.getBoundingClientRect().top || 0) + 200,
-          scale * 1.2
-        )}>Zoom in</button>
-        <button type="button" className="btn btn-secondary text-sm px-3 py-1.5" onClick={() => zoomAt(
-          (viewportRef.current?.getBoundingClientRect().left || 0) + 200,
-          (viewportRef.current?.getBoundingClientRect().top || 0) + 200,
-          scale / 1.2
-        )}>Zoom out</button>
-        <button type="button" className="btn btn-secondary text-sm px-3 py-1.5" onClick={() => { setScale(1); setPan({ x: 0, y: 0 }); }}>Reset</button>
-        <label className="flex items-center gap-2 text-sm font-bold">
-          <input type="checkbox" checked={showTreaties} onChange={(event) => setShowTreaties(event.target.checked)} />
-          Show treaties
-        </label>
-        {canEdit && (
-          <button type="button" className={`text-sm px-3 py-1.5 ${adding ? "btn" : "btn btn-secondary"}`} onClick={() => { setAdding((value) => !value); setDraft(null); }}>
-            {adding ? "Click the map to place a pin" : "Add pin"}
-          </button>
-        )}
-        {canEdit && (
-          <label className="text-sm">
-            <span className="sr-only">Replace realm map</span>
-            <input
-              type="file"
-              accept="image/*"
-              className="text-sm"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = "";
-                if (!file) return;
-                setUploadError("");
-                onUpload(file).catch(() => setUploadError(UPLOAD_FAILED_MESSAGE));
-              }}
-            />
+    <div className="relative h-full min-h-0">
+      <div className="absolute top-3 left-3 right-3 z-30 flex flex-wrap items-center gap-2">
+        <div className="glass-panel px-3 py-2 flex flex-wrap items-center gap-2 max-w-full">
+          <h1 className="text-accent-gold mr-1">Realm map</h1>
+          <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => zoomAt(
+            (viewportRef.current?.getBoundingClientRect().left || 0) + frame.w / 2,
+            (viewportRef.current?.getBoundingClientRect().top || 0) + frame.h / 2,
+            scale * 1.2
+          )}>+</button>
+          <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={() => zoomAt(
+            (viewportRef.current?.getBoundingClientRect().left || 0) + frame.w / 2,
+            (viewportRef.current?.getBoundingClientRect().top || 0) + frame.h / 2,
+            scale / 1.2
+          )}>−</button>
+          <button type="button" className="btn btn-secondary text-xs px-2 py-1" onClick={resetView}>Fit</button>
+          <label className="flex items-center gap-2 text-sm font-bold">
+            <input type="checkbox" checked={showTreaties} onChange={(event) => setShowTreaties(event.target.checked)} />
+            Show treaties
           </label>
-        )}
+          {canEdit && (
+            <button type="button" className={`text-xs px-2 py-1 ${adding ? "btn" : "btn btn-secondary"}`} onClick={() => { setAdding((value) => !value); setDraft(null); }}>
+              {adding ? "Click the map" : "Add pin"}
+            </button>
+          )}
+          {canEdit && (
+            <label className="text-xs">
+              <span className="sr-only">Replace realm map</span>
+              <input
+                type="file"
+                accept="image/*"
+                className="text-xs max-w-[9rem]"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  setUploadError("");
+                  setBusy(true);
+                  onUpload(file)
+                    .then(() => setNotice("Map image saved."))
+                    .catch(() => setUploadError(UPLOAD_FAILED_MESSAGE))
+                    .finally(() => setBusy(false));
+                }}
+              />
+            </label>
+          )}
+        </div>
       </div>
-      {uploadError && <p className="text-sm font-bold" role="alert">{uploadError}</p>}
+      {(uploadError || notice) && (
+        <p className={`absolute top-16 left-3 z-30 glass-panel px-3 py-2 text-sm font-bold ${uploadError ? "" : "text-ink"}`} role="status">
+          {uploadError || notice}
+        </p>
+      )}
 
       <div
         ref={viewportRef}
-        className="relative h-[75vh] min-h-[520px] overflow-hidden rounded-lg border border-primary-brown bg-white touch-none"
+        className="relative h-full overflow-hidden bg-[#f7f6f3] touch-none"
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("[data-pin],[data-popup]")) return;
           drag.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y, moved: false };
@@ -198,15 +248,27 @@ export function RealmMap({
           if (!adding) return;
           const next = placeNorm(event);
           if (!next) return;
+          const firstCity = cities[0];
           setDraft(next);
           setSelectedPin(null);
-          setCityId(cities[0]?.id || "");
+          setCityId(firstCity?.id || "");
+          setTitle(firstCity?.name || "");
+          setDescription("");
           setWikiIds([]);
+          setFormError("");
+          setNotice("");
         }}
       >
         <div style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`, transformOrigin: "0 0" }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={imageUrl} alt="Realm map" className="block w-full h-auto select-none" draggable={false} />
+          <img
+            src={imageUrl}
+            alt="Realm map"
+            draggable={false}
+            onLoad={(event) => setNatural({ w: event.currentTarget.naturalWidth, h: event.currentTarget.naturalHeight })}
+            style={fitted ? { width: fitted.w, height: fitted.h } : { width: "100%", height: "auto" }}
+            className="block select-none max-w-none pixel-image"
+          />
           {showTreaties && (
             <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
               {visibleTreaties.map((treaty) => {
@@ -245,7 +307,7 @@ export function RealmMap({
               type="button"
               data-pin
               title={pin.title}
-              className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-yellow border border-on-yellow shadow"
+              className="absolute w-4 h-4 -ml-2 -mt-2 bg-accent-yellow border-2 border-on-yellow"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
               onPointerDown={(event) => {
                 event.stopPropagation();
@@ -259,7 +321,7 @@ export function RealmMap({
             />
           ))}
           {draft && (
-            <span className="absolute w-4 h-4 -ml-2 -mt-2 rounded-full bg-accent-cyan border border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
+            <span className="absolute w-4 h-4 -ml-2 -mt-2 bg-accent-cyan border-2 border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
           )}
         </div>
 
@@ -289,14 +351,23 @@ export function RealmMap({
                   wikiEntryIds: wikiIds,
                   wikiEntryId: wikiIds[0] || null,
                 });
+                setNotice("Pin saved.");
+              } catch (error) {
+                setFormError(actionError(error, "Could not save that pin."));
               } finally {
                 setBusy(false);
               }
             }}
             onDelete={async () => {
               if (!selectedPin) return;
-              await onDeletePin(selectedPin);
-              setSelectedPin(null);
+              setBusy(true);
+              try {
+                await onDeletePin(selectedPin);
+                setSelectedPin(null);
+                setNotice("Pin deleted.");
+              } finally {
+                setBusy(false);
+              }
             }}
           />
         )}
@@ -311,8 +382,8 @@ export function RealmMap({
       </div>
 
       {showTreaties && (
-        <div className="glass-panel p-4">
-          <h2 className="font-bold mb-2">Treaty legend</h2>
+        <div className="absolute bottom-3 left-3 z-30 glass-panel p-3 max-w-lg">
+          <h2 className="mb-2">Treaty legend</h2>
           {treaties.length === 0 ? (
             <p className="text-sm text-text-muted">No active treaties to draw.</p>
           ) : (
@@ -329,7 +400,7 @@ export function RealmMap({
                         );
                       }}
                     />
-                    <span className="inline-block w-4 h-1.5 rounded" style={{ background: treaty.color }} />
+                    <span className="inline-block w-4 h-2" style={{ background: treaty.color }} />
                     {treaty.name}
                   </label>
                 </li>
@@ -341,15 +412,25 @@ export function RealmMap({
 
       {canEdit && draft && (
         <form
-          className="glass-panel p-4 space-y-3"
+          data-popup
+          className="absolute top-16 right-3 z-30 w-[min(22rem,calc(100%-1.5rem))] glass-panel p-4 space-y-3 max-h-[calc(100%-5rem)] overflow-y-auto"
           onSubmit={async (event) => {
             event.preventDefault();
             const city = cityById.get(cityId);
-            if (!city) return;
+            if (!city) {
+              setFormError("Choose a city for this pin.");
+              return;
+            }
+            if (!title.trim()) {
+              setFormError("Give the pin a title.");
+              return;
+            }
             setBusy(true);
+            setFormError("");
             try {
               await onAddPin({
-                title: city.name,
+                title: title.trim(),
+                note: description.trim(),
                 nx: draft.nx,
                 ny: draft.ny,
                 cityId: city.id,
@@ -362,18 +443,35 @@ export function RealmMap({
               setDraft(null);
               setAdding(false);
               setWikiIds([]);
+              setNotice("Pin saved.");
+            } catch (error) {
+              setFormError(actionError(error, "Could not save that pin."));
             } finally {
               setBusy(false);
             }
           }}
         >
-          <p className="text-sm text-text-muted">Link this pin to a city. Wiki entries are optional.</p>
+          <div className="flex justify-between gap-2">
+            <h2>Define this pin</h2>
+            <button type="button" className="text-text-muted" onClick={() => setDraft(null)} aria-label="Close">×</button>
+          </div>
+          <p className="text-sm text-text-muted">Nothing is stored until you save.</p>
           <label className="form-label" htmlFor="pin-city">City</label>
-          <select id="pin-city" className="form-input" value={cityId} onChange={(event) => setCityId(event.target.value)} required>
+          <select id="pin-city" className="form-input" value={cityId} onChange={(event) => {
+            const next = event.target.value;
+            setCityId(next);
+            const city = cityById.get(next);
+            if (!title.trim() && city) setTitle(city.name);
+          }} required>
             {cities.map((city) => <option key={city.id} value={city.id}>{city.name}</option>)}
           </select>
+          <label className="form-label" htmlFor="pin-title">Title</label>
+          <input id="pin-title" className="form-input" value={title} onChange={(event) => setTitle(event.target.value)} required />
+          <label className="form-label" htmlFor="pin-description">Description</label>
+          <textarea id="pin-description" className="form-input" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} />
           <WikiPicker entries={wikiEntries} selected={wikiIds} onChange={setWikiIds} />
-          <button className="btn text-sm px-4 py-2" disabled={busy} type="submit">Save pin</button>
+          {formError && <p className="text-sm font-bold" role="alert">{formError}</p>}
+          <SubmitButton busy={busy} busyLabel="Saving…" className="btn text-sm px-4 py-2">Save pin</SubmitButton>
         </form>
       )}
     </div>
@@ -392,7 +490,7 @@ function WikiPicker({
   if (entries.length === 0) return <p className="text-sm text-text-muted">No wiki entries yet.</p>;
   return (
     <fieldset className="space-y-1 max-h-40 overflow-y-auto">
-      <legend className="form-label">Wiki entries</legend>
+      <legend className="form-label">Linked wiki</legend>
       {entries.map((entry) => (
         <label key={entry.id} className="flex items-center gap-2 text-sm">
           <input
@@ -447,18 +545,18 @@ function PinPopup({
   return (
     <div data-popup className="absolute z-20 w-72 glass-panel p-4 shadow-lg" style={{ left: at.x, top: at.y }}>
       <div className="flex justify-between gap-2">
-        <h3 className="font-bold">{shown?.name || pin.title}</h3>
+        <h3>{shown?.name || pin.title}</h3>
         <button type="button" className="text-text-muted" onClick={onClose} aria-label="Close">×</button>
       </div>
       {shown?.sigilUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={shown.sigilUrl} alt="" className="w-12 h-12 rounded-full border border-primary-brown object-cover my-2" />
+        <img src={shown.sigilUrl} alt="" className="w-12 h-12 border-2 border-ink object-cover my-2" />
       ) : (
-        <div className="w-12 h-12 rounded-full my-2 flex items-center justify-center font-bold" style={{ background: shown?.colors?.primary || "#169C9C", color: "#1c1917" }}>
+        <div className="w-12 h-12 my-2 flex items-center justify-center font-bold" style={{ background: shown?.colors?.primary || "#169C9C", color: "#1c1917" }}>
           {(shown?.name || pin.title).charAt(0)}
         </div>
       )}
-      <p className="text-sm text-text-muted line-clamp-3">{shown?.bio || shown?.description || "No description yet."}</p>
+      <p className="text-sm text-text-muted line-clamp-3">{pin.note || shown?.bio || shown?.description || "No description yet."}</p>
       {shown && <Link className="text-accent-gold text-sm font-bold" href={`/cities/${shown.slug}`}>City home</Link>}
       {wikiEntries.length > 0 && (
         <ul className="mt-2 space-y-1">
@@ -472,14 +570,14 @@ function PinPopup({
         </ul>
       )}
       {canEdit && (
-        <div className="mt-3 space-y-2 border-t border-primary-brown pt-3">
+        <div className="mt-3 space-y-2 border-t border-ink pt-3">
           <select className="form-input" value={cityId} onChange={(event) => onCityId(event.target.value)}>
             {cities.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
           <WikiPicker entries={allWiki} selected={wikiIds} onChange={onWikiIds} />
           <div className="flex gap-2">
-            <button type="button" className="btn text-sm px-3 py-1.5" disabled={busy} onClick={() => onSave()}>Save</button>
-            <button type="button" className="btn btn-danger text-sm px-3 py-1.5" onClick={() => onDelete()}>Delete</button>
+            <SubmitButton type="button" busy={busy} busyLabel="Saving…" className="btn text-sm px-3 py-1.5" onClick={() => onSave()}>Save</SubmitButton>
+            <button type="button" className="btn btn-danger text-sm px-3 py-1.5" disabled={busy} onClick={() => onDelete()}>Delete</button>
           </div>
         </div>
       )}
@@ -503,7 +601,7 @@ function TreatyPopup({
   return (
     <div data-popup className="absolute z-20 w-72 glass-panel p-4 shadow-lg" style={{ left: at.x, top: at.y }}>
       <div className="flex justify-between gap-2">
-        <h3 className="font-bold">{treaty.name}</h3>
+        <h3>{treaty.name}</h3>
         <button type="button" className="text-text-muted" onClick={onClose} aria-label="Close">×</button>
       </div>
       <p className="text-sm mt-1">{parties.join(", ")}</p>
