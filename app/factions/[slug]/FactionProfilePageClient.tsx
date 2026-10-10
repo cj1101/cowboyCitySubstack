@@ -18,6 +18,8 @@ import { PostCard } from "@/components/posts/PostCard";
 
 import { CityPanel } from "@/components/cities/CityPanel";
 
+import { CityTreaties } from "@/components/treaties/CityTreaties";
+
 import { getFactionBySlug, isFactionOwner } from "@/lib/firestore/factions";
 
 import { getCharactersForFaction } from "@/lib/firestore/characters";
@@ -657,6 +659,8 @@ export default function FactionProfilePageClient() {
           <section className="glass-panel p-6">
 
             <CityPanel faction={faction} isOwner={isOwner} />
+
+            <CityTreaties cityId={faction.id} />
 
 
 

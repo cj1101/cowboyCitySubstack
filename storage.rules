@@ -113,6 +113,12 @@ service firebase.storage {
       allow delete: if isSignedIn() && (request.auth.uid == uid || isAdmin());
     }
 
+    match /threads/{threadId}/{fileName} {
+      allow read: if isMember();
+      allow write: if isMember() && isImage(8 * 1024 * 1024);
+      allow delete: if isMember();
+    }
+
     match /realm/{fileName} {
       allow read: if isMember();
       allow write: if isAdmin() && isImage(15 * 1024 * 1024);

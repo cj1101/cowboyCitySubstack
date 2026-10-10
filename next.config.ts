@@ -11,6 +11,18 @@ const nextConfig: NextConfig = {
         protocol: "https",
         hostname: "*.firebasestorage.app",
       },
+      {
+        protocol: "https",
+        hostname: "cowboycityrealm.firebasestorage.app",
+      },
+      {
+        protocol: "https",
+        hostname: "storage.googleapis.com",
+      },
+      {
+        protocol: "https",
+        hostname: "*.appspot.com",
+      },
     ],
   },
   async rewrites() {

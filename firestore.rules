@@ -162,7 +162,20 @@ service cloud.firestore {
     function keepsIdentity() {
       return request.resource.data.email == resource.data.email &&
         request.resource.data.isAdmin == resource.data.isAdmin &&
-        request.resource.data.status == resource.data.status;
+        request.resource.data.status == resource.data.status &&
+        request.resource.data.get('ownsCity', false) == resource.data.get('ownsCity', false);
+    }
+
+    function isCityOwner() {
+      return hasUser() && userDoc().data.get('ownsCity', false) == true;
+    }
+
+    function claimCityOwner(uid) {
+      return request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownsCity', 'proofCityId']) &&
+        request.resource.data.ownsCity == true &&
+        request.resource.data.proofCityId is string &&
+        isFactionOwner(request.resource.data.proofCityId);
     }
 
     function selfPromoteAllowlisted(uid) {
@@ -214,6 +227,7 @@ service cloud.firestore {
         selfPromoteAllowlisted(uid) ||
         acceptOwnInvite(uid) ||
         claimOpenMembership(uid) ||
+        claimCityOwner(uid) ||
         (request.auth.uid == uid && keepsIdentity())
       );
       allow delete: if isAdmin() && request.auth.uid != uid;
@@ -432,7 +446,7 @@ service cloud.firestore {
       allow create: if isMember() &&
         request.resource.data.recipientUid is string &&
         request.resource.data.read == false &&
-        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval'] &&
+        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval', 'treaty'] &&
         request.resource.data.summary is string &&
         request.resource.data.summary.size() <= 500 &&
         request.resource.data.href is string;
@@ -440,6 +454,215 @@ service cloud.firestore {
         resource.data.recipientUid == request.auth.uid &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
         request.resource.data.read == true;
+    }
+
+    function treatyPath(treatyId) {
+      return /databases/$(database)/documents/treaties/$(treatyId);
+    }
+
+    function treatyData(treatyId) {
+      return get(treatyPath(treatyId)).data;
+    }
+
+    function canReadTreaty(treatyId) {
+      return isAdmin() || (
+        isMember() && exists(treatyPath(treatyId)) && (
+          treatyData(treatyId).status == 'active' ||
+          request.auth.uid in treatyData(treatyId).readerUids ||
+          (treatyData(treatyId).open == true &&
+            treatyData(treatyId).status == 'pending' &&
+            isCityOwner())
+        )
+      );
+    }
+
+    function treatyStatusMatches() {
+      return (request.resource.data.partyCityIds.size() >= 2 && request.resource.data.status == 'active') ||
+        (request.resource.data.partyCityIds.size() < 2 && request.resource.data.status == 'pending');
+    }
+
+    function cityMayAct(cityId) {
+      return resource.data.open == true ||
+        cityId == resource.data.proposerCityId ||
+        cityId in resource.data.inviteeCityIds;
+    }
+
+    function validNewTreaty() {
+      return isMember() &&
+        isFactionOwner(request.resource.data.proposerCityId) &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.currentRevision == 1 &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.partyCityIds.size() == 1 &&
+        request.resource.data.partyCityIds[0] == request.resource.data.proposerCityId &&
+        request.resource.data.type in ['alliance', 'trade', 'non-aggression', 'other'] &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 160 &&
+        request.resource.data.nature is string &&
+        request.resource.data.nature.size() <= 8000 &&
+        request.resource.data.terms is string &&
+        request.resource.data.terms.size() <= 20000 &&
+        request.resource.data.purpose is string &&
+        request.resource.data.purpose.size() > 0 &&
+        request.resource.data.purpose.size() <= 500 &&
+        request.resource.data.open is bool &&
+        request.resource.data.inviteeCityIds is list &&
+        request.resource.data.inviteeCityIds.size() <= 24 &&
+        request.resource.data.readerUids is list &&
+        request.auth.uid in request.resource.data.readerUids &&
+        request.resource.data.color is string &&
+        request.resource.data.lastActionCityId == request.resource.data.proposerCityId;
+    }
+
+    function partyAccept() {
+      return isFactionOwner(request.resource.data.lastActionCityId) &&
+        cityMayAct(request.resource.data.lastActionCityId) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['partyCityIds', 'status', 'updatedAt', 'lastActionCityId', 'partyOwnerUids', 'readerUids']) &&
+        request.resource.data.partyCityIds.hasAll(resource.data.partyCityIds) &&
+        request.resource.data.partyCityIds.hasAny([request.resource.data.lastActionCityId]) &&
+        request.resource.data.partyCityIds.size() == resource.data.partyCityIds.size() + 1 &&
+        treatyStatusMatches() &&
+        request.resource.data.currentRevision == resource.data.currentRevision &&
+        request.resource.data.proposerCityId == resource.data.proposerCityId;
+    }
+
+    function partyRemove() {
+      return isFactionOwner(request.resource.data.lastActionCityId) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['partyCityIds', 'status', 'updatedAt', 'lastActionCityId', 'partyOwnerUids', 'readerUids']) &&
+        resource.data.partyCityIds.hasAll(request.resource.data.partyCityIds) &&
+        resource.data.partyCityIds.hasAny([request.resource.data.lastActionCityId]) &&
+        !(request.resource.data.lastActionCityId in request.resource.data.partyCityIds) &&
+        request.resource.data.partyCityIds.size() == resource.data.partyCityIds.size() - 1 &&
+        treatyStatusMatches() &&
+        request.resource.data.currentRevision == resource.data.currentRevision &&
+        request.resource.data.proposerCityId == resource.data.proposerCityId;
+    }
+
+    function counterRevision() {
+      return isFactionOwner(request.resource.data.lastActionCityId) &&
+        cityMayAct(request.resource.data.lastActionCityId) &&
+        request.resource.data.currentRevision == resource.data.currentRevision + 1 &&
+        request.resource.data.partyCityIds.size() == 1 &&
+        request.resource.data.partyCityIds[0] == request.resource.data.lastActionCityId &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.proposerCityId == resource.data.proposerCityId &&
+        request.resource.data.open == resource.data.open &&
+        request.resource.data.color == resource.data.color &&
+        request.resource.data.inviteeCityIds.hasAll(resource.data.inviteeCityIds) &&
+        request.resource.data.readerUids.hasAll(resource.data.readerUids) &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 160 &&
+        request.resource.data.type in ['alliance', 'trade', 'non-aggression', 'other'] &&
+        request.resource.data.nature is string &&
+        request.resource.data.terms is string &&
+        request.resource.data.purpose is string &&
+        request.auth.uid in request.resource.data.partyOwnerUids;
+    }
+
+    match /treaties/{treatyId} {
+      allow get: if canReadTreaty(treatyId);
+      allow list: if isAdmin() ||
+        (isMember() && resource.data.status == 'active') ||
+        (isMember() && request.auth.uid in resource.data.readerUids) ||
+        (isMember() && resource.data.open == true && resource.data.status == 'pending' && isCityOwner());
+      allow create: if validNewTreaty();
+      allow update: if isMember() && (isAdmin() || partyAccept() || partyRemove() || counterRevision());
+      allow delete: if isAdmin();
+
+      match /revisions/{revId} {
+        allow read: if canReadTreaty(treatyId);
+        allow create: if isAdmin() || (
+          isMember() &&
+          isFactionOwner(request.resource.data.authorCityId) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.number is int &&
+          request.resource.data.number == int(revId) &&
+          request.resource.data.authorCityId is string &&
+          (
+            request.resource.data.number == 1 ||
+            request.resource.data.number == treatyData(treatyId).currentRevision + 1
+          ) &&
+          (treatyData(treatyId).open == true ||
+            request.resource.data.authorCityId == treatyData(treatyId).proposerCityId ||
+            request.resource.data.authorCityId in treatyData(treatyId).inviteeCityIds)
+        );
+      }
+
+      match /responses/{responseId} {
+        allow read: if canReadTreaty(treatyId);
+        allow create, update: if isMember() &&
+          request.resource.data.cityId is string &&
+          isFactionOwner(request.resource.data.cityId) &&
+          request.resource.data.uid == request.auth.uid &&
+          request.resource.data.decision in ['accept', 'decline', 'counter', 'withdraw'] &&
+          request.resource.data.revision == treatyData(treatyId).currentRevision &&
+          (treatyData(treatyId).open == true ||
+            request.resource.data.cityId == treatyData(treatyId).proposerCityId ||
+            request.resource.data.cityId in treatyData(treatyId).inviteeCityIds ||
+            request.resource.data.decision == 'withdraw');
+      }
+
+      match /comments/{commentId} {
+        allow read: if canReadTreaty(treatyId);
+        allow create: if canReadTreaty(treatyId) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() > 0 &&
+          request.resource.data.body.size() <= 8000;
+        allow delete: if isAdmin() || (isMember() && resource.data.authorUid == request.auth.uid);
+      }
+
+      match /wiki_sections/{sectionId} {
+        allow read: if canReadTreaty(treatyId);
+        allow create, update: if isMember() &&
+          (isAdmin() ||
+            isFactionOwner(treatyData(treatyId).proposerCityId) ||
+            request.auth.uid in treatyData(treatyId).partyOwnerUids) &&
+          request.resource.data.title is string &&
+          request.resource.data.title.size() > 0 &&
+          request.resource.data.title.size() <= 160 &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() <= 20000;
+        allow delete: if isAdmin() ||
+          (isMember() && isFactionOwner(treatyData(treatyId).proposerCityId));
+      }
+    }
+
+    match /threads/{threadId} {
+      allow read: if isMember();
+      allow create: if isMember() &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 200 &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 20000 &&
+        request.resource.data.imageUrls is list &&
+        request.resource.data.imageUrls.size() <= 6 &&
+        request.resource.data.replyCount == 0;
+      allow update: if isMember() && (
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastActivityAt', 'replyCount']) &&
+          request.resource.data.replyCount == resource.data.replyCount + 1 &&
+          request.resource.data.authorUid == resource.data.authorUid) ||
+        isAdmin()
+      );
+      allow delete: if isAdmin() || (isMember() && resource.data.authorUid == request.auth.uid);
+
+      match /replies/{replyId} {
+        allow read: if isMember();
+        allow create: if isMember() &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() > 0 &&
+          request.resource.data.body.size() <= 8000 &&
+          request.resource.data.imageUrls is list &&
+          request.resource.data.imageUrls.size() <= 4;
+        allow delete: if isAdmin() || (isMember() && resource.data.authorUid == request.auth.uid);
+      }
     }
   }
 }

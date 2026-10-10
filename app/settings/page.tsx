@@ -66,9 +66,13 @@ export default function SettingsPage() {
             <input id="avatar" type="file" accept="image/*" className="form-input" onChange={async (e) => {
               const file = e.target.files?.[0];
               if (!file) return;
-              const url = await uploadUserAvatar(user.uid, file);
-              await updateDoc(doc(getClientDb(), "users", user.uid), { avatarUrl: url });
-              setMessage("Avatar updated.");
+              try {
+                const url = await uploadUserAvatar(user.uid, file);
+                await updateDoc(doc(getClientDb(), "users", user.uid), { avatarUrl: url });
+                setMessage("Avatar updated.");
+              } catch (err) {
+                setMessage(err instanceof Error ? err.message : "Upload failed. The image was not stored.");
+              }
             }} />
           </div>
           <button className="btn" disabled={busy} type="submit">Save profile</button>

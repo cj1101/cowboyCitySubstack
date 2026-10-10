@@ -227,6 +227,8 @@ export interface MapPin {
   z?: number | null;
   postId?: string | null;
   wikiEntryId?: string | null;
+  wikiEntryIds?: string[];
+  cityId?: string | null;
   note?: string;
 }
 
@@ -251,7 +253,8 @@ export type NotificationType =
   | "reference"
   | "reply"
   | "dm"
-  | "approval";
+  | "approval"
+  | "treaty";
 
 export interface AppNotification {
   id: string;

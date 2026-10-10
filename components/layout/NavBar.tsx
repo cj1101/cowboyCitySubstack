@@ -13,8 +13,10 @@ import { subscribeConversations } from "@/lib/firestore/messages";
 
 const NAV_LINKS = [
   { href: "/cities", label: "Cities" },
+  { href: "/maps", label: "Realm Map" },
+  { href: "/treaties", label: "Treaties" },
+  { href: "/forum", label: "Forum" },
   { href: "/timeline", label: "Timeline" },
-  { href: "/maps", label: "Maps" },
   { href: "/lore-graph", label: "Lore Graph" },
   { href: "/search", label: "Search" },
 ] as const;

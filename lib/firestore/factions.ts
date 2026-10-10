@@ -95,6 +95,7 @@ export async function createFaction(
     factionId: factionRef.id,
     role: "owner",
   });
+  await updateDoc(doc(db, "users", creatorUid), { ownsCity: true, proofCityId: factionRef.id });
 
   return {
     id: factionRef.id,
@@ -109,6 +110,10 @@ export async function createFaction(
     mapImageUrl: input.mapImageUrl,
     ownerUids: [creatorUid],
   };
+}
+
+export async function ensureCityOwnerClaim(uid: string, cityId: string): Promise<void> {
+  await updateDoc(doc(getClientDb(), "users", uid), { ownsCity: true, proofCityId: cityId });
 }
 
 export async function updateFaction(
