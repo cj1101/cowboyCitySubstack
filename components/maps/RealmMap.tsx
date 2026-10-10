@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Faction, MapPin, WikiEntry } from "@/lib/types";
 import type { StoredTreaty } from "@/lib/firestore/treaties";
+import { TreatyBadge } from "@/components/treaties/TreatyBadge";
 import { actionError } from "@/lib/async";
 import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
 import { clamp, pinchView, popupPosition } from "@/lib/maps/gestures";
@@ -703,6 +704,7 @@ function TreatyPopup({
         <button type="button" className="menu-button shrink-0" onClick={onClose} aria-label="Close">×</button>
       </div>
       <p className="text-sm mt-1">{parties.join(", ")}</p>
+      <p className="mt-2"><TreatyBadge status={treaty.status} expiresOn={treaty.expiresOn} /></p>
       <p className="text-sm text-text-muted mt-2">{treaty.purpose}</p>
       <Link className="text-accent-gold text-sm font-bold" href={`/treaties/${treaty.id}`}>Treaty page</Link>
     </div>

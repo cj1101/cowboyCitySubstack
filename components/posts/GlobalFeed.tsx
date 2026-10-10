@@ -8,9 +8,10 @@ import {
   getAllFactions,
   getCharactersMap,
   getFactionsMap,
-  getPosts,
+  getPostsPage,
   publishDueScheduledPosts,
 } from "@/lib/firestore/posts";
+import type { Timestamp } from "firebase/firestore";
 import { getFollowedCityIds } from "@/lib/firestore/follows";
 import type { Character, Faction, Post } from "@/lib/types";
 
@@ -26,13 +27,14 @@ export function GlobalFeed() {
   const [followingOnly, setFollowingOnly] = useState(false);
   const [followed, setFollowed] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [cursor, setCursor] = useState<Timestamp | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!user) return;
-    getAllFactions()
-      .then(setFactions)
-      .catch(() => setFactions([]));
     publishDueScheduledPosts(user.uid).catch(() => undefined);
     getFollowedCityIds(user.uid).then(setFollowed).catch(() => setFollowed([]));
   }, [user]);
@@ -44,23 +46,66 @@ export function GlobalFeed() {
       return;
     }
 
+    let cancelled = false;
     setLoading(true);
     setError(null);
 
-    getPosts({ factionId: factionFilter || null })
-      .then(async (fetched) => {
-        setPosts(fetched);
-        const fMap = await getFactionsMap(fetched.map((p) => p.factionId));
-        const cMap = await getCharactersMap(fetched.map((p) => p.characterId));
+    Promise.all([
+      getAllFactions(),
+      getPostsPage({ factionId: factionFilter || null }),
+    ])
+      .then(async ([factionList, page]) => {
+        if (cancelled) return;
+        setFactions(factionList);
+        setPosts(page.posts);
+        setHasMore(page.hasMore);
+        setCursor(page.cursor);
+        const fMap = new Map(factionList.map((city) => [city.id, city]));
+        const missing = page.posts.map((post) => post.factionId).filter((id) => id && !fMap.has(id));
+        if (missing.length > 0) {
+          const extra = await getFactionsMap(missing);
+          extra.forEach((city, id) => fMap.set(id, city));
+        }
         setFactionsMap(fMap);
-        setCharactersMap(cMap);
+        setCharactersMap(await getCharactersMap(page.posts.map((post) => post.characterId)));
       })
       .catch((err) => {
         console.error(err);
-        setError("Could not load the feed. Check your connection and try again.");
+        if (!cancelled) setError("Could not load the feed. Check your connection and try again.");
       })
-      .finally(() => setLoading(false));
-  }, [user, authLoading, factionFilter]);
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, authLoading, factionFilter, reloadKey]);
+
+  const loadOlder = async () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const page = await getPostsPage({ factionId: factionFilter || null, after: cursor });
+      setPosts((current) => {
+        const seen = new Set(current.map((post) => post.id));
+        return [...current, ...page.posts.filter((post) => !seen.has(post.id))];
+      });
+      setHasMore(page.hasMore);
+      setCursor(page.cursor);
+      const extraCharacters = await getCharactersMap(page.posts.map((post) => post.characterId));
+      setCharactersMap((current) => {
+        const next = new Map(current);
+        extraCharacters.forEach((character, id) => next.set(id, character));
+        return next;
+      });
+    } catch (err) {
+      console.error(err);
+      setError("Could not load older posts.");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   if (authLoading) {
     return (
@@ -138,7 +183,17 @@ export function GlobalFeed() {
         )}
 
         {error && (
-          <div className="glass-panel p-6 text-danger text-center">{error}</div>
+          <div className="glass-panel p-6 text-center mb-4" role="alert">
+            <p className="font-bold">{error}</p>
+            <button
+              type="button"
+              className="btn text-sm px-4 py-2 mt-3 min-h-11"
+              disabled={loading || loadingMore}
+              onClick={() => (posts.length > 0 ? loadOlder() : setReloadKey((value) => value + 1))}
+            >
+              {loading || loadingMore ? "Loading…" : "Try again"}
+            </button>
+          </div>
         )}
 
         {!loading && !error && posts.length === 0 && (
@@ -150,7 +205,7 @@ export function GlobalFeed() {
           </div>
         )}
 
-        {!loading && !error && posts.length > 0 && (
+        {!loading && posts.length > 0 && (
           <div className="flex flex-col gap-5">
             {posts
               .filter((post) => !followingOnly || (post.cityIds ?? [post.factionId]).some((id) => followed.includes(id)))
@@ -163,6 +218,11 @@ export function GlobalFeed() {
                 tagged={factions.filter((city) => (post.cityIds ?? []).includes(city.id))}
               />
             ))}
+            {hasMore && (
+              <button type="button" className="btn btn-secondary min-h-11" disabled={loadingMore} aria-busy={loadingMore} onClick={loadOlder}>
+                {loadingMore ? "Loading older posts…" : "Load older posts"}
+              </button>
+            )}
           </div>
         )}
       </div>

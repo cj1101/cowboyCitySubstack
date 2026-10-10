@@ -12,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { withTimeout } from "@/lib/async";
 import { getClientDb } from "@/lib/firebase";
+import { searchTokensFrom } from "@/lib/search/tokens";
 import type { Faction, FactionInput, FactionMember } from "@/lib/types";
 
 const FACTIONS = "factions";
@@ -42,10 +43,19 @@ function docToFaction(id: string, data: Record<string, unknown>): Faction {
   };
 }
 
+let factionCache: { at: number; items: Faction[] } | null = null;
+
+export function invalidateFactionCache() {
+  factionCache = null;
+}
+
 export async function getAllFactions(): Promise<Faction[]> {
+  if (factionCache && Date.now() - factionCache.at < 20000) return factionCache.items;
   const db = getClientDb();
   const snapshot = await getDocs(collection(db, FACTIONS));
-  return snapshot.docs.map((d) => docToFaction(d.id, d.data()));
+  const items = snapshot.docs.map((d) => docToFaction(d.id, d.data()));
+  factionCache = { at: Date.now(), items };
+  return items;
 }
 
 export async function getFactionById(id: string): Promise<Faction | null> {
@@ -88,8 +98,13 @@ export async function createFaction(
     lore: input.lore ?? "",
     mapImageUrl: input.mapImageUrl ?? null,
     ownerUids: [creatorUid],
+    searchTokens: searchTokensFrom({
+      title: `${input.name} ${input.slug}`,
+      body: `${description} ${input.lore || ""}`,
+    }),
     createdAt: serverTimestamp(),
   }));
+  invalidateFactionCache();
 
   await withTimeout(setDoc(doc(db, FACTION_MEMBERS, memberDocId(creatorUid, factionRef.id)), {
     uid: creatorUid,
@@ -148,7 +163,16 @@ export async function updateFaction(
   }
   if (input.lore !== undefined) updates.lore = input.lore;
   if (input.mapImageUrl !== undefined) updates.mapImageUrl = input.mapImageUrl;
+  if (Object.keys(updates).length > 0) {
+    const current = await getDoc(doc(db, FACTIONS, factionId));
+    const data = current.data() || {};
+    updates.searchTokens = searchTokensFrom({
+      title: `${input.name ?? data.name ?? ""} ${input.slug ?? data.slug ?? ""}`,
+      body: `${input.description ?? input.bio ?? data.description ?? data.bio ?? ""} ${input.lore ?? data.lore ?? ""}`,
+    });
+  }
   await updateDoc(doc(db, FACTIONS, factionId), updates);
+  invalidateFactionCache();
 }
 
 export async function deleteFaction(factionId: string): Promise<void> {
@@ -160,6 +184,7 @@ export async function deleteFaction(factionId: string): Promise<void> {
   }
   batch.delete(doc(db, FACTIONS, factionId));
   await batch.commit();
+  invalidateFactionCache();
 }
 
 export async function getFactionsForUser(uid: string): Promise<Faction[]> {

@@ -10,6 +10,7 @@ import {
   where,
 } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
+import { searchTokensFrom } from "@/lib/search/tokens";
 import type { WikiEntry, WikiEntryKind, WikiEntryStats } from "@/lib/types";
 
 function toEntry(id: string, data: Record<string, unknown>): WikiEntry {
@@ -68,6 +69,10 @@ export async function saveWikiEntry(
     summary: input.summary ?? "",
     body: input.body ?? "",
     stats: input.stats ?? null,
+    searchTokens: searchTokensFrom({
+      title: `${input.title} ${input.slug} ${input.kind}`,
+      body: `${input.summary || ""} ${input.body || ""}`,
+    }),
     updatedAt: serverTimestamp(),
   };
   if (input.id) {

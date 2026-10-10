@@ -111,6 +111,14 @@
       "collectionGroup": "treaties",
       "queryScope": "COLLECTION",
       "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "searchTokens", "arrayConfig": "CONTAINS" }
+      ]
+    },
+    {
+      "collectionGroup": "treaties",
+      "queryScope": "COLLECTION",
+      "fields": [
         { "fieldPath": "open", "order": "ASCENDING" },
         { "fieldPath": "status", "order": "ASCENDING" }
       ]

@@ -132,6 +132,13 @@ service cloud.firestore {
         request.resource.data.poll.votes[request.auth.uid] < resource.data.poll.options.size();
     }
 
+    function searchTokenPatch() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['searchTokens']) &&
+        request.resource.data.searchTokens is list &&
+        request.resource.data.searchTokens.size() > 0 &&
+        request.resource.data.searchTokens.size() <= 80;
+    }
+
     function validNewPost() {
       return isMember() &&
         isFactionMember(request.resource.data.factionId) &&
@@ -320,6 +327,7 @@ service cloud.firestore {
       allow read: if isAdmin() || isMember();
       allow create: if validNewPost();
       allow update: if (isMember() || isAdmin()) && (
+        (isAdmin() && searchTokenPatch()) ||
         (isAdmin() && preservesPostIdentity()) ||
         ((resource.data.authorUid == request.auth.uid || isFactionOwner(resource.data.factionId)) &&
           preservesPostIdentity()) ||
@@ -389,6 +397,7 @@ service cloud.firestore {
         request.resource.data.slug is string &&
         request.resource.data.body is string &&
         request.resource.data.body.size() <= 200000;
+      allow update: if isAdmin() && searchTokenPatch();
       allow delete: if isMember() && (isAdmin() || isFactionOwner(resource.data.cityId));
     }
 
@@ -478,6 +487,7 @@ service cloud.firestore {
       return isAdmin() || (
         isMember() && exists(treatyPath(treatyId)) && (
           treatyData(treatyId).status == 'active' ||
+          treatyData(treatyId).status == 'broken' ||
           request.auth.uid in treatyData(treatyId).readerUids ||
           (treatyData(treatyId).open == true &&
             treatyData(treatyId).status == 'pending' &&
@@ -570,17 +580,40 @@ service cloud.firestore {
         request.resource.data.nature is string &&
         request.resource.data.terms is string &&
         request.resource.data.purpose is string &&
-        request.auth.uid in request.resource.data.partyOwnerUids;
+        request.auth.uid in request.resource.data.partyOwnerUids &&
+        (!('expiresOn' in request.resource.data) || (request.resource.data.expiresOn is string && request.resource.data.expiresOn.size() <= 10)) &&
+        (!('renewOn' in request.resource.data) || (request.resource.data.renewOn is string && request.resource.data.renewOn.size() <= 10));
+    }
+
+    function partyBreak() {
+      return ownsListedCity(request.resource.data.lastActionCityId) &&
+        resource.data.status == 'active' &&
+        resource.data.partyCityIds.hasAny([request.resource.data.lastActionCityId]) &&
+        !(request.resource.data.lastActionCityId in request.resource.data.partyCityIds) &&
+        request.resource.data.partyCityIds.size() == resource.data.partyCityIds.size() - 1 &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['partyCityIds', 'status', 'updatedAt', 'lastActionCityId', 'partyOwnerUids', 'readerUids', 'brokenByCityId', 'breakNote']) &&
+        request.resource.data.brokenByCityId == request.resource.data.lastActionCityId &&
+        request.resource.data.breakNote is string &&
+        request.resource.data.breakNote.size() > 0 &&
+        request.resource.data.breakNote.size() <= 500 &&
+        request.resource.data.currentRevision == resource.data.currentRevision &&
+        request.resource.data.proposerCityId == resource.data.proposerCityId &&
+        (
+          (request.resource.data.partyCityIds.size() >= 2 && request.resource.data.status == 'active') ||
+          (request.resource.data.partyCityIds.size() < 2 && request.resource.data.status == 'broken')
+        );
     }
 
     match /treaties/{treatyId} {
       allow get: if canReadTreaty(treatyId);
       allow list: if isAdmin() ||
         (isMember() && resource.data.status == 'active') ||
+        (isMember() && resource.data.status == 'broken') ||
         (isMember() && request.auth.uid in resource.data.readerUids) ||
         (isMember() && resource.data.open == true && resource.data.status == 'pending' && isCityOwner());
       allow create: if validNewTreaty();
-      allow update: if isMember() && (isAdmin() || partyAccept() || partyRemove() || counterRevision());
+      allow update: if isMember() && (isAdmin() || partyAccept() || partyRemove() || counterRevision() || partyBreak());
       allow delete: if isAdmin();
 
       match /revisions/{revId} {
@@ -608,7 +641,7 @@ service cloud.firestore {
           request.resource.data.cityId is string &&
           ownsListedCity(request.resource.data.cityId) &&
           request.resource.data.uid == request.auth.uid &&
-          request.resource.data.decision in ['accept', 'decline', 'counter', 'withdraw'] &&
+          request.resource.data.decision in ['accept', 'decline', 'counter', 'withdraw', 'break'] &&
           request.resource.data.revision == treatyData(treatyId).currentRevision &&
           (treatyData(treatyId).open == true ||
             request.resource.data.cityId == treatyData(treatyId).proposerCityId ||
