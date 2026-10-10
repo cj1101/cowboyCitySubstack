@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { useAuth } from "@/components/auth/AuthProvider";
-import { RealmMark } from "@/components/brand/RealmMark";
+import { RealmWordmark } from "@/components/brand/RealmWordmark";
 import { FactionSwitcher } from "@/components/factions/FactionSwitcher";
 import { canUseRealm, isSheriff } from "@/lib/membership";
 import { getClientDb } from "@/lib/firebase";
@@ -102,9 +102,9 @@ export function NavBar() {
   if (loading) {
     return (
       <nav className="hud">
-        <span className="inline-flex items-center gap-2 min-w-0">
-          <RealmMark className="w-8 h-8 border-2 border-ink shrink-0" />
-          <span className="hud-title truncate">Cowboy City</span>
+        <span className="realm-wordmark inline-flex items-center min-w-0">
+          <RealmWordmark compact className="sm:hidden" />
+          <RealmWordmark className="hidden sm:block" />
         </span>
         <span className="text-text-muted text-sm">Loading…</span>
       </nav>
@@ -114,9 +114,9 @@ export function NavBar() {
   return (
     <>
       <nav className="hud">
-        <Link href="/" className="inline-flex items-center gap-2 min-w-0 hover:opacity-80">
-          <RealmMark className="w-8 h-8 shrink-0 border-2 border-ink" />
-          <span className="hud-title truncate">Cowboy City</span>
+        <Link href="/" className="realm-wordmark inline-flex items-center min-w-0" aria-label="Cowboy City home">
+          <RealmWordmark compact className="sm:hidden" />
+          <RealmWordmark className="hidden sm:block" />
         </Link>
 
         {user && member && (

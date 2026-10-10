@@ -58,6 +58,7 @@ export function RealmMap({
   onDeletePin: (pinId: string) => Promise<void>;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [frame, setFrame] = useState({ w: 0, h: 0 });
@@ -69,9 +70,10 @@ export function RealmMap({
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedTreaty, setSelectedTreaty] = useState<string | null>(null);
   const [popupAt, setPopupAt] = useState<{ x: number; y: number } | null>(null);
-  const [uploadError, setUploadError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [formError, setFormError] = useState("");
+  const [toolbarH, setToolbarH] = useState(56);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [cityId, setCityId] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -94,6 +96,16 @@ export function RealmMap({
     const node = viewportRef.current;
     if (!node) return;
     const measure = () => setFrame({ w: node.clientWidth, h: node.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const node = toolbarRef.current;
+    if (!node) return;
+    const measure = () => setToolbarH(node.offsetHeight);
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(node);
@@ -171,8 +183,17 @@ export function RealmMap({
 
   return (
     <div className="relative h-full min-h-0">
-      <div className="absolute top-2 left-2 right-2 z-30 flex flex-wrap items-center gap-2">
-        <div className="glass-panel px-2 py-2 flex flex-wrap items-center gap-2 max-w-full">
+      <div ref={toolbarRef} className="pointer-events-none absolute top-2 left-2 right-2 z-30">
+        <div className="pointer-events-auto glass-panel px-2 py-2 flex flex-wrap items-center gap-2 w-fit max-w-full">
+          <button
+            type="button"
+            className="btn btn-secondary text-sm min-h-11 px-3 py-2 md:hidden"
+            aria-expanded={toolsOpen}
+            onClick={() => setToolsOpen((value) => !value)}
+          >
+            {toolsOpen ? "Hide tools" : "Map tools"}
+          </button>
+          <div className={`${toolsOpen ? "flex" : "hidden"} md:flex flex-wrap items-center gap-2`}>
           <h1 className="text-accent-gold mr-1">Realm map</h1>
           <button type="button" className="btn btn-secondary text-base min-h-11 min-w-11 px-3 py-2" onClick={() => zoomAt(
             (viewportRef.current?.getBoundingClientRect().left || 0) + frame.w / 2,
@@ -205,21 +226,26 @@ export function RealmMap({
                   const file = event.target.files?.[0];
                   event.target.value = "";
                   if (!file) return;
-                  setUploadError("");
+                  setBanner(null);
                   setBusy(true);
                   onUpload(file)
-                    .then(() => setNotice("Map image saved."))
-                    .catch(() => setUploadError(UPLOAD_FAILED_MESSAGE))
+                    .then(() => setBanner({ tone: "ok", text: "Map image saved." }))
+                    .catch((error) => setBanner({ tone: "error", text: actionError(error, UPLOAD_FAILED_MESSAGE) }))
                     .finally(() => setBusy(false));
                 }}
               />
             </label>
           )}
+          </div>
         </div>
       </div>
-      {(uploadError || notice) && (
-        <p className={`absolute top-16 left-3 z-30 glass-panel px-3 py-2 text-sm font-bold ${uploadError ? "" : "text-ink"}`} role="status">
-          {uploadError || notice}
+      {banner && (
+        <p
+          className={`absolute left-3 right-3 z-40 glass-panel px-3 py-2 text-sm font-bold sm:right-auto sm:max-w-md ${banner.tone === "error" ? "text-ink" : "text-ink"}`}
+          style={{ top: toolbarH + 12 }}
+          role={banner.tone === "error" ? "alert" : "status"}
+        >
+          {banner.text}
         </p>
       )}
 
@@ -307,7 +333,11 @@ export function RealmMap({
             const dragging = pinDrag.current;
             pinDrag.current = null;
             const next = placeNorm(event);
-            if (dragging.moved && next) onMovePin(dragging.id, next.nx, next.ny).catch(() => undefined);
+            if (dragging.moved && next) {
+              onMovePin(dragging.id, next.nx, next.ny).catch((error) => {
+                setBanner({ tone: "error", text: actionError(error, "Could not move that pin.") });
+              });
+            }
             else if (!dragging.moved) openPin(dragging.id, event);
             return;
           }
@@ -325,7 +355,7 @@ export function RealmMap({
           setDescription("");
           setWikiIds([]);
           setFormError("");
-          setNotice("");
+          setBanner(null);
         }}
         onPointerCancel={(event) => {
           pointers.current.delete(event.pointerId);
@@ -335,14 +365,22 @@ export function RealmMap({
           if (pointers.current.size === 0) pinched.current = false;
         }}
       >
-        <div className="realm-map-canvas" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`, transformOrigin: "0 0" }}>
+        <div
+          className="realm-map-canvas relative"
+          style={{
+            width: fitted ? fitted.w : "100%",
+            height: fitted ? fitted.h : undefined,
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+            transformOrigin: "0 0",
+          }}
+        >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={imageUrl}
             alt="Realm map"
             draggable={false}
             onLoad={(event) => setNatural({ w: event.currentTarget.naturalWidth, h: event.currentTarget.naturalHeight })}
-            style={fitted ? { width: fitted.w, height: fitted.h } : { width: "100%", height: "auto" }}
+            style={fitted ? { width: "100%", height: "100%" } : { width: "100%", height: "auto" }}
             className="block select-none max-w-none pixel-image"
           />
           {showTreaties && (
@@ -384,14 +422,26 @@ export function RealmMap({
               data-pin={pin.id}
               title={pin.title}
               aria-label={pin.title}
-              className="absolute w-11 h-11 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
+              className="absolute z-10 w-11 h-11 -translate-x-1/2 -translate-y-1/2"
               style={{ left: `${pin.nx * 100}%`, top: `${pin.ny * 100}%` }}
             >
-              <span className="w-4 h-4 bg-accent-yellow border-2 border-on-yellow pointer-events-none" />
+              <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-accent-yellow border-2 border-on-yellow pointer-events-none" />
+              <span className="absolute left-1/2 top-full -translate-x-1/2 mt-0.5 max-w-[7.5rem] truncate border-2 border-ink bg-white px-1 text-[10px] font-bold leading-tight text-ink pointer-events-none">
+                {pin.title}
+              </span>
             </button>
           ))}
           {draft && (
-            <span className="absolute w-4 h-4 -ml-2 -mt-2 bg-accent-cyan border-2 border-on-yellow" style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%` }} />
+            <span
+              data-draft-pin=""
+              className="absolute z-20 pointer-events-none"
+              style={{ left: `${draft.nx * 100}%`, top: `${draft.ny * 100}%`, transform: "translate(-50%, -50%)" }}
+            >
+              <span className="block h-6 w-6 border-[3px] border-ink bg-accent-cyan shadow-[3px_3px_0_#fed83d]" />
+              <span className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap border-2 border-ink bg-accent-yellow px-1 text-[10px] font-bold leading-tight text-on-yellow">
+                New pin
+              </span>
+            </span>
           )}
         </div>
 
@@ -423,9 +473,11 @@ export function RealmMap({
                   wikiEntryIds: wikiIds,
                   wikiEntryId: wikiIds[0] || null,
                 });
-                setNotice("Pin saved.");
+                setBanner({ tone: "ok", text: "Pin saved." });
               } catch (error) {
-                setFormError(actionError(error, "Could not save that pin."));
+                const message = actionError(error, "Could not save that pin.");
+                setFormError(message);
+                setBanner({ tone: "error", text: message });
               } finally {
                 setBusy(false);
               }
@@ -436,7 +488,9 @@ export function RealmMap({
               try {
                 await onDeletePin(selectedPin);
                 setSelectedPin(null);
-                setNotice("Pin deleted.");
+                setBanner({ tone: "ok", text: "Pin deleted." });
+              } catch (error) {
+                setBanner({ tone: "error", text: actionError(error, "Could not delete that pin.") });
               } finally {
                 setBusy(false);
               }
@@ -519,9 +573,11 @@ export function RealmMap({
               setDraft(null);
               setAdding(false);
               setWikiIds([]);
-              setNotice("Pin saved.");
+              setBanner({ tone: "ok", text: "Pin saved." });
             } catch (error) {
-              setFormError(actionError(error, "Could not save that pin."));
+              const message = actionError(error, "Could not save that pin.");
+              setFormError(message);
+              setBanner({ tone: "error", text: message });
             } finally {
               setBusy(false);
             }

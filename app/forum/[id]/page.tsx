@@ -6,7 +6,6 @@ import { useParams } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { addReply, getThread, listReplies, type ForumReply, type ForumThread } from "@/lib/firestore/forum";
 import { StoredImage } from "@/components/media/StoredImage";
-import { UPLOAD_FAILED_MESSAGE } from "@/lib/images";
 import { actionError, withTimeout } from "@/lib/async";
 import { SubmitButton } from "@/components/ui/SubmitButton";
 import { CameraRollInput } from "@/components/media/CameraRollInput";
@@ -61,7 +60,7 @@ export default function ThreadPage() {
       load();
     } catch (err) {
       const message = actionError(err, "Could not post that reply.");
-      setError(files.length > 0 && !message.includes("under") && !message.includes("too long") ? UPLOAD_FAILED_MESSAGE : message);
+      setError(message);
     } finally {
       setBusy(false);
     }

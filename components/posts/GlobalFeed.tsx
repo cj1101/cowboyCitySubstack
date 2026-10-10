@@ -12,6 +12,7 @@ import {
   publishDueScheduledPosts,
 } from "@/lib/firestore/posts";
 import { getFollowedCityIds } from "@/lib/firestore/follows";
+import { withTimeout } from "@/lib/async";
 import type { Character, Faction, Post } from "@/lib/types";
 
 export function GlobalFeed() {
@@ -47,7 +48,7 @@ export function GlobalFeed() {
     setLoading(true);
     setError(null);
 
-    getPosts({ factionId: factionFilter || null })
+    withTimeout(getPosts({ factionId: factionFilter || null }))
       .then(async (fetched) => {
         setPosts(fetched);
         const fMap = await getFactionsMap(fetched.map((p) => p.factionId));
@@ -76,7 +77,7 @@ export function GlobalFeed() {
             Cowboy City & The Realm
           </h1>
           <p className="text-text-muted text-lg mb-8">
-            A private chronicle of the realm&apos;s city-states. Ask to join, then a sheriff lets you in.
+            A private chronicle of the realm&apos;s city-states. Sign in to read the feed and write.
           </p>
           <div className="flex gap-4 justify-center flex-wrap">
             <Link href="/login" className="btn">
@@ -138,7 +139,12 @@ export function GlobalFeed() {
         )}
 
         {error && (
-          <div className="glass-panel p-6 text-danger text-center">{error}</div>
+          <div className="glass-panel p-6 text-center space-y-3" role="alert">
+            <p className="font-bold">{error}</p>
+            <button type="button" className="btn text-sm px-4 py-2 min-h-11" onClick={() => window.location.reload()}>
+              Retry
+            </button>
+          </div>
         )}
 
         {!loading && !error && posts.length === 0 && (

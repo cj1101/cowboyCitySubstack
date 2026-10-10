@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   orderBy,
   query,
   serverTimestamp,
@@ -382,7 +383,7 @@ export async function getTreatyBundle(treatyId: string): Promise<{
 }
 
 export async function listActiveTreaties(): Promise<StoredTreaty[]> {
-  const snap = await getDocs(
+  const snap = await getDocsFromServer(
     query(collection(getClientDb(), "treaties"), where("status", "==", "active"))
   );
   return snap.docs.map((item) => toStoredTreaty(item.id, item.data()));

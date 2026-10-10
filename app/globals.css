@@ -53,6 +53,26 @@ h3 { font-size: 0.78rem; }
 
 .hud-title { font-size: 0.68rem; }
 
+.realm-wordmark {
+  transition: transform 140ms steps(2, end);
+}
+
+.realm-wordmark:hover {
+  transform: translate(-1px, -2px);
+}
+
+.realm-wordmark:hover .wordmark-depth {
+  fill: #169c9c;
+}
+
+.realm-wordmark:hover .wordmark-star rect {
+  fill: #fff3a3;
+}
+
+.realm-wordmark:hover .wordmark-brim {
+  fill: #fff3a3;
+}
+
 h1.text-accent-gold,
 h2.text-accent-gold,
 h3.text-accent-gold {

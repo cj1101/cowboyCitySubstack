@@ -37,6 +37,8 @@ export function MapBoard({
   const place = async (event: React.MouseEvent<HTMLDivElement>) => {
     if (!canEdit || !imageUrl) return;
     const rect = event.currentTarget.getBoundingClientRect();
+    setError("");
+    setNotice("");
     setDraft({
       nx: (event.clientX - rect.left) / rect.width,
       ny: (event.clientY - rect.top) / rect.height,
@@ -98,6 +100,8 @@ export function MapBoard({
           onSubmit={async (event) => {
             event.preventDefault();
             setBusy(true);
+            setError("");
+            setNotice("");
             try {
               await onAddPin({
                 title: title.trim(),
@@ -114,6 +118,9 @@ export function MapBoard({
               setWikiEntryId("");
               setX("");
               setZ("");
+              setNotice("Pin saved.");
+            } catch (err) {
+              setError(actionError(err, "Could not save that pin."));
             } finally {
               setBusy(false);
             }
@@ -139,7 +146,19 @@ export function MapBoard({
               {pin.postId ? <Link className="ml-2 text-accent-gold" href={`/posts/${pin.postId}`}>Post</Link> : null}
             </span>
             {canEdit && (
-              <button type="button" className="text-danger" onClick={() => onDeletePin(pin.id)}>Remove</button>
+              <button
+                type="button"
+                className="text-danger min-h-11 px-2"
+                onClick={() => {
+                  setError("");
+                  setNotice("");
+                  onDeletePin(pin.id)
+                    .then(() => setNotice("Pin removed."))
+                    .catch((err) => setError(actionError(err, "Could not remove that pin.")));
+                }}
+              >
+                Remove
+              </button>
             )}
           </li>
         ))}
