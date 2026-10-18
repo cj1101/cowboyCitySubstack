@@ -3,15 +3,21 @@
 # Spec: workstreams/phase0-readiness.md §4 (Priya, DevOps). Draft adapted from
 # workstreams/ci-workflow-draft.yml (Osei, QA) per that spec's adaptation pass.
 #
-# One job, one required check: "Install · Typecheck · Lint · Build"
+# One required check: "Install · Typecheck · Lint · Build"
 #   npm ci -> npm run typecheck -> npm run lint -> npm run build
+# That job's definition below is the branch-protection contract — do not
+# rename it, and do not fold other steps into it.
 #
-# Deliberately NOT here (phase0-readiness.md §3, §4.4):
+# A second job, "Rules tests (non-required)", runs the Firestore/Storage
+# rules suite (test:rules, Firebase emulators) purely to establish the
+# suite's baseline in a clean environment. It is NOT a required check and
+# must NOT be added to branch protection: it stays non-required until it
+# passes green and stable on unmodified master, and is promoted only via
+# a separate PR (phase0-readiness.md §4.4).
+#
+# Deliberately NOT here (phase0-readiness.md §3):
 #   - No `npm test` step: package.json has no `test` script; a step that
 #     cannot fail is worse than no step.
-#   - No `test:rules` yet: the Firestore/Storage rules suite needs the
-#     Firebase emulators and has no green baseline on unmodified master.
-#     It stays non-required until it passes green and stable on master.
 #   - No deploy job: Vercel's Git integration deploys; CI verifies only.
 #   - No secrets, no write-back: permissions are read-only by design.
 # =============================================================================
@@ -64,3 +70,66 @@ jobs:
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+  rules-tests:
+    # =========================================================================
+    # NON-REQUIRED — do NOT add this job to branch protection.
+    #
+    # Purpose: establish the rules suite's true baseline in GitHub Actions.
+    # The suite has never been observed to run anywhere: in the dev sandbox,
+    # the Firestore emulator rejects its own rules-upload endpoint for every
+    # client (a sandbox loopback defect — see
+    # workstreams/test-rules-baseline-report.md), so no local baseline
+    # exists. Actions runners have clean loopback; this job IS the baseline
+    # venue.
+    #
+    # Failure semantics: a red run here is expected while the baseline is
+    # being established, and it must not block merges. That is guaranteed by
+    # branch protection listing only "Install · Typecheck · Lint · Build"
+    # as a required status check — this job is simply not in that list.
+    # Do NOT paper over failures with `continue-on-error: true`: the check
+    # must show its real color in the PR checks list, or the baseline
+    # evidence is worthless. The distinct check name ("Rules tests
+    # (non-required)") keeps it visually separate from the required check.
+    #
+    # Promotion (phase0-readiness.md §4.4): a separate PR may add this job
+    # to branch protection only after green, stable runs on unmodified
+    # master — working bar: 3 consecutive green runs on master.
+    # =========================================================================
+    name: Rules tests (non-required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java (Firebase emulators)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Same pin as the required job and Vercel (Node 24).
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rules tests (Firebase emulators)
+        # Emulators are local processes: no secrets, no firebase login,
+        # no project access needed.
+        run: npm run test:rules
+
+      - name: Upload emulator debug logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-debug-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            firestore-debug.log
+            firebase-debug.log
+          if-no-files-found: ignore
+          retention-days: 14
