@@ -623,16 +623,44 @@ async function main() {
       "the member is shown a FRESH preview"
     );
 
-    // Re-confirm against the fresh preview: commits, deltas compose.
-    // (previewAction is idempotent here — same state, same plan, same
-    // stored preview the dispatcher just refreshed.)
-    await previewAndConfirm(ownerA, "ownerA", staleId);
+    // Re-confirm against the fresh preview: commits — the FRESH plan,
+    // hash-pinned below. (previewAction is idempotent here — same state,
+    // same plan, same stored preview the dispatcher just refreshed; the
+    // first assertion proves that identity rather than assuming it.)
+    const confirmed = await previewAndConfirm(ownerA, "ownerA", staleId);
+    const confirmedPreview = confirmed.preview as Record<string, unknown>;
+    assert.equal(
+      confirmedPreview.previewHash,
+      (refreshed?.preview as Record<string, unknown>).previewHash,
+      "the re-confirmation binds to the dispatcher's refreshed preview"
+    );
     const summary2 = await wake();
     assert.ok(
       summary2.actionsCommitted.includes(staleId) ||
         (await adminDoc(`sim_actions/${staleId}`))?.status === "resolved"
     );
-    assert.equal(await treasury("cityA"), treasuryAfterMove + 5_000);
+    // P2-G3 parity, pinned to THIS preview: the committed manifest must
+    // carry the fresh preview's planHash + previewHash. Without this
+    // pin, a commit of the stale plan would pass whenever its treasury
+    // effect happened to coincide with the fresh plan's (here both
+    // clamp to 1000) — the treasury assertion below cannot tell the
+    // two plans apart.
+    const manifest = await adminDoc(`sim_resolutions/${staleId}`);
+    assert.equal(manifest?.planHash, confirmed.previewPlanHash);
+    assert.equal(manifest?.previewHash, confirmedPreview.previewHash);
+    // Treasury expectation — corrected (fix round, PR #21): NOT
+    // treasuryAfterMove + 5_000. fixture_adjust plans are absolute,
+    // clamped writes (FIXTURE-ADJUST handler: after = clamp(before +
+    // delta, 0, 1000)) computed against the preview's snapshot, and
+    // the commit reproduces the previewed plan (brief §4.4 step 4;
+    // P2-G3 parity) — the nominal delta is never re-applied at commit
+    // time. The intervening +7,000 saturated the treasury at the clamp
+    // ceiling (treasuryAfterMove = 1000), so the fresh plan is
+    // 1000 -> 1000 and committing it leaves the treasury exactly
+    // where the move left it. 6000 is unreachable under the fixture
+    // semantics at any head in this sequence: every plan here —
+    // stale, move, and fresh — writes a clamped value <= 1000.
+    assert.equal(await treasury("cityA"), treasuryAfterMove);
     await verifyOk(fixtureRegistry);
   }
   console.log("ok stale preview: no entry, fresh preview, re-confirm commits (P2-G3)");
