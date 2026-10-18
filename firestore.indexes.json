@@ -130,7 +130,86 @@
         { "fieldPath": "cityId", "order": "ASCENDING" },
         { "fieldPath": "title", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cityIds", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "seq", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "actor.memberId", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "kind", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "major", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "actor.memberId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "sim_log_entries",
+      "fieldPath": "changes",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "fieldPath": "summaryText",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "fieldPath": "actionText",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_actions",
+      "fieldPath": "actionText",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_actions",
+      "fieldPath": "structuredAction",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_actions",
+      "fieldPath": "preview",
+      "indexes": []
+    }
+  ]
 }

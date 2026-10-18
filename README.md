@@ -105,6 +105,7 @@ npx firebase deploy --only firestore:rules,firestore:indexes,storage --project c
 
 - **Every PR updates this README.** If a change alters behavior, setup, or project status, the same PR updates the relevant section above and adds a dated line to the Changelog below. A PR with no README change needs a stated reason in its description.
 - **CI is required.** The GitHub Actions check `Install · Typecheck · Lint · Build` (`npm ci` -> typecheck -> lint -> build, Node 24) runs on every PR and push to `master`, and branch protection requires it green before merge.
+- **Rules tests run in CI, non-required for now.** A second check, `Rules tests (non-required)`, runs `npm run test:rules` against the Firebase emulators on every PR and push. It is deliberately **not** in branch protection — a red run does not block merges — and stays non-required until it runs green and stable on unmodified `master` (Priya's promotion criteria), at which point a separate PR promotes it.
 - **Parallel PRs are normal.** Several contributors (human and agent) may have PRs open at once; keep each PR to one concern so they can merge in any order.
 - **Merging:** the PR author or another team member/agent merges once CI is green and the change matches its description. Production deploys stay a deliberate human-approved step (Vercel), never an automatic side effect of a merge beyond the normal Vercel flow.
 
@@ -124,12 +125,13 @@ Step-by-step notes are in [DEPLOY.md](DEPLOY.md). An IONOS VPS with Node, PM2, a
 app/                  # Next.js App Router pages
 components/           # React components
 lib/                  # Firebase client, Firestore helpers
+lib/sim/              # Sim layer: even-start template, genesis, lazy city creation
 firestore.rules       # Firestore security rules
 firestore.indexes.json
 storage.rules
 firebase.json
-scripts/              # Optional legacy migration (Admin SDK)
-tests/rules.test.ts   # Emulator tests for approval, DMs, city ownership
+scripts/              # Optional legacy migration (Admin SDK); sim ops scripts (emulator-only)
+tests/rules.test.ts   # Emulator tests for approval, DMs, city ownership, sim layer
 legacy/               # Original PHP prototype
 ```
 
@@ -146,11 +148,18 @@ City pages are served at `/cities/...`. The older `/factions/...` URLs rewrite t
 | `npm run test:rules` | Security rules emulator tests |
 | `npm run emulators` | Auth, Firestore, and Storage emulators |
 | `npm run migrate` | Optional legacy import (needs a service account) |
+| `npx tsx scripts/sim-genesis.ts` | Sim genesis (emulator only; production run is guarded and a separate ops decision) |
+| `npx tsx scripts/sim-ensure-city.ts <factionId>` | Lazily create one claimed city's sim docs from the even-start template (emulator only) |
+| `npx tsx scripts/sim-phase1-verify.ts` | Phase 1 data-shape verification (P1-G2/G3/G4) against the emulator |
+
+The sim layer (Phase 1) adds Firestore collections `sim_world`, `sim_counters`, `sim_log_entries`, `sim_cities`, `sim_stat_allocations`, `sim_actions`, `sim_resolutions`, `sim_publications`, and `sim_intel_records`. Client writes to authoritative sim state are denied for every identity; only the fabric committer identity (custom claims, `lib/sim/` + rules) writes, and cities are created lazily from an identical even-start template the first time a claimed city is switched on — no stats are seeded from lore. Nothing in Phase 1 is deployed: the rules/index changes in this repo take effect only when someone deliberately deploys them, and production genesis is a separate guarded step.
 
 ## Changelog
 
+- 2026-10-17 — Phase 1: sim data foundation. `firestore.rules` gains the sim-layer helpers and match blocks (client writes to sim state denied for all identities; fabric-committer-only writes; owner allocation drafts field-fenced; publications create-only; Log create-only in Phase 1); `firestore.indexes.json` gains the Phase 1 sim indexes and field exclusions; `lib/sim/` adds the even-start template + `baselineHash`, the idempotent emulator-guarded genesis procedure, and lazy city creation (`ensureSimCity` — unowned factions get no sim presence, and lazy creation writes no Log entry); `tests/rules.test.ts` gains the P1-G1/G5/G6/G7 rules tests plus P1-G2/G3/G4 data checks; `scripts/sim-*.ts` are the emulator-only ops entry points. No production deploy, genesis, or data access in this PR. (PR: phase1/sim-data-foundation)
 - 2026-10-17 — Security: transitive dependency refresh — clears 10 audit nodes (brace-expansion ×2, js-yaml, nanoid, source-map-js, postcss, @fastify/busboy, @grpc/grpc-js (admin copy), fast-xml-parser, protobufjs); lockfile only, no `package.json` changes (list in PR). (PR: security/pr-c-transitive-refresh)
 - 2026-10-17 — Security (PR-A): Next.js 15.5.20 → 15.5.27 (clears all 12 `next` advisories, incl. 2 critical RCEs in the Image Optimization API — GHSA-p293-qw3h-jr36, GHSA-2xp9-vwfh-vxw4); `eslint-config-next` in lockstep; `sharp` → 0.35.5 via `overrides` (clears 3 libvips CVEs on the live `next/image` path). (PR: security/pr-a-next-sharp)
+- 2026-10-17 — CI: non-required `Rules tests (non-required)` job added to `.github/workflows/ci.yml` (`npm run test:rules` on the Firebase emulators; Java 21 + Node 24; emulator debug logs uploaded as artifacts on failure). It is not in branch protection and stays non-required until green and stable on unmodified `master`. (PR: ci/test-rules-job)
 - 2026-10-17 — Development workflow documented (this section): README-with-every-PR rule, PR template added. (PR: docs/readme-convention)
 - 2026-10-17 — Phase 0: CI established. GitHub Actions workflow `.github/workflows/ci.yml` runs `Install · Typecheck · Lint · Build` on PRs and pushes to `master`; branch protection requires the check. Node pinned to 24 to match Vercel. (PR #14)
 
