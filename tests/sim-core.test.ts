@@ -815,6 +815,16 @@ async function main() {
     });
     fund2PendingId = `pend_${fund2.actionId}_01`;
     const parent = await adminDoc(`sim_pending_consequences/${fund2PendingId}`);
+    if (!parent) {
+      // DIAGNOSTIC (fix round 4): name the failure mode before asserting.
+      const fund2Action = await adminDoc(`sim_actions/${fund2.actionId}`);
+      const allPendings = await adminDb.collection("sim_pending_consequences").get();
+      console.log("DIAG fund2 action status:", fund2Action?.status);
+      console.log("DIAG fund2 wake summary:", JSON.stringify(fund2.summary));
+      console.log("DIAG pendings present:", allPendings.docs.map((d) => d.id).join(","));
+      const fund2Entries = await entriesOf(fund2.actionId);
+      console.log("DIAG fund2 entries:", fund2Entries.map((e) => `${e.kind}:${(e.classification as Record<string, unknown>)?.rejectionCode ?? ""}`).join(","));
+    }
     const requiredSeq = (parent?.ripenCondition as Record<string, unknown>).requiredSeq as number;
     advanceHours(70);
     while ((await headSeq()) < requiredSeq) await driveActions(1);
