@@ -9,6 +9,16 @@
  * hash-bound to the stored preview (the §9.4 rules clause), and the
  * committer re-derives everything inside the transaction — a preview is
  * a promise about a snapshot, never an authority.
+ *
+ * Determinism invariant: preview computation on identical world state +
+ * identical action payload yields an identical previewHash, at any
+ * injected clock, in any mode. To that end the hashed inputHeads EXCLUDE
+ * the source action doc's own head (see computePreviewHash): the action
+ * is bound by the actionPayload component, and its doc's lifecycle
+ * bookkeeping (status, claim, stored preview, confirmation, updatedAt)
+ * is fabric control state — the same exclusion the committer applies to
+ * its state-head comparison (controlPaths in commitResolution). The
+ * volatile `computedAt` display field is likewise never hashed.
  */
 
 import { sha256Hex } from "./canonical";
@@ -54,10 +64,21 @@ export function computePreviewHash(input: {
     input.baselineRegistry,
     input.snapshot.counterHead.lastSeq + 1
   );
+  // The source action doc is a snapshot input (the resolver reads it),
+  // but its head is a full-doc hash over fabric lifecycle bookkeeping —
+  // claim, status, the stored preview itself, updatedAt. Hashing it
+  // would make every fabric bookkeeping write change the next preview's
+  // hash on identical world state (preview computation would not be
+  // idempotent, and a dispatcher's refreshed preview could never
+  // hash-equal a re-computation). Exclude it, exactly as the committer
+  // excludes the action path from its state-head comparison; the action
+  // payload component above binds the action's identity and content.
+  const actionPath = `sim_actions/${input.action.actionId}`;
+  const inputHeads = input.snapshot.heads.filter((h) => h.path !== actionPath);
   return sha256Hex(
     projectFirestoreValue({
       actionPayload: actionPayloadForHash(input.action),
-      inputHeads: input.snapshot.heads,
+      inputHeads,
       rulesVersion: RESOLVER_RULES_VERSION,
       baselineVersion: citable?.version ?? null,
       baselineDocHash: citable?.docHash ?? null,
