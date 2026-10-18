@@ -1,0 +1,66 @@
+# =============================================================================
+# Cowboy City — CI  ·  Phase 0 (Build Plan v1.2)
+# Spec: workstreams/phase0-readiness.md §4 (Priya, DevOps). Draft adapted from
+# workstreams/ci-workflow-draft.yml (Osei, QA) per that spec's adaptation pass.
+#
+# One job, one required check: "Install · Typecheck · Lint · Build"
+#   npm ci -> npm run typecheck -> npm run lint -> npm run build
+#
+# Deliberately NOT here (phase0-readiness.md §3, §4.4):
+#   - No `npm test` step: package.json has no `test` script; a step that
+#     cannot fail is worse than no step.
+#   - No `test:rules` yet: the Firestore/Storage rules suite needs the
+#     Firebase emulators and has no green baseline on unmodified master.
+#     It stays non-required until it passes green and stable on master.
+#   - No deploy job: Vercel's Git integration deploys; CI verifies only.
+#   - No secrets, no write-back: permissions are read-only by design.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Install · Typecheck · Lint · Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # MUST equal the Vercel project's Node.js Version setting.
+          # No engines field, vercel.json, or .nvmrc exists in this repo;
+          # the only measured baseline (repo-inventory.md §1, and the local
+          # verification for this PR) passed on Node v24.20.0, so 24 is the
+          # defensible pin until the Vercel setting is confirmed — if Vercel
+          # says otherwise, this value changes to match it.
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
