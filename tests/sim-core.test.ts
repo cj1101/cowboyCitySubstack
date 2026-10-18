@@ -857,7 +857,14 @@ async function main() {
     });
     assert.ok(wakeSummary.summary.scans[0]?.ripened.includes(childPendingId));
     assert.equal((await adminDoc(`sim_pending_consequences/${childPendingId}`))?.status, "ripened");
-    assert.equal(await treasury("cityB"), treasuryBeforeChild + 1 + 5);
+    // The trigger's +1 passes through the fixture clamp ([0, 1000] —
+    // registry.ts fixture handler), so from 3,000 it lands at 1,000, not
+    // 3,001; the child's ripening delta (+5) is resolver arithmetic and
+    // unclamped. Expected: clamp(before + 1) + 5 (fix round 4).
+    assert.equal(
+      await treasury("cityB"),
+      Math.min(Math.max(treasuryBeforeChild + 1, 0), 1000) + 5
+    );
     await verifyOk(fixtureRegistry);
   }
   console.log("ok one generation per wake; child ripens next wake (P2-G7b)");
