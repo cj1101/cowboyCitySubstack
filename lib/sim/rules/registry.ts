@@ -180,7 +180,10 @@ function fundHandler(ctx: HandlerContext): ResolutionPlan {
       kind: t.kind,
       targetCityId: t.targetCityId,
       payloadSpec: t.payloadSpec,
-      summaryText: t.summaryText,
+      // summaryText is optional on the template: omit the key entirely
+      // when absent — an explicit undefined is not a Firestore value and
+      // the committer's transaction would refuse the whole commit.
+      ...(t.summaryText !== undefined ? { summaryText: t.summaryText } : {}),
     }));
   }
 
@@ -293,7 +296,10 @@ function scheduleHandler(ctx: HandlerContext): ResolutionPlan {
       kind: t.kind,
       targetCityId: t.targetCityId,
       payloadSpec: t.payloadSpec,
-      summaryText: t.summaryText,
+      // summaryText is optional on the template: omit the key entirely
+      // when absent — an explicit undefined is not a Firestore value and
+      // the committer's transaction would refuse the whole commit.
+      ...(t.summaryText !== undefined ? { summaryText: t.summaryText } : {}),
     }));
   }
   if (Array.isArray(params.voidEffects)) payloadSpec.voidEffects = params.voidEffects;

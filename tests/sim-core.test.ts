@@ -829,17 +829,6 @@ async function main() {
     // Guard (fix round 4): never read a resolution's outputs before
     // asserting the resolution itself landed — a silent rejection here is
     // what masked the CK7b failure as a downstream TypeError.
-    {
-      const fund2ActionDoc = await adminDoc(`sim_actions/${fund2.actionId}`);
-      if (fund2ActionDoc?.status !== "resolved") {
-        const fund2DiagEntries = await entriesOf(fund2.actionId);
-        console.log("DIAG2 fund2 status:", fund2ActionDoc?.status);
-        console.log("DIAG2 fund2 wake:", JSON.stringify(fund2.summary));
-        console.log("DIAG2 fund2 entries:", fund2DiagEntries.map((e) => `${e.kind}:${(e.classification as Record<string, unknown>)?.rejectionCode ?? ""}:${e.summaryText ?? ""}`).join(" | "));
-        console.log("DIAG2 cityB treasury now:", (await adminDoc("sim_cities/cityB"))?.stats);
-        console.log("DIAG2 fund2 preview:", JSON.stringify(fund2ActionDoc?.preview)?.slice(0, 400));
-      }
-    }
     assert.equal(
       (await adminDoc(`sim_actions/${fund2.actionId}`))?.status,
       "resolved",
