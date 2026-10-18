@@ -21,6 +21,17 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import { getBytes, listAll, ref, uploadString } from "firebase/storage";
+import { getApps, initializeApp } from "firebase-admin/app";
+import { getFirestore as getAdminFirestore } from "firebase-admin/firestore";
+import { projectFirestoreValue, runGenesis } from "../lib/sim/genesis";
+import { ensureSimCity } from "../lib/sim/ensureSimCity";
+import {
+  BASELINE_HASH,
+  EVEN_START_TEMPLATE,
+  INITIAL_POINT_BUDGET,
+  logEntryDocId,
+} from "../lib/sim/template";
+import { canonicalJson } from "../lib/sim/canonical";
 
 const PROJECT_ID = "cowboycityrealm";
 
@@ -1030,6 +1041,470 @@ async function main() {
   await assertSucceeds(updateDoc(doc(treatyOther.firestore(), "notifications", "n1"), { read: true }));
   await assertFails(updateDoc(doc(treatyOther.firestore(), "notifications", "n2"), { summary: "rewritten" }));
   console.log("ok social interactions");
+
+  // ======================================================================
+  // Sim layer (Phase 1) — P1-G1..G7 (Phase 1 brief §7).
+  //
+  // Genesis + lazy creation run for real, via the §2/§3 procedures on the
+  // Admin SDK pointed at the emulator (emulators:exec sets
+  // FIRESTORE_EMULATOR_HOST). Rules assertions use claim-bearing
+  // rules-unit-testing contexts. P1-G8 (Osei's adapted V01–V08 over an
+  // export) is a separate sign-off, not part of this suite.
+  // ======================================================================
+  if (!process.env.FIRESTORE_EMULATOR_HOST) {
+    throw new Error(
+      "sim section requires FIRESTORE_EMULATOR_HOST — run via `npm run test:rules`"
+    );
+  }
+  const adminApp =
+    getApps().length > 0
+      ? getApps()[0]
+      : initializeApp({ projectId: PROJECT_ID }, "sim-phase1");
+  const adminDb = getAdminFirestore(adminApp);
+
+  await env.clearFirestore();
+  await seedUser(env, "ownerA", { email: "a@realm.test", status: "approved", isAdmin: false });
+  await seedUser(env, "ownerB", { email: "b@realm.test", status: "approved", isAdmin: false });
+  await seedUser(env, "memberC", { email: "c@realm.test", status: "approved", isAdmin: false });
+  await seedUser(env, "adminD", { email: "d@realm.test", status: "approved", isAdmin: true });
+  await seedUser(env, "suspendedE", { email: "e@realm.test", status: "suspended", isAdmin: false });
+  // Guest stand-in: the accessLevel field is Phase 8's, but the Phase 1
+  // helpers already read it (default 'member'); a fixture user carrying
+  // 'guest' exercises that branch without migrating any real data.
+  await seedUser(env, "guestG", {
+    email: "g@realm.test",
+    status: "approved",
+    isAdmin: false,
+    accessLevel: "guest",
+  });
+  await env.withSecurityRulesDisabled(async (context) => {
+    const fs = context.firestore();
+    await setDoc(doc(fs, "factions", "cityA"), {
+      name: "Fixture City A",
+      slug: "fixture-a",
+      ownerUids: ["ownerA"],
+    });
+    await setDoc(doc(fs, "faction_members", "ownerA_cityA"), {
+      uid: "ownerA",
+      factionId: "cityA",
+      role: "owner",
+    });
+    await setDoc(doc(fs, "factions", "cityB"), {
+      name: "Fixture City B",
+      slug: "fixture-b",
+      ownerUids: [],
+    });
+    await setDoc(doc(fs, "faction_members", "ownerB_cityB"), {
+      uid: "ownerB",
+      factionId: "cityB",
+      role: "owner",
+    });
+    await setDoc(doc(fs, "factions", "cityU"), {
+      name: "Fixture City U",
+      slug: "fixture-u",
+      ownerUids: [],
+    });
+    // Corpus tripwire: a corpus-style figure living ONLY in a cited lore
+    // record — the one place it is allowed (P1-G2 corpus-trace scan).
+    await setDoc(doc(fs, "wiki_entries", "lore-cityA"), {
+      cityId: "cityA",
+      title: "Fixture lore",
+      gdpRubars: 987654321,
+      source: { citation: "fixture corpus doc, planted tripwire" },
+    });
+    // Publications fixture for the read-surface checks (P1-G5).
+    await setDoc(doc(fs, "sim_publications", "pubMembers"), {
+      cityId: "cityA",
+      businessId: null,
+      publisherUid: "ownerA",
+      version: 1,
+      supersedesPublicationId: null,
+      status: "published",
+      publishedAtSeq: 1,
+      claims: [],
+      visibility: "members",
+    });
+  });
+
+  const genesisResult = await runGenesis(adminDb, {});
+  assert.equal(genesisResult.status, "created");
+  assert.equal((await ensureSimCity(adminDb, "cityA")).status, "created");
+  assert.equal((await ensureSimCity(adminDb, "cityB")).status, "created");
+  assert.equal((await ensureSimCity(adminDb, "cityU")).status, "unclaimed");
+
+  const simCollections = [
+    "sim_world",
+    "sim_counters",
+    "sim_log_entries",
+    "sim_cities",
+    "sim_stat_allocations",
+    "sim_actions",
+    "sim_resolutions",
+    "sim_publications",
+    "sim_intel_records",
+    "sim_fabric_status",
+    "sim_character_extensions",
+  ];
+  async function simDocsSerialized(): Promise<string[]> {
+    const out: string[] = [];
+    for (const name of simCollections) {
+      const snap = await adminDb.collection(name).get();
+      for (const d of snap.docs) {
+        out.push(canonicalJson(projectFirestoreValue(d.data())));
+      }
+    }
+    return out;
+  }
+
+  // ---- P1-G2: even start (TC-D04 rewritten) + P1-G3 roster + P1-G4 nulls
+  {
+    const world = (await adminDb.collection("sim_world").doc("current").get()).data() ?? {};
+    const cityA = (await adminDb.collection("sim_cities").doc("cityA").get()).data() ?? {};
+    const cityB = (await adminDb.collection("sim_cities").doc("cityB").get()).data() ?? {};
+    const allocA = (await adminDb.collection("sim_stat_allocations").doc("cityA").get()).data() ?? {};
+    const allocB = (await adminDb.collection("sim_stat_allocations").doc("cityB").get()).data() ?? {};
+    const baseA = (cityA.baseline ?? {}) as Record<string, unknown>;
+    const baseB = (cityB.baseline ?? {}) as Record<string, unknown>;
+    assert.equal(world.evenStartTemplateHash, BASELINE_HASH);
+    assert.equal(baseA.baselineHash, BASELINE_HASH);
+    assert.equal(baseB.baselineHash, BASELINE_HASH);
+    assert.equal(allocA.baselineHash, BASELINE_HASH);
+    assert.equal(allocB.baselineHash, BASELINE_HASH);
+    const templateJson = canonicalJson(EVEN_START_TEMPLATE.baselineStats);
+    assert.equal(canonicalJson(cityA.stats), templateJson);
+    assert.equal(canonicalJson(cityB.stats), templateJson);
+    assert.equal(canonicalJson(baseA.baselineStats), templateJson);
+    assert.equal(allocA.status, "not_started");
+    assert.equal(allocB.status, "not_started");
+    // The brief's §7 asserts pointBudget == null — that was the pre-lock
+    // posture ("null until Vera locks the pool"). Vera's lock landed at
+    // 400 (Q-B5 closed) before this build; see phase1-decisions.md.
+    assert.equal(allocA.pointBudget, INITIAL_POINT_BUDGET);
+    assert.equal(allocB.pointBudget, INITIAL_POINT_BUDGET);
+    const serialized = await simDocsSerialized();
+    assert.ok(
+      serialized.every((s) => !s.includes("987654321")),
+      "corpus tripwire leaked into a sim document"
+    );
+
+    // P1-G3: unowned = strongly inactive; second lazy creation is a no-op.
+    assert.equal((await adminDb.collection("sim_cities").doc("cityU").get()).exists, false);
+    assert.equal(
+      (await adminDb.collection("sim_stat_allocations").doc("cityU").get()).exists,
+      false
+    );
+    assert.ok(
+      serialized.every((s) => !s.includes('"cityU"')),
+      "a sim document references the unowned fixture city"
+    );
+    const cityABefore = canonicalJson(
+      projectFirestoreValue(
+        (await adminDb.collection("sim_cities").doc("cityA").get()).data() ?? {}
+      )
+    );
+    assert.equal((await ensureSimCity(adminDb, "cityA")).status, "already-exists");
+    const cityAAfter = canonicalJson(
+      projectFirestoreValue(
+        (await adminDb.collection("sim_cities").doc("cityA").get()).data() ?? {}
+      )
+    );
+    assert.equal(cityAAfter, cityABefore);
+    assert.equal(cityA.stateVersion, 1);
+    // Lazy creation writes no Log entry (decision L-1): genesis is alone.
+    assert.equal((await adminDb.collection("sim_log_entries").get()).size, 1);
+
+    // P1-G4: null honesty — present keys, null values, never 0/50.
+    const stats = (cityA.stats ?? {}) as Record<string, unknown>;
+    for (const key of ["military", "defense", "population", "gdpRubars"]) {
+      assert.ok(Object.prototype.hasOwnProperty.call(stats, key), `stats.${key} missing`);
+      assert.equal(stats[key], null, `stats.${key} must be null`);
+    }
+    assert.equal(stats.households, 0);
+    assert.equal(stats.housingUnits, 0);
+    assert.equal(stats.treasuryRubars, 0);
+    assert.equal(cityA.lastChangedSeq, null);
+    assert.equal(cityA.seedCityId, null);
+    const genesisEntry =
+      (await adminDb.collection("sim_log_entries").doc(logEntryDocId(1)).get()).data() ?? {};
+    assert.equal(genesisEntry.baseline, null);
+    assert.deepEqual(genesisEntry.changes, []);
+    assert.equal(genesisEntry.visibility, "public");
+  }
+  console.log("ok sim genesis, even start, roster, null honesty (P1-G2/G3/G4)");
+
+  const ownerA = env.authenticatedContext("ownerA", { email: "a@realm.test" });
+  const ownerB = env.authenticatedContext("ownerB", { email: "b@realm.test" });
+  const memberC = env.authenticatedContext("memberC", { email: "c@realm.test" });
+  const adminD = env.authenticatedContext("adminD", { email: "d@realm.test" });
+  const suspendedE = env.authenticatedContext("suspendedE", { email: "e@realm.test" });
+  const guestG = env.authenticatedContext("guestG", { email: "g@realm.test" });
+  const anon = env.unauthenticatedContext();
+  const fabricCommitter = env.authenticatedContext("fabricSvc", {
+    email: "fabric@realm.test",
+    fabric: true,
+    fabricRole: "committer",
+  });
+  const fabricWorker = env.authenticatedContext("fabricWkr", {
+    email: "worker@realm.test",
+    fabric: true,
+    fabricRole: "worker",
+  });
+
+  const validEntry = {
+    seq: 2,
+    resolutionSeq: 2,
+    resolutionId: "test-resolution",
+    entryIndexWithinResolution: 0,
+    kind: "action-summary",
+    resolvedAt: "2026-10-17T00:00:00.000Z",
+    rulesVersion: "sim-rules-0.1.0-phase1",
+    actor: {
+      type: "member",
+      memberId: "ownerA",
+      npcId: null,
+      onBehalfOfMemberId: null,
+      mandateId: null,
+      mandateVersion: null,
+      envelopeId: null,
+    },
+    actionId: null,
+    actionText: null,
+    classification: null,
+    cityId: "cityA",
+    cityIds: ["cityA"],
+    ruleIds: [],
+    changes: [],
+    spilloverFromSeq: null,
+    causedBySeq: null,
+    correctsSeq: null,
+    recordsCreated: [],
+    recordsUpdated: [],
+    legal: null,
+    chronicleDraftId: null,
+    major: false,
+    summaryText: "test entry",
+    visibility: "public",
+    baseline: null,
+    prevHash: "a".repeat(64),
+    entryHash: "b".repeat(64),
+    hashVersion: "cowboy-canonical-json-v1",
+  };
+
+  // ---- P1-G1: TC-C01 structural refusal — the single write path.
+  {
+    const deniedActors = [ownerA, ownerB, memberC, adminD, suspendedE, anon, fabricWorker];
+    for (const actor of deniedActors) {
+      const fs = actor.firestore();
+      await assertFails(updateDoc(doc(fs, "sim_world", "current"), { lastCommittedSeq: 99 }));
+      await assertFails(updateDoc(doc(fs, "sim_cities", "cityA"), { traits: ["x"] }));
+      await assertFails(
+        setDoc(doc(fs, "sim_cities", "cityA", "structures", "x"), { name: "X" })
+      );
+      await assertFails(setDoc(doc(fs, "sim_log_entries", logEntryDocId(2)), validEntry));
+      await assertFails(setDoc(doc(fs, "sim_resolutions", "x"), { resolutionId: "x" }));
+      await assertFails(
+        setDoc(doc(fs, "sim_intel_records", "x"), {
+          collectorUid: "ownerA",
+          collectorCityId: "cityA",
+          method: { kindLabel: "test", methodRef: "log:1" },
+          collectionResolutionId: "r1",
+        })
+      );
+    }
+    // The committer succeeds on shape-valid creates.
+    const committerFs = fabricCommitter.firestore();
+    await assertSucceeds(
+      updateDoc(doc(committerFs, "sim_world", "current"), { lastCommittedSeq: 1 })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_cities", "cityNew"), {
+        factionId: "cityNew",
+        baseline: { baselineHash: "d".repeat(64) },
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(committerFs, "sim_cities", "cityA"), { traits: [] })
+    );
+    await assertSucceeds(setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(2)), validEntry));
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_resolutions", "test-resolution"), {
+        resolutionId: "test-resolution",
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_intel_records", "intel1"), {
+        collectorUid: "ownerA",
+        collectorCityId: "cityA",
+        targetCityId: "cityB",
+        targetBusinessId: null,
+        method: { kindLabel: "survey", methodRef: "sim_actions:test" },
+        collectionResolutionId: "test-resolution",
+        collectedAtSeq: 2,
+        coverage: null,
+        reliability: null,
+        findings: [],
+      })
+    );
+    // Shape discipline binds the committer too.
+    await assertFails(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(3)), {
+        ...validEntry,
+        seq: 3,
+        entryHash: "b".repeat(63),
+      })
+    );
+    await assertFails(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(3)), {
+        ...validEntry,
+        seq: 3,
+        kind: "not-a-kind",
+      })
+    );
+    // Create-only records: update/delete denied for EVERY identity,
+    // committer and admin included; delete denied on any sim doc.
+    await assertFails(
+      updateDoc(doc(committerFs, "sim_log_entries", logEntryDocId(2)), { major: true })
+    );
+    await assertFails(deleteDoc(doc(committerFs, "sim_log_entries", logEntryDocId(2))));
+    await assertFails(deleteDoc(doc(adminD.firestore(), "sim_log_entries", logEntryDocId(2))));
+    await assertFails(
+      updateDoc(doc(committerFs, "sim_resolutions", "test-resolution"), { x: 1 })
+    );
+    await assertFails(deleteDoc(doc(committerFs, "sim_resolutions", "test-resolution")));
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_publications", "pubMembers"), { status: "retracted" })
+    );
+    await assertFails(deleteDoc(doc(committerFs, "sim_publications", "pubMembers")));
+    await assertFails(
+      updateDoc(doc(committerFs, "sim_intel_records", "intel1"), { coverage: {} })
+    );
+    await assertFails(deleteDoc(doc(committerFs, "sim_cities", "cityA")));
+  }
+  console.log("ok sim structural refusal (P1-G1)");
+
+  // ---- P1-G5: read surface.
+  {
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_cities", "cityA")));
+    await assertSucceeds(getDoc(doc(guestG.firestore(), "sim_cities", "cityA")));
+    await assertFails(getDoc(doc(anon.firestore(), "sim_cities", "cityA")));
+    await assertFails(getDoc(doc(suspendedE.firestore(), "sim_cities", "cityA")));
+    await assertSucceeds(
+      getDoc(doc(memberC.firestore(), "sim_log_entries", logEntryDocId(1)))
+    );
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_resolutions", "test-resolution")));
+    // Counters: admin + fabric only.
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_counters", "log")));
+    await assertFails(getDoc(doc(ownerA.firestore(), "sim_counters", "log")));
+    await assertSucceeds(getDoc(doc(adminD.firestore(), "sim_counters", "log")));
+    await assertSucceeds(getDoc(doc(fabricWorker.firestore(), "sim_counters", "log")));
+    // Actor-private entry (the §7.1 espionage split): actor + admin only.
+    await assertSucceeds(
+      setDoc(doc(fabricCommitter.firestore(), "sim_log_entries", logEntryDocId(3)), {
+        ...validEntry,
+        seq: 3,
+        visibility: "actor-private",
+      })
+    );
+    await assertSucceeds(getDoc(doc(ownerA.firestore(), "sim_log_entries", logEntryDocId(3))));
+    await assertSucceeds(getDoc(doc(adminD.firestore(), "sim_log_entries", logEntryDocId(3))));
+    await assertFails(getDoc(doc(ownerB.firestore(), "sim_log_entries", logEntryDocId(3))));
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_log_entries", logEntryDocId(3))));
+    // Publications / intel read walls.
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_publications", "pubMembers")));
+    await assertFails(getDoc(doc(guestG.firestore(), "sim_publications", "pubMembers")));
+    await assertSucceeds(getDoc(doc(ownerA.firestore(), "sim_intel_records", "intel1")));
+    await assertFails(getDoc(doc(ownerB.firestore(), "sim_intel_records", "intel1")));
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_intel_records", "intel1")));
+  }
+  console.log("ok sim read surface (P1-G5)");
+
+  // ---- P1-G6: publication / intel creation discipline.
+  {
+    const pubDoc = {
+      cityId: "cityA",
+      businessId: null,
+      publisherUid: "ownerA",
+      version: 1,
+      supersedesPublicationId: null,
+      status: "published",
+      publishedAtSeq: 3,
+      claims: [
+        {
+          metric: "gdpRubars",
+          claimedValue: 5,
+          unit: null,
+          periodLabel: null,
+          note: null,
+        },
+      ],
+      visibility: "members",
+    };
+    await assertSucceeds(setDoc(doc(ownerA.firestore(), "sim_publications", "pubA1"), pubDoc));
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_publications", "pubBadCity"), {
+        ...pubDoc,
+        cityId: "cityB",
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_publications", "pubBadBiz"), {
+        ...pubDoc,
+        businessId: "corp1",
+      })
+    );
+    // Fabric never publishes; members never create intel.
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "sim_publications", "pubFabric"), pubDoc)
+    );
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_intel_records", "intelBad"), {
+        collectorUid: "ownerA",
+        collectorCityId: "cityA",
+        method: { kindLabel: "survey", methodRef: "sim_actions:test" },
+        collectionResolutionId: "test-resolution",
+      })
+    );
+    // No ref, no record — even for the committer.
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "sim_intel_records", "intelNoRef"), {
+        collectorUid: "ownerA",
+        collectorCityId: "cityA",
+        method: { kindLabel: "survey", methodRef: "" },
+        collectionResolutionId: "test-resolution",
+      })
+    );
+  }
+  console.log("ok sim publication and intel discipline (P1-G6)");
+
+  // ---- P1-G7: allocation draft boundary.
+  {
+    const allocRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_stat_allocations", "cityA");
+    await assertSucceeds(
+      updateDoc(allocRef(ownerA), {
+        allocations: { spirit: 50 },
+        draftVersion: 1,
+        draftHash: "c".repeat(64),
+        authorUid: "ownerA",
+        status: "draft",
+        updatedAt: Timestamp.now(),
+      })
+    );
+    await assertFails(updateDoc(allocRef(ownerA), { pointBudget: 999 }));
+    await assertFails(updateDoc(allocRef(ownerA), { baselineHash: "x".repeat(64) }));
+    await assertFails(updateDoc(allocRef(ownerA), { committedSeq: 9 }));
+    await assertFails(updateDoc(allocRef(ownerA), { status: "committed" }));
+    await assertFails(
+      updateDoc(allocRef(ownerB), { allocations: { spirit: 1 }, status: "draft" })
+    );
+    // The load-bearing wall: stats change only through the committer.
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_cities", "cityA"), {
+        stats: { spirit: 50 },
+      })
+    );
+  }
+  console.log("ok sim allocation draft boundary (P1-G7)");
 
   await env.cleanup();
   assert.ok(true);

@@ -83,6 +83,68 @@ service cloud.firestore {
       );
     }
 
+    // --- Sim layer (Phase 1) ---------------------------------------------
+
+    function userData() {
+      return userDoc().data;
+    }
+
+    // Signed-in, has a user doc, not suspended/removed. Default-safe before
+    // the Phase 8 guest pass: with no accessLevel field anywhere, every
+    // viewer evaluates as a member — exactly today's behavior.
+    function isViewer() {
+      return isSignedIn() && hasUser() && !isSuspended();
+    }
+
+    function isGuestViewer() {
+      return isViewer() && userData().get('accessLevel', 'member') == 'guest';
+    }
+
+    function isFullMember() {
+      return isViewer() && userData().get('accessLevel', 'member') == 'member';
+    }
+
+    // Fabric service user (spec §5.9): custom claims on a dedicated Auth
+    // service user. The Admin SDK bypasses these predicates entirely; they
+    // bind the client-SDK/service-user path, which is the ongoing-play path.
+    function isFabricService() {
+      return isSignedIn()
+        && request.auth.token.get('fabric', false) == true
+        && request.auth.token.get('fabricRole', '') in ['committer', 'worker'];
+    }
+
+    function isFabricCommitter() {
+      return isSignedIn()
+        && request.auth.token.get('fabric', false) == true
+        && request.auth.token.get('fabricRole', '') == 'committer';
+    }
+
+    function isFabricWorker() {
+      return isSignedIn()
+        && request.auth.token.get('fabric', false) == true
+        && request.auth.token.get('fabricRole', '') == 'worker';
+    }
+
+    // Sim ownership proof reuses the existing faction proof order
+    // (faction_members owner role, factions.ownerUids fallback). Never a
+    // copied ownerUid field on a sim doc.
+    function simCityOwner(cityId) {
+      return isFullMember() && ownsListedCity(cityId);
+    }
+
+    function validNewLogEntry(entryId) {
+      return request.resource.data.seq is int
+        && request.resource.data.seq >= 1
+        && request.resource.data.kind in
+             ['action-summary', 'rule-effect', 'case', 'contest', 'rejected', 'genesis']
+        && request.resource.data.visibility in ['public', 'actor-private']
+        && request.resource.data.prevHash is string
+        && request.resource.data.prevHash.size() == 64
+        && request.resource.data.entryHash is string
+        && request.resource.data.entryHash.size() == 64
+        && request.resource.data.hashVersion == 'cowboy-canonical-json-v1';
+    }
+
     function isFactionMember(factionId) {
       return isSignedIn() && exists(factionMemberPath(request.auth.uid, factionId));
     }
@@ -853,6 +915,185 @@ service cloud.firestore {
           allow delete: if emojiReactionDelete();
         }
       }
+    }
+
+    // --- Sim layer: world control ---------------------------------------
+
+    match /sim_world/{docId} {
+      allow read: if isViewer() && docId == 'current';
+      allow create, update: if isFabricCommitter() && docId == 'current';
+      allow delete: if false;
+    }
+
+    match /sim_counters/{docId} {
+      allow read: if isAdmin() || isFabricService();
+      allow create, update: if isFabricCommitter() && docId == 'log';
+      allow delete: if false;
+    }
+
+    match /sim_fabric_status/{docId} {
+      allow read: if isViewer() && docId == 'current';
+      allow create, update: if isFabricService() && docId == 'current';
+      allow delete: if false;
+    }
+
+    // --- Sim layer: city state ------------------------------------------
+
+    match /sim_cities/{cityId} {
+      allow read: if isViewer();
+      allow create: if isFabricCommitter()
+        && request.resource.data.factionId == cityId
+        && request.resource.data.baseline.baselineHash is string;
+      allow update: if isFabricCommitter();
+      allow delete: if false;
+
+      match /structures/{structureId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if false;
+      }
+
+      match /households/{householdId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if false;
+      }
+
+      match /figures/{figureId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if false;
+      }
+
+      match /corporations/{corpId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if false;
+      }
+
+      match /laws/{lawId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if false;
+      }
+    }
+
+    match /sim_character_extensions/{characterId} {
+      allow read: if isViewer();
+      allow create, update: if isFabricCommitter();
+      allow delete: if false;
+    }
+
+    // --- Sim layer: the Log ----------------------------------------------
+    // Phase 1 posture (Phase 1 brief §1.4): create-only for EVERY identity,
+    // committer included. The Phase 2 undo amendment adds committer delete
+    // (never update) when the dependency-check engine ships. Do not add a
+    // delete path before then.
+
+    match /sim_log_entries/{entryId} {
+      allow read: if isViewer()
+        && (resource.data.get('visibility', 'public') == 'public'
+            || isAdmin()
+            || (isFullMember()
+                && resource.data.get('actor', {}).get('memberId', '') == request.auth.uid));
+      allow create: if isFabricCommitter() && validNewLogEntry(entryId);
+      allow update, delete: if false;
+    }
+
+    match /sim_resolutions/{resolutionId} {
+      allow read: if isViewer();
+      allow create: if isFabricCommitter();
+      allow update, delete: if false;
+    }
+
+    // --- Sim layer: action intake (first client surface is Phase 4) -----
+
+    match /sim_actions/{actionId} {
+      allow read: if isAdmin()
+        || (isFullMember() && resource.data.actor.memberId == request.auth.uid)
+        || (isFullMember()
+            && request.auth.uid in resource.data.get('audienceUids', []));
+      allow create: if isFullMember()
+        && request.resource.data.actor.memberId == request.auth.uid
+        && request.resource.data.status in ['received', 'awaiting_confirmation']
+        && request.resource.data.resolutionId == null
+        && request.resource.data.firstLogSeq == null
+        && request.resource.data.lastLogSeq == null;
+      // The actor may confirm only the exact preview the fabric stored.
+      allow update: if isFabricService()
+        || (isFullMember()
+            && resource.data.actor.memberId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['confirmation', 'status', 'updatedAt'])
+            && request.resource.data.status == 'awaiting_confirmation'
+            && request.resource.data.confirmation.confirmedByUid == request.auth.uid
+            && request.resource.data.confirmation.previewHash == resource.data.preview.previewHash);
+      allow delete: if false;
+    }
+
+    // --- Sim layer: stat allocation ---------------------------------------
+
+    match /sim_stat_allocations/{cityId} {
+      allow read: if isAdmin() || simCityOwner(cityId);
+      allow create: if isFabricCommitter()
+        && request.resource.data.cityId == cityId
+        && request.resource.data.status == 'not_started';
+      // Owner draft saves: draft fields only; baseline, budget, and every
+      // commit field are untouchable from a browser (field-equality checks).
+      allow update: if isFabricCommitter()
+        || (simCityOwner(cityId)
+            && resource.data.status in ['not_started', 'draft']
+            && request.resource.data.status in ['draft', 'commit_requested']
+            && request.resource.data.baselineHash == resource.data.baselineHash
+            && request.resource.data.baselineStats == resource.data.baselineStats
+            && request.resource.data.pointBudget == resource.data.pointBudget
+            && request.resource.data.commitActionId == resource.data.commitActionId
+            && request.resource.data.committedSeq == resource.data.committedSeq
+            && request.resource.data.committedByUid == resource.data.committedByUid
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['allocations', 'spentPoints', 'draftVersion',
+                           'draftHash', 'authorUid', 'status', 'updatedAt']));
+      allow delete: if false;
+
+      match /versions/{version} {
+        allow read: if isAdmin() || simCityOwner(cityId)
+          || (isViewer() && resource.data.commitSeq != null);
+        allow create: if isFabricCommitter()
+          || (simCityOwner(cityId) && request.resource.data.authorUid == request.auth.uid);
+        allow update, delete: if false;
+      }
+    }
+
+    // --- Sim layer: trust (publications + intel) --------------------------
+
+    match /sim_publications/{publicationId} {
+      allow read: if (resource.data.visibility == 'members_and_guests' && isViewer())
+        || (resource.data.visibility == 'members'
+            && (isFullMember() || isAdmin()
+                || resource.data.publisherUid == request.auth.uid));
+      // Create-only for every identity, forever: supersede/retract are new
+      // version docs (brief §1.7). The subject-city owner publishes;
+      // businessId stays null until the Phase 4 corporation-ownership pass.
+      allow create: if isFullMember()
+        && request.resource.data.publisherUid == request.auth.uid
+        && simCityOwner(request.resource.data.cityId)
+        && request.resource.data.businessId == null
+        && request.resource.data.visibility in ['members', 'members_and_guests']
+        && request.resource.data.claims is list;
+      allow update, delete: if false;
+    }
+
+    match /sim_intel_records/{intelId} {
+      allow read: if isAdmin()
+        || (isFullMember() && resource.data.collectorUid == request.auth.uid)
+        || (isFullMember() && ownsListedCity(resource.data.collectorCityId));
+      // No ref, no record: a logged means is a creation requirement, in rules.
+      allow create: if isFabricCommitter()
+        && request.resource.data.method.methodRef is string
+        && request.resource.data.method.methodRef.size() > 0
+        && request.resource.data.collectionResolutionId is string
+        && request.resource.data.collectionResolutionId.size() > 0;
+      allow update, delete: if false;
     }
   }
 }
