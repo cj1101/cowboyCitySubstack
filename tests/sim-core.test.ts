@@ -681,6 +681,14 @@ async function main() {
   // ---- CK7a: the CK2 fund ripens inside a player-caused wake, with
   // origin-actor attribution and the wake recorded as occasion, not cause.
   {
+    // cityA's treasury entering this checkpoint is 1,000 — NOT the
+    // 900,000 CK2 left behind. The CK6 stale-preview checkpoint's
+    // fixture_adjust writes are absolute and clamped to [0, 1000], and
+    // its +7,000 move saturated the treasury at that ceiling (see the
+    // fix-round note at the CK6 treasury assertion). Pinned here so the
+    // ripening derivation below starts from a stated, checked base.
+    const treasuryBeforeRipen = await treasury("cityA");
+    assert.equal(treasuryBeforeRipen, 1_000);
     const trigger = await submitConfirmWake(ownerB, "ownerB", "fixture_adjust", {
       cityId: "cityB",
       field: "stats.treasuryRubars",
@@ -705,7 +713,24 @@ async function main() {
     assert.ok(r34, "R-34 trickle-down entry present");
     const findings = (r34.classification as Record<string, unknown>).trickleDownFindings as unknown[];
     assert.equal(findings.length, 1, "one live-connection path cityA -> cityB");
-    assert.equal(await treasury("cityA"), 942_000);
+    // Treasury expectation — corrected (fix round 3, PR #21): NOT
+    // 942,000. That figure assumed (i) the treasury still held CK2's
+    // 900,000 — it does not; the CK6 clamp legacy pinned above leaves
+    // 1,000 — and (ii) a +42,000 ripening yield that no governing text
+    // prescribes. Felix §3's canonical fund is GENERATIVE: the gross
+    // is prepared payload content inside a published band, not a
+    // formula, and Felix's only formulas are the §2.3 delay derivation.
+    // His ripening rule (R-26, renumbered R-33) credits NO treasury at
+    // all — fund disbursedRubars += payload disbursement; the value
+    // lands in inventor/corp receipts and GDP. This fixture is the
+    // brief's determinate variant (P2-G7): brief §7.1 — a determinate
+    // pending "carries its full effect in payloadSpec" and "ripening
+    // is pure resolver arithmetic" on it. The committed payload is
+    // CK2's effectDelta of +30,000, applied to the standing balance:
+    // 1,000 + 30,000 = 31,000. The fund assertions below are the R-33
+    // disbursement contract itself: fundDisbursementRubars (CK2's
+    // disbursementRubars, 100,000) moves remaining -> disbursed.
+    assert.equal(await treasury("cityA"), treasuryBeforeRipen + 30_000);
     const fund = await adminDoc("sim_cities/cityA/structures/fund1");
     assert.equal(fund?.disbursedRubars, 100_000);
     assert.equal(fund?.remainingRubars, 0);
