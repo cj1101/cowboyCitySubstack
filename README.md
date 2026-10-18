@@ -105,7 +105,6 @@ npx firebase deploy --only firestore:rules,firestore:indexes,storage --project c
 
 - **Every PR updates this README.** If a change alters behavior, setup, or project status, the same PR updates the relevant section above and adds a dated line to the Changelog below. A PR with no README change needs a stated reason in its description.
 - **CI is required.** The GitHub Actions check `Install · Typecheck · Lint · Build` (`npm ci` -> typecheck -> lint -> build, Node 24) runs on every PR and push to `master`, and branch protection requires it green before merge.
-- **Rules tests run in CI, non-required for now.** A second check, `Rules tests (non-required)`, runs `npm run test:rules` against the Firebase emulators on every PR and push. It is deliberately **not** in branch protection — a red run does not block merges — and stays non-required until it runs green and stable on unmodified `master` (Priya's promotion criteria), at which point a separate PR promotes it.
 - **Parallel PRs are normal.** Several contributors (human and agent) may have PRs open at once; keep each PR to one concern so they can merge in any order.
 - **Merging:** the PR author or another team member/agent merges once CI is green and the change matches its description. Production deploys stay a deliberate human-approved step (Vercel), never an automatic side effect of a merge beyond the normal Vercel flow.
 
@@ -150,8 +149,8 @@ City pages are served at `/cities/...`. The older `/factions/...` URLs rewrite t
 
 ## Changelog
 
+- 2026-10-17 — Security: transitive dependency refresh — clears 10 audit nodes (brace-expansion ×2, js-yaml, nanoid, source-map-js, postcss, @fastify/busboy, @grpc/grpc-js (admin copy), fast-xml-parser, protobufjs); lockfile only, no `package.json` changes (list in PR). (PR: security/pr-c-transitive-refresh)
 - 2026-10-17 — Security (PR-A): Next.js 15.5.20 → 15.5.27 (clears all 12 `next` advisories, incl. 2 critical RCEs in the Image Optimization API — GHSA-p293-qw3h-jr36, GHSA-2xp9-vwfh-vxw4); `eslint-config-next` in lockstep; `sharp` → 0.35.5 via `overrides` (clears 3 libvips CVEs on the live `next/image` path). (PR: security/pr-a-next-sharp)
-- 2026-10-17 — CI: non-required `Rules tests (non-required)` job added to `.github/workflows/ci.yml` (`npm run test:rules` on the Firebase emulators; Java 21 + Node 24; emulator debug logs uploaded as artifacts on failure). It is not in branch protection and stays non-required until green and stable on unmodified `master`. (PR: ci/test-rules-job)
 - 2026-10-17 — Development workflow documented (this section): README-with-every-PR rule, PR template added. (PR: docs/readme-convention)
 - 2026-10-17 — Phase 0: CI established. GitHub Actions workflow `.github/workflows/ci.yml` runs `Install · Typecheck · Lint · Build` on PRs and pushes to `master`; branch protection requires the check. Node pinned to 24 to match Vercel. (PR #14)
 
