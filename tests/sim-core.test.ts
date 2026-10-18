@@ -792,6 +792,19 @@ async function main() {
   let fund2PendingId = "";
   let childPendingId = "";
   {
+    // Fixture-economy funding (fix round 4): CK7a's trigger action wrote
+    // cityB's treasury through fixture_adjust, whose plans are absolute
+    // clamped writes ([0, 1000] — the round-1 finding), leaving cityB at
+    // exactly 1,000 R. The 10,000 R fund below was therefore correctly
+    // rejected INSUFFICIENT_TREASURY and no parent pending was created.
+    // Restore cityB's seeded balance with a direct fixture write — the
+    // same method the genesis seeding block above uses — so the fund
+    // scenario runs against the balance it was written for.
+    const cityBDoc = await adminDoc("sim_cities/cityB");
+    await adminDb.doc("sim_cities/cityB").set(
+      { stats: { ...(cityBDoc?.stats as Record<string, unknown>), treasuryRubars: 500_000 } },
+      { merge: true }
+    );
     const fund2 = await submitConfirmWake(ownerB, "ownerB", "fixture_fund", {
       cityId: "cityB",
       fundName: "Child-bearing fund",
@@ -813,18 +826,16 @@ async function main() {
         },
       ],
     });
+    // Guard (fix round 4): never read a resolution's outputs before
+    // asserting the resolution itself landed — a silent rejection here is
+    // what masked the CK7b failure as a downstream TypeError.
+    assert.equal(
+      (await adminDoc(`sim_actions/${fund2.actionId}`))?.status,
+      "resolved",
+      "fund2's fund action must resolve (its pending is read below)"
+    );
     fund2PendingId = `pend_${fund2.actionId}_01`;
     const parent = await adminDoc(`sim_pending_consequences/${fund2PendingId}`);
-    if (!parent) {
-      // DIAGNOSTIC (fix round 4): name the failure mode before asserting.
-      const fund2Action = await adminDoc(`sim_actions/${fund2.actionId}`);
-      const allPendings = await adminDb.collection("sim_pending_consequences").get();
-      console.log("DIAG fund2 action status:", fund2Action?.status);
-      console.log("DIAG fund2 wake summary:", JSON.stringify(fund2.summary));
-      console.log("DIAG pendings present:", allPendings.docs.map((d) => d.id).join(","));
-      const fund2Entries = await entriesOf(fund2.actionId);
-      console.log("DIAG fund2 entries:", fund2Entries.map((e) => `${e.kind}:${(e.classification as Record<string, unknown>)?.rejectionCode ?? ""}`).join(","));
-    }
     const requiredSeq = (parent?.ripenCondition as Record<string, unknown>).requiredSeq as number;
     advanceHours(70);
     while ((await headSeq()) < requiredSeq) await driveActions(1);
