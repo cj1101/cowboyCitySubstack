@@ -1112,7 +1112,20 @@ async function main() {
       gdpRubars: 987654321,
       source: { citation: "fixture corpus doc, planted tripwire" },
     });
-    // Publications fixture for the read-surface checks (P1-G5).
+  });
+
+  const genesisResult = await runGenesis(adminDb, {});
+  assert.equal(genesisResult.status, "created");
+  assert.equal((await ensureSimCity(adminDb, "cityA")).status, "created");
+  assert.equal((await ensureSimCity(adminDb, "cityB")).status, "created");
+  assert.equal((await ensureSimCity(adminDb, "cityU")).status, "unclaimed");
+
+  // Publications fixture for the P1-G1 create-only checks and the P1-G5
+  // read-surface checks. Ordering constraint: fixtures in sim_* collections
+  // must be seeded after genesis, because genesis verifies a pristine world
+  // (its post-commit sweep requires every sim_* collection to start empty).
+  await env.withSecurityRulesDisabled(async (context) => {
+    const fs = context.firestore();
     await setDoc(doc(fs, "sim_publications", "pubMembers"), {
       cityId: "cityA",
       businessId: null,
@@ -1125,12 +1138,6 @@ async function main() {
       visibility: "members",
     });
   });
-
-  const genesisResult = await runGenesis(adminDb, {});
-  assert.equal(genesisResult.status, "created");
-  assert.equal((await ensureSimCity(adminDb, "cityA")).status, "created");
-  assert.equal((await ensureSimCity(adminDb, "cityB")).status, "created");
-  assert.equal((await ensureSimCity(adminDb, "cityU")).status, "unclaimed");
 
   const simCollections = [
     "sim_world",
