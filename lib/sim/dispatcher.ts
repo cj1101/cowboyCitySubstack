@@ -4,11 +4,14 @@
  * A wake exists ONLY because a player caused it (the runner is invoked
  * on a player-caused occasion; nothing here is scheduled). Each wake:
  *
- *   1. Process requested undo operations (undo never triggers a scan).
- *   2. For each confirmed action, in submission order: claim → commit
+ *   1. For each confirmed action, in submission order: claim → commit
  *      (the committer re-derives everything in its transaction) → run
  *      ONE ripeness scan pass. Ripenings inside the pass trigger no
  *      further passes.
+ *   2. Process queued undo operations (§8.4): a wake picks them up
+ *      AFTER the actions it carried have committed, so an op's
+ *      execution-time revalidation sees everything that landed in its
+ *      wake (TC-U07). Processing an op never triggers a scan.
  *
  * The dispatcher itself performs no domain writes: action claim/preview
  * bookkeeping goes through the fabric identity's rules-bound updates;
@@ -175,21 +178,13 @@ export async function runWake(
   };
   const reader = firestoreReader(deps.committerDb);
 
-  // 1. Undo operations first (§8.5 ordering inside the wake).
-  const opsSnap = await getDocs(
-    query(
-      collection(deps.committerDb, "sim_undo_operations"),
-      where("status", "in", ["requested", "checking"]),
-      orderBy("createdAt", "asc"),
-      limit(10)
-    )
-  );
-  for (const opDoc of opsSnap.docs) {
-    await processUndoOperation(deps.committerDb, opDoc.id, { now: opts.now });
-    summary.undoOpsProcessed += 1;
-  }
-
-  // 2. Confirmed actions in submission order.
+  // Confirmed actions first (brief §1.3's wake order: actions commit,
+  // each followed by its scan; queued undo operations are picked up
+  // after the action phase, §8.4 step 2, and never trigger a scan).
+  // Processing ops BEFORE the queued actions would let an op execute
+  // against a world the same wake is about to change: a dependent
+  // action landing in the op's own wake must be visible to the op's
+  // execution-time dependency revalidation (TC-U07's race).
   const actionsSnap = await getDocs(
     query(
       collection(deps.fabricDb, "sim_actions"),
@@ -326,6 +321,21 @@ export async function runWake(
       summary.actionsStale.push(action.actionId);
     }
     // "aborted" (claim lost): another committer owns it now; nothing to do.
+  }
+
+  // Queued undo operations, after the action phase (§8.4 step 2).
+  // Processing an op never triggers a ripeness scan (§1.3/§8.2).
+  const opsSnap = await getDocs(
+    query(
+      collection(deps.committerDb, "sim_undo_operations"),
+      where("status", "in", ["requested", "checking"]),
+      orderBy("createdAt", "asc"),
+      limit(10)
+    )
+  );
+  for (const opDoc of opsSnap.docs) {
+    await processUndoOperation(deps.committerDb, opDoc.id, { now: opts.now });
+    summary.undoOpsProcessed += 1;
   }
 
   return summary;

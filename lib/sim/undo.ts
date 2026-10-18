@@ -342,8 +342,10 @@ export function checkUndoAuthority(
 
 // ---------------------------------------------------------------------------
 // Processing — one operation, end to end (brief §8.5). Called by the
-// dispatcher inside a player-caused wake, BEFORE new actions process:
-// undo never triggers a ripeness scan.
+// dispatcher inside a player-caused wake, AFTER that wake's queued
+// actions have committed (brief §1.3 wake order, §8.4 step 2), so a
+// dependent landing in the same wake is visible to the revalidation
+// below (TC-U07). Undo processing never triggers a ripeness scan.
 // ---------------------------------------------------------------------------
 
 export async function processUndoOperation(
