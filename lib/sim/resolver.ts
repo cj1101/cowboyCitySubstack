@@ -1,0 +1,661 @@
+/**
+ * The resolver (Phase 2 brief §5) — a pure function of (snapshot, action):
+ * no I/O, no clock reads, no randomness. Generative content arrives as
+ * prepared payloads and is validated against stored bounds, never
+ * generated. Three entry points share one discipline:
+ *
+ *   resolveAction(snapshot, action)         — member actions incl. the
+ *                                               §6.4 Baseline guard and
+ *                                               the unruled narrative path
+ *   resolveRipening(snapshot, pending, …)    — R-33 application + R-34
+ *   resolveVoiding(snapshot, pending, …)     — R-33 voiding
+ *
+ * Every plan passes `validatePlan` (the §5.6 + §6.3 mechanical guards)
+ * and `finalizePlan` (ref-key normalization + planHash) before it may
+ * reach the committer. Rejected outcomes are plans too — a rejection is
+ * a deterministic first-class Resolution Event (§4.5).
+ */
+
+import { sha256Hex } from "./canonical";
+import { headHashOf } from "./log";
+import {
+  PENDING_FANOUT_CAP,
+  PENDING_GENERATION_CAP,
+  docField,
+  snapshotDoc,
+  withDocField,
+  type PreparedPayload,
+  type ResolutionPlan,
+  type SimAction,
+  type SimCitations,
+  type SimSnapshot,
+} from "./state";
+import {
+  citableBaselineVersion,
+  type BaselineRegistry,
+} from "./baseline/registry";
+import {
+  RULE_DESCRIPTORS,
+  baselineContextFor,
+  descriptorForActionKind,
+} from "./rules/registry";
+import {
+  applyRipeningEffect,
+  buildPendingDraft,
+  evaluateTrickleDown,
+  pendingKindConfig,
+  type DeterminateEffect,
+} from "./rules/pendingRules";
+import { planWrite, ruleEffectDraft, summaryDraft } from "./rules/planHelpers";
+
+export class PlanValidationError extends Error {
+  code = "PLAN_INVALID";
+}
+
+export class SnapshotError extends Error {
+  constructor(public code: string, message: string) {
+    super(message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot assembly (the one place reads become a snapshot; callers own
+// the reader so preview/commit/tests each use their identity).
+// ---------------------------------------------------------------------------
+
+export interface DocReader {
+  get(path: string): Promise<Record<string, unknown> | null>;
+}
+
+export async function buildSnapshot(
+  reader: DocReader,
+  paths: readonly string[],
+  now: string
+): Promise<SimSnapshot> {
+  const unique = [...new Set(paths)];
+  const docs = new Map<string, Record<string, unknown> | null>();
+  for (const path of unique) {
+    docs.set(path, await reader.get(path));
+  }
+  const counter = docs.get("sim_counters/log") ?? null;
+  if (!counter || typeof counter.lastSeq !== "number") {
+    throw new SnapshotError(
+      "LOG_NOT_INITIALIZED",
+      "sim_counters/log is missing or malformed — the Log is not initialized (genesis has not run)."
+    );
+  }
+  const heads = unique.map((path) => {
+    const doc = docs.get(path) ?? null;
+    const stateVersion =
+      doc && typeof doc.stateVersion === "number" ? (doc.stateVersion as number) : null;
+    return { path, stateVersion, hash: headHashOf(doc) };
+  });
+  return {
+    docs,
+    heads,
+    counterHead: {
+      lastSeq: counter.lastSeq as number,
+      lastEntryHash: (counter.lastEntryHash as string) ?? "",
+    },
+    now,
+  };
+}
+
+/** Assemble a snapshot from already-read docs (the committer's in-
+ * transaction path: reads happen under the transaction, then the pure
+ * resolver runs over exactly those docs). */
+export function snapshotFromDocs(
+  docs: ReadonlyMap<string, Record<string, unknown> | null>,
+  now: string
+): SimSnapshot {
+  const counter = docs.get("sim_counters/log") ?? null;
+  if (!counter || typeof counter.lastSeq !== "number") {
+    throw new SnapshotError(
+      "LOG_NOT_INITIALIZED",
+      "sim_counters/log is missing or malformed — the Log is not initialized (genesis has not run)."
+    );
+  }
+  const heads = [...docs.keys()].map((path) => {
+    const doc = docs.get(path) ?? null;
+    const stateVersion =
+      doc && typeof doc.stateVersion === "number" ? (doc.stateVersion as number) : null;
+    return { path, stateVersion, hash: headHashOf(doc) };
+  });
+  return {
+    docs,
+    heads,
+    counterHead: {
+      lastSeq: counter.lastSeq as number,
+      lastEntryHash: (counter.lastEntryHash as string) ?? "",
+    },
+    now,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Read plans — the snapshot boundary (brief §5.1). Resolution reads only
+// declared inputs; anything a handler needs must be reachable from here.
+// ---------------------------------------------------------------------------
+
+export function collectActionReadPaths(action: SimAction): string[] {
+  const paths = new Set<string>([
+    "sim_world/current",
+    "sim_counters/log",
+    `sim_actions/${action.actionId}`,
+  ]);
+  const sa = (action.structuredAction ?? {}) as Record<string, unknown>;
+  const cities = new Set<string>(action.targetCityIds);
+  if (typeof sa.cityId === "string") cities.add(sa.cityId);
+  for (const cityId of cities) {
+    paths.add(`sim_cities/${cityId}`);
+    paths.add(`factions/${cityId}`);
+    // Note: sim_stat_allocations is deliberately NOT a Phase 2 resolver
+    // input — no Phase 2 handler consumes it (allocation commits are
+    // Phase 4), and the committer identity cannot read that collection.
+  }
+  if (typeof sa.structureId === "string" && typeof sa.cityId === "string") {
+    paths.add(`sim_cities/${sa.cityId}/structures/${sa.structureId}`);
+  }
+  if (typeof sa.fundId === "string" && typeof sa.cityId === "string") {
+    paths.add(`sim_cities/${sa.cityId}/structures/${sa.fundId}`);
+  }
+  if (typeof sa.pendingId === "string") {
+    paths.add(`sim_pending_consequences/${sa.pendingId}`);
+  }
+  if (typeof sa.publicationPath === "string") paths.add(sa.publicationPath);
+  const citations = extractCitations(action);
+  for (const id of citations.pendingIds ?? []) paths.add(`sim_pending_consequences/${id}`);
+  for (const path of citations.recordPaths ?? []) paths.add(path);
+  return [...paths];
+}
+
+export function collectRipeningReadPaths(pending: Record<string, unknown>): string[] {
+  const paths = new Set<string>([
+    "sim_world/current",
+    "sim_counters/log",
+    `sim_pending_consequences/${pending.pendingId as string}`,
+  ]);
+  const cities = new Set<string>();
+  if (typeof pending.originCityId === "string") cities.add(pending.originCityId);
+  if (typeof pending.targetCityId === "string") cities.add(pending.targetCityId);
+  const spec = (pending.payloadSpec ?? {}) as Record<string, unknown>;
+  const effect = spec.effect as DeterminateEffect | undefined;
+  if (effect && typeof effect.cityId === "string") cities.add(effect.cityId);
+  const bounds = spec.bounds as { cityId?: string } | undefined;
+  if (bounds && typeof bounds.cityId === "string") cities.add(bounds.cityId);
+  if (Array.isArray(spec.childPendings)) {
+    for (const child of spec.childPendings as { targetCityId?: string }[]) {
+      if (child.targetCityId) cities.add(child.targetCityId);
+    }
+  }
+  if (Array.isArray(spec.voidEffects)) {
+    for (const e of spec.voidEffects as DeterminateEffect[]) cities.add(e.cityId);
+  }
+  for (const cityId of cities) {
+    paths.add(`sim_cities/${cityId}`);
+    paths.add(`factions/${cityId}`);
+  }
+  if (typeof spec.fundPath === "string") paths.add(spec.fundPath);
+  const condition = (pending.ripenCondition ?? {}) as Record<string, unknown>;
+  const preconditions = (condition.preconditions ?? []) as { path: string }[];
+  for (const pc of preconditions) paths.add(pc.path);
+  return [...paths];
+}
+
+export function extractCitations(action: SimAction): SimCitations {
+  const sa = (action.structuredAction ?? {}) as Record<string, unknown>;
+  const raw = (sa.citations ?? {}) as Record<string, unknown>;
+  const strings = (v: unknown) =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+  const numbers = (v: unknown) =>
+    Array.isArray(v) ? v.filter((x): x is number => typeof x === "number") : undefined;
+  return {
+    resolutionIds: strings(raw.resolutionIds),
+    pendingIds: strings(raw.pendingIds),
+    recordPaths: strings(raw.recordPaths),
+    seqs: numbers(raw.seqs),
+  };
+}
+
+function citationRefKeys(citations: SimCitations): string[] {
+  const keys: string[] = [];
+  for (const id of citations.resolutionIds ?? []) keys.push(`resolution:${id}`);
+  for (const id of citations.pendingIds ?? []) keys.push(`pending:${id}`);
+  for (const path of citations.recordPaths ?? []) keys.push(`record:${path}`);
+  for (const seq of citations.seqs ?? []) keys.push(`seq:${seq}`);
+  return keys;
+}
+
+// ---------------------------------------------------------------------------
+// Plan validation — the mechanical guards (brief §5.6 + §6.3). Throws
+// PlanValidationError; both the resolver's own output and any plan
+// reaching the committer pass through here.
+// ---------------------------------------------------------------------------
+
+export function validatePlan(
+  plan: ResolutionPlan,
+  opts: { baselineRegistry: BaselineRegistry; covertEntriesAllowed: boolean }
+): void {
+  const fail = (message: string): never => {
+    throw new PlanValidationError(message);
+  };
+
+  // §5.6 — no surface records: the committer never produces situations,
+  // notifications, or chronicle drafts in Phase 2.
+  for (const output of plan.narrativeOutputs) {
+    if (output.kind !== "note") {
+      fail(`plan emits a ${output.kind} output — situations/outbox/chronicle records are not Phase 2`);
+    }
+  }
+
+  // §6.3 Baseline guards.
+  for (const entry of plan.entries) {
+    if (entry.baseline !== null) {
+      const version = opts.baselineRegistry.versions.find(
+        (v) => v.version === (entry.baseline as { version: string }).version
+      );
+      if (!version) fail(`entry cites unknown Baseline version ${entry.baseline.version}`);
+      if (version?.status !== "ratified") {
+        fail(`entry cites Baseline ${entry.baseline.version} with status ${version?.status} — unratified text is never citable`);
+      }
+      if (entry.changes.length > 0) {
+        fail("an entry carrying field changes may not also cite the Baseline (§5.6: R-derivable changes resolve with baseline: null)");
+      }
+    }
+  }
+
+  // §2.1 visibility: actor-private entries exist only under a covert
+  // rule's classification.
+  if (!opts.covertEntriesAllowed) {
+    for (const entry of plan.entries) {
+      if (entry.visibility === "actor-private") {
+        fail("actor-private entry outside a covert rule classification (§2.1)");
+      }
+    }
+  }
+
+  // Rule ids cited anywhere must exist in the registry.
+  for (const entry of plan.entries) {
+    for (const ruleId of entry.ruleIds) {
+      if (!RULE_DESCRIPTORS[ruleId]) fail(`entry cites unknown rule ${ruleId}`);
+    }
+  }
+
+  // Pending creation is a permission of the classifying descriptor.
+  if (plan.pendingCreates.length > 0 && plan.descriptorId) {
+    const descriptor = RULE_DESCRIPTORS[plan.descriptorId];
+    if (descriptor && !descriptor.mayCreatePendings) {
+      fail(`descriptor ${plan.descriptorId} may not create pendings`);
+    }
+  }
+
+  // Exactly one summary entry, in last position (rejected plans carry
+  // exactly one entry, built by the resolver below).
+  const summaries = plan.entries.filter((e) => e.summary);
+  if (plan.entries.length > 0) {
+    if (summaries.length !== 1) fail(`plan has ${summaries.length} summary entries (exactly one required)`);
+    if (!plan.entries[plan.entries.length - 1].summary) fail("the summary entry must be last");
+  }
+
+  // Every record a plan claims to create/update must be in its write set.
+  const written = new Set(plan.writes.map((w) => w.path));
+  for (const entry of plan.entries) {
+    for (const path of [...entry.recordsCreated, ...entry.recordsUpdated]) {
+      if (!written.has(path)) fail(`entry claims record ${path} but the plan writes no such path`);
+    }
+  }
+}
+
+export function finalizePlan(plan: ResolutionPlan): ResolutionPlan {
+  plan.readRefKeys = [...new Set(plan.readRefKeys)].sort();
+  const hashable: Record<string, unknown> = {
+    ...(plan as unknown as Record<string, unknown>),
+  };
+  delete hashable.planHash;
+  plan.planHash = sha256Hex(hashable);
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
+// Member actions
+// ---------------------------------------------------------------------------
+
+export interface ResolveOptions {
+  baselineRegistry: BaselineRegistry;
+  mode: "preview" | "commit";
+  prepared?: PreparedPayload;
+}
+
+export function resolveAction(
+  snapshot: SimSnapshot,
+  action: SimAction,
+  opts: ResolveOptions
+): ResolutionPlan {
+  const citations = extractCitations(action);
+  const descriptor = descriptorForActionKind(action.actionType);
+
+  if (!descriptor) {
+    // §5.5 unruled: narrative-only plan, baseline null, changes []. The
+    // action still enters the Log (auditability), and that entry is what
+    // a later undo targets if the narrative has effects.
+    const plan: ResolutionPlan = {
+      outcome: "resolved",
+      descriptorId: null,
+      entries: [
+        summaryDraft({
+          actor: action.actor,
+          actionId: action.actionId,
+          actionText: action.actionText,
+          classification: {
+            verb: null,
+            scope: null,
+            ruleIds: [],
+            unruled: true,
+            unruledReason: "no rule classifies this action kind",
+          },
+          cityId: action.targetCityIds[0] ?? null,
+          cityIds: action.targetCityIds,
+          ruleIds: [],
+          baseline: null,
+          summaryText:
+            action.actionText ??
+            "Narrative action recorded. No rule classifies it (unruled); no state changed.",
+        }),
+      ],
+      writes: [],
+      pendingCreates: [],
+      pendingTransitions: [],
+      pendingReferenceWrites: [],
+      readRefKeys: citationRefKeys(citations),
+      narrativeOutputs: action.actionText
+        ? [{ kind: "note", text: action.actionText }]
+        : [],
+      planHash: "",
+    };
+    validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false });
+    return finalizePlan(plan);
+  }
+
+  const handler = descriptor.handlers[action.actionType];
+  const plan = handler({
+    snapshot,
+    action,
+    resolutionId: action.actionId,
+    prepared: opts.prepared,
+    baselineRegistry: opts.baselineRegistry,
+    citableBaseline: baselineContextFor(opts.baselineRegistry, snapshot.counterHead.lastSeq),
+    citations,
+  });
+  plan.descriptorId = descriptor.id;
+
+  if (plan.outcome === "rejected" && plan.rejection) {
+    plan.entries = [
+      {
+        ...ruleEffectDraft({
+          actor: action.actor,
+          cityId: action.targetCityIds[0] ?? null,
+          cityIds: action.targetCityIds,
+          ruleIds: plan.rejection.ruleIds,
+          summaryText: plan.rejection.summaryText,
+        }),
+        kind: "rejected",
+        summary: true,
+        actionId: action.actionId,
+        actionText: action.actionText,
+        classification: {
+          verb: null,
+          scope: null,
+          ruleIds: plan.rejection.ruleIds,
+          unruled: false,
+          rejectionCode: plan.rejection.code,
+        },
+      },
+    ];
+  }
+
+  validatePlan(plan, {
+    baselineRegistry: opts.baselineRegistry,
+    covertEntriesAllowed: descriptor.visibility === "covert",
+  });
+  return finalizePlan(plan);
+}
+
+// ---------------------------------------------------------------------------
+// Ripening + voiding (R-33 / R-34) — planned by the same resolver, inside
+// the wake that a player action caused. Actor = the origin actor, copied
+// verbatim (never "system"); the wake is recorded by the committer in
+// wakeActionId/executedDuringSeq, outside the cause chain.
+// ---------------------------------------------------------------------------
+
+export function ripeningResolutionId(pendingId: string): string {
+  return `ripen_${pendingId}`;
+}
+
+export function voidingResolutionId(pendingId: string): string {
+  return `void_${pendingId}`;
+}
+
+export function resolveRipening(
+  snapshot: SimSnapshot,
+  pending: Record<string, unknown>,
+  opts: { baselineRegistry: BaselineRegistry; prepared?: PreparedPayload }
+): ResolutionPlan {
+  const pendingId = pending.pendingId as string;
+  const resolutionId = ripeningResolutionId(pendingId);
+  const originActor = pending.originActor as SimAction["actor"];
+  const originSeq = pending.originSeq as number;
+  const targetCityId = pending.targetCityId as string;
+  const kindConfig = pendingKindConfig(pending.kind as string);
+  const spec = pending.payloadSpec as Record<string, unknown>;
+
+  const plan: ResolutionPlan = {
+    outcome: "resolved",
+    descriptorId: "R-33",
+    entries: [],
+    writes: [],
+    pendingCreates: [],
+    pendingTransitions: [],
+    pendingReferenceWrites: [],
+    readRefKeys: [`pending:${pendingId}`, `resolution:${pending.originResolutionId as string}`],
+    narrativeOutputs: [],
+    planHash: "",
+  };
+
+  const application = applyRipeningEffect(snapshot, plan, pending, opts.prepared);
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: originActor,
+      ruleIds: ["R-33"],
+      cityId: targetCityId,
+      cityIds: [targetCityId],
+      changes: application.changes,
+      recordsUpdated: plan.writes.filter((w) => w.recordClass === "state").map((w) => w.path),
+      causedBySeq: originSeq,
+      pendingId,
+      generation: application.generation,
+      summaryText: `R-33 ripening of ${pendingId} (origin seq ${originSeq}).`,
+    })
+  );
+
+  // R-34 trickle-down: information-only findings, when the origin rule
+  // committed to evaluating them.
+  if (spec.trickleDown === true) {
+    const findings = evaluateTrickleDown(snapshot, pending);
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: originActor,
+        ruleIds: ["R-34"],
+        cityId: pending.originCityId as string | null,
+        cityIds: pending.originCityId ? [pending.originCityId as string] : [],
+        changes: [],
+        causedBySeq: originSeq,
+        pendingId,
+        classification: { trickleDownFindings: findings, ruleIds: ["R-34"] },
+        summaryText:
+          findings.length > 0
+            ? `R-34 trickle-down: ${findings.length} propagation path(s) found for ${pendingId}; no mechanical effect in Phase 2.`
+            : `R-34 trickle-down: no propagation paths found for ${pendingId}.`,
+      })
+    );
+  }
+
+  // Children — generation-capped, fan-out-capped (brief §7.4). Excess
+  // consequences simply do not happen, and the cap is on the record.
+  const childGeneration = (pending.generation as number) + 1;
+  let capped = false;
+  if (application.childSpecs.length > 0) {
+    if (childGeneration > PENDING_GENERATION_CAP) {
+      capped = true;
+    } else {
+      const specs = application.childSpecs.slice(0, PENDING_FANOUT_CAP);
+      if (specs.length < application.childSpecs.length) capped = true;
+      specs.forEach((childSpec, i) => {
+        const childId = `pend_${resolutionId}_${String(i + 1).padStart(2, "0")}`;
+        const { draft } = buildPendingDraft(snapshot, {
+          pendingId: childId,
+          kind: childSpec.kind,
+          originResolutionId: pending.originResolutionId as string,
+          originActionId: pending.originActionId as string | null,
+          originActor,
+          originCityId: pending.originCityId as string | null,
+          originSummaryText: childSpec.summaryText ?? application.outcomeSummary,
+          targetCityId: childSpec.targetCityId,
+          sourceKind: "ripening",
+          generation: childGeneration,
+          chainId: pending.chainId as string,
+          chainRootPendingId:
+            (pending.chainRootPendingId as string | null) ?? pendingId,
+          createdByResolutionId: resolutionId,
+          payloadSpec: childSpec.payloadSpec,
+          fundSize: null,
+        });
+        draft.doc.originSeq = originSeq;
+        plan.pendingCreates.push(draft);
+        plan.entries.push(
+          ruleEffectDraft({
+            actor: originActor,
+            ruleIds: ["R-32"],
+            cityId: childSpec.targetCityId,
+            cityIds: [childSpec.targetCityId],
+            changes: [],
+            causedBySeq: originSeq,
+            pendingId: childId,
+            summaryText: `R-32: child consequence ${childId} (generation ${childGeneration}) created by ripening of ${pendingId}.`,
+          })
+        );
+      });
+    }
+  }
+  if (capped) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: originActor,
+        ruleIds: ["R-33"],
+        cityId: targetCityId,
+        cityIds: [targetCityId],
+        changes: [],
+        causedBySeq: originSeq,
+        pendingId,
+        classification: { capReached: true, ruleIds: ["R-33"] },
+        summaryText: `R-33 cap reached while ripening ${pendingId}: further child consequences did not happen (generation cap ${PENDING_GENERATION_CAP}, fan-out cap ${PENDING_FANOUT_CAP}).`,
+      })
+    );
+  }
+
+  plan.pendingTransitions.push({
+    pendingId,
+    toStatus: "ripened",
+    outcomeSummary: application.outcomeSummary,
+  });
+  plan.entries.push(
+    summaryDraft({
+      actor: originActor,
+      ruleIds: kindConfig.ruleIdsOnRipen,
+      cityId: targetCityId,
+      cityIds: [targetCityId],
+      causedBySeq: originSeq,
+      pendingId,
+      generation: application.generation,
+      summaryText: application.outcomeSummary,
+    })
+  );
+
+  validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false });
+  return finalizePlan(plan);
+}
+
+export function resolveVoiding(
+  snapshot: SimSnapshot,
+  pending: Record<string, unknown>,
+  opts: { baselineRegistry: BaselineRegistry; voidReason: string }
+): ResolutionPlan {
+  const pendingId = pending.pendingId as string;
+  const originActor = pending.originActor as SimAction["actor"];
+  const originSeq = pending.originSeq as number;
+  const spec = pending.payloadSpec as Record<string, unknown>;
+  const plan: ResolutionPlan = {
+    outcome: "resolved",
+    descriptorId: "R-33",
+    entries: [],
+    writes: [],
+    pendingCreates: [],
+    pendingTransitions: [],
+    pendingReferenceWrites: [],
+    readRefKeys: [`pending:${pendingId}`, `resolution:${pending.originResolutionId as string}`],
+    narrativeOutputs: [],
+    planHash: "",
+  };
+
+  const changes: { field: string; before: unknown; after: unknown; formula: string }[] = [];
+  const voidEffects = (spec.voidEffects as DeterminateEffect[] | undefined) ?? [];
+  for (const effect of voidEffects) {
+    const path = `sim_cities/${effect.cityId}`;
+    const city = snapshotDoc(snapshot, path);
+    if (!city) continue;
+    const before = docField(city, effect.field);
+    if (typeof before !== "number") continue;
+    planWrite(plan, snapshot, path, withDocField(city, effect.field, before + effect.delta), "state", [effect.field]);
+    changes.push({
+      field: effect.field,
+      before,
+      after: before + effect.delta,
+      formula: `voiding effect of ${pendingId} (R-33)`,
+    });
+  }
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: originActor,
+      ruleIds: ["R-33"],
+      cityId: pending.targetCityId as string,
+      cityIds: [pending.targetCityId as string],
+      changes,
+      causedBySeq: originSeq,
+      pendingId,
+      summaryText: `R-33 voiding of ${pendingId}: ${opts.voidReason}.`,
+    })
+  );
+  plan.pendingTransitions.push({ pendingId, toStatus: "voided", voidReason: opts.voidReason });
+  plan.entries.push(
+    summaryDraft({
+      actor: originActor,
+      ruleIds: ["R-33"],
+      cityId: pending.targetCityId as string,
+      cityIds: [pending.targetCityId as string],
+      causedBySeq: originSeq,
+      pendingId,
+      summaryText: `Pending ${pendingId} voided: ${opts.voidReason}. The world did not change except as its own voiding terms stated.`,
+    })
+  );
+
+  validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false });
+  return finalizePlan(plan);
+}
+
+export function citableBaselineForHead(
+  registry: BaselineRegistry,
+  headSeq: number
+) {
+  return citableBaselineVersion(registry, headSeq + 1);
+}
