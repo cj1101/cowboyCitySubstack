@@ -101,6 +101,13 @@ npx firebase deploy --only firestore:rules,firestore:indexes,storage --project c
 
 `firestore:rules` and `firestore:indexes` publish `firestore.rules` and `firestore.indexes.json`. `storage` releases `storage.rules` onto `cowboycityrealm.firebasestorage.app` (the `media` target in `.firebaserc`).
 
+## Development workflow
+
+- **Every PR updates this README.** If a change alters behavior, setup, or project status, the same PR updates the relevant section above and adds a dated line to the Changelog below. A PR with no README change needs a stated reason in its description.
+- **CI is required.** The GitHub Actions check `Install · Typecheck · Lint · Build` (`npm ci` -> typecheck -> lint -> build, Node 24) runs on every PR and push to `master`, and branch protection requires it green before merge.
+- **Parallel PRs are normal.** Several contributors (human and agent) may have PRs open at once; keep each PR to one concern so they can merge in any order.
+- **Merging:** the PR author or another team member/agent merges once CI is green and the change matches its description. Production deploys stay a deliberate human-approved step (Vercel), never an automatic side effect of a merge beyond the normal Vercel flow.
+
 ## Production on Vercel
 
 1. Import this GitHub repo in Vercel. Framework preset: Next.js. Root directory: the repo root.
@@ -139,6 +146,11 @@ City pages are served at `/cities/...`. The older `/factions/...` URLs rewrite t
 | `npm run test:rules` | Security rules emulator tests |
 | `npm run emulators` | Auth, Firestore, and Storage emulators |
 | `npm run migrate` | Optional legacy import (needs a service account) |
+
+## Changelog
+
+- 2026-10-17 — Development workflow documented (this section): README-with-every-PR rule, PR template added. (PR: docs/readme-convention)
+- 2026-10-17 — Phase 0: CI established. GitHub Actions workflow `.github/workflows/ci.yml` runs `Install · Typecheck · Lint · Build` on PRs and pushes to `master`; branch protection requires the check. Node pinned to 24 to match Vercel. (PR #14)
 
 ## License
 
