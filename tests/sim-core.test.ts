@@ -1257,6 +1257,10 @@ async function main() {
       note: "watch the docks",
     });
     const covertEntries = await entriesOf(covert.actionId);
+    if (covertEntries.length === 0) {
+      console.log("DIAG3 covert wake:", JSON.stringify(covert.summary));
+      console.log("DIAG3 covert action:", JSON.stringify(await adminDoc(`sim_actions/${covert.actionId}`))?.slice(0, 500));
+    }
     assert.ok(covertEntries.every((e) => e.visibility === "actor-private"));
     const summaryEntry = covertEntries[covertEntries.length - 1];
     await assertSucceeds(
