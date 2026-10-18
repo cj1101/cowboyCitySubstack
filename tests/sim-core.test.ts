@@ -792,28 +792,27 @@ async function main() {
   let fund2PendingId = "";
   let childPendingId = "";
   {
-    // Fixture-economy funding (fix round 4): CK7a's trigger action wrote
-    // cityB's treasury through fixture_adjust, whose plans are absolute
-    // clamped writes ([0, 1000] — the round-1 finding), leaving cityB at
-    // exactly 1,000 R. The 10,000 R fund below was therefore correctly
-    // rejected INSUFFICIENT_TREASURY and no parent pending was created.
-    // Restore cityB's seeded balance with a direct fixture write — the
-    // same method the genesis seeding block above uses — so the fund
-    // scenario runs against the balance it was written for.
-    const cityBDoc = await adminDoc("sim_cities/cityB");
-    await adminDb.doc("sim_cities/cityB").set(
-      { stats: { ...(cityBDoc?.stats as Record<string, unknown>), treasuryRubars: 500_000 } },
-      { merge: true }
-    );
+    // Fixture economy (fix round 4): every fixture_adjust write clamps
+    // to [0, 1000], and CK7a's trigger + driveActions run on cityB's
+    // treasury — so entering this checkpoint cityB holds exactly
+    // 1,000 R, whatever the seed said. The fund below is sized to that
+    // real balance (1,000 R): at 10,000 R it was correctly rejected
+    // INSUFFICIENT_TREASURY and no parent pending was created. (An
+    // earlier round-4 attempt restored the seed balance with a direct
+    // off-Log write; the standing verifier rightly refused it —
+    // FIELD_CHAIN_BREAK — because mid-scenario state changes must flow
+    // through the Log. The delay derivation is fund-size-insensitive at
+    // this scale: fundScale clamps identically, 61 h / 10 seq either
+    // way, so no timing assertion moves.)
     const fund2 = await submitConfirmWake(ownerB, "ownerB", "fixture_fund", {
       cityId: "cityB",
       fundName: "Child-bearing fund",
       fundId: "fund2",
-      amountRubars: 10_000,
+      amountRubars: 1_000,
       mode: "determinate",
       effectField: "stats.treasuryRubars",
-      effectDelta: 2_000,
-      disbursementRubars: 10_000,
+      effectDelta: 500,
+      disbursementRubars: 1_000,
       childPendings: [
         {
           kind: "instant-effect",
