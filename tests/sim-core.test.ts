@@ -44,9 +44,13 @@ import {
 } from "../lib/sim/dispatcher";
 import { commitResolution } from "../lib/sim/committer";
 import {
+  PlanValidationError,
   buildSnapshot,
   collectActionReadPaths,
   resolveAction,
+  resolveVoiding,
+  snapshotFromDocs,
+  validatePlan,
 } from "../lib/sim/resolver";
 import {
   PRODUCTION_BASELINE_REGISTRY,
@@ -456,7 +460,7 @@ async function main() {
 
     const simFiles = [
       "lib/sim/state.ts", "lib/sim/log.ts", "lib/sim/resolver.ts", "lib/sim/preview.ts",
-      "lib/sim/committer.ts", "lib/sim/dispatcher.ts", "lib/sim/pending.ts",
+      "lib/sim/committer.ts", "lib/sim/dispatcher.ts", "lib/sim/readers.ts", "lib/sim/pending.ts",
       "lib/sim/undo.ts", "lib/sim/verify.ts", "lib/sim/intake.ts",
       "lib/sim/rules/registry.ts", "lib/sim/rules/arithmetic.ts",
       "lib/sim/rules/pendingRules.ts", "lib/sim/rules/planHelpers.ts",
@@ -1495,6 +1499,302 @@ async function main() {
     assert.ok(csvHeader.startsWith("seq,entry_hash,prev_hash"), "CSV mirrors the tab columns");
   }
   console.log("ok export packaging: split-first, -PARTIAL discipline (P2-G10)");
+
+  // ======================================================================
+  // Step 0 (Phase 4) — engine-hardening fixtures (prep §4.0): F-02
+  // planWrite folding + changes↔writes reconciliation; F-01 contracted
+  // read plans; F-07 prepared-payload binding; the wake-order lock.
+  // ======================================================================
+
+  // ---- S0-F02 (pure): a voiding with two effects on the SAME field of
+  // the same doc — the landed replacement flaw — now lands both,
+  // chained; a plan whose changes cannot chain fails validatePlan.
+  {
+    const snap = snapshotFromDocs(
+      new Map<string, Record<string, unknown> | null>([
+        ["sim_counters/log", { lastSeq: 3, lastEntryHash: "ab".repeat(32) }],
+        ["sim_world/current", { lastCommittedSeq: 3 }],
+        ["sim_cities/cityA", { cityId: "cityA", stats: { treasuryRubars: 100, culture: 40 } }],
+      ]),
+      nowIso()
+    );
+    const pendingDoc: Record<string, unknown> = {
+      pendingId: "pend_s0_pure",
+      originActor: memberActor("ownerA"),
+      originSeq: 2,
+      originResolutionId: "act_s0_origin",
+      targetCityId: "cityA",
+      payloadSpec: {
+        voidEffects: [
+          { type: "stat-delta", cityId: "cityA", field: "stats.treasuryRubars", delta: 30 },
+          { type: "stat-delta", cityId: "cityA", field: "stats.treasuryRubars", delta: 12 },
+          { type: "stat-delta", cityId: "cityA", field: "stats.culture", delta: 1 },
+        ],
+      },
+    };
+    const plan = resolveVoiding(snap, pendingDoc, {
+      baselineRegistry: fixtureRegistry,
+      voidReason: "s0 fixture: precondition ceased",
+    });
+    const cityWrite = plan.writes.find((w) => w.path === "sim_cities/cityA");
+    assert.ok(cityWrite?.afterDoc, "one folded write for the city doc");
+    const foldedStats = (cityWrite.afterDoc as Record<string, unknown>).stats as Record<string, number>;
+    assert.equal(foldedStats.treasuryRubars, 142, "both treasury effects landed (30 + 12)");
+    assert.equal(foldedStats.culture, 41);
+    const effectEntry = plan.entries[0];
+    assert.deepEqual(
+      effectEntry.changes.map((c) => [c.field, c.before, c.after]),
+      [
+        ["stats.treasuryRubars", 100, 130],
+        ["stats.treasuryRubars", 130, 142],
+        ["stats.culture", 40, 41],
+      ],
+      "changes chain off each other, not off the snapshot"
+    );
+    validatePlan(plan, { baselineRegistry: fixtureRegistry, covertEntriesAllowed: false, snapshot: snap });
+    const tampered = structuredClone(plan);
+    tampered.entries[0].changes.push({ field: "stats.treasuryRubars", before: 999999, after: 1, formula: "tampered" });
+    assert.throws(
+      () => validatePlan(tampered, { baselineRegistry: fixtureRegistry, covertEntriesAllowed: false, snapshot: snap }),
+      (e: unknown) => e instanceof PlanValidationError && /F-02/.test((e as Error).message),
+      "a change that cannot chain to the folded write must fail validation"
+    );
+  }
+  console.log("ok S0-F02 pure: voiding folds multi-effect writes; reconciliation catches stale changes");
+
+  // ---- S0-F02 (e2e): two-effect voiding through the full stack.
+  {
+    await submitConfirmWake(ownerA, "ownerA", "fixture_structure", {
+      cityId: "cityA",
+      structureId: "vault2",
+      status: "active",
+      name: "Vault Two",
+    });
+    const cultureBefore = (await cityStats("cityA")).culture as number;
+    const scheduled = await submitConfirmWake(ownerA, "ownerA", "fixture_schedule", {
+      cityId: "cityA",
+      pendingKind: "instant-effect",
+      effectField: "stats.treasuryRubars",
+      effectDelta: 555,
+      preconditions: [
+        {
+          type: "record-status",
+          path: "sim_cities/cityA/structures/vault2",
+          field: null,
+          operator: "==",
+          value: "active",
+          onFalse: "void",
+        },
+      ],
+      voidEffects: [
+        { type: "stat-delta", cityId: "cityA", field: "stats.treasuryRubars", delta: 30 },
+        { type: "stat-delta", cityId: "cityA", field: "stats.culture", delta: 1 },
+      ],
+    });
+    const voidPendingId = `pend_${scheduled.actionId}_01`;
+    advanceHours(2);
+    const treasuryBefore = await treasury("cityA");
+    const dissolve = await submitConfirmWake(ownerA, "ownerA", "fixture_structure", {
+      cityId: "cityA",
+      structureId: "vault2",
+      status: "dissolved",
+    });
+    assert.ok(dissolve.summary.scans[0]?.voided.includes(voidPendingId));
+    assert.equal(await treasury("cityA"), treasuryBefore + 30, "first void effect landed");
+    assert.equal((await cityStats("cityA")).culture, cultureBefore + 1, "second void effect on the same doc landed too (F-02)");
+    const voidEntries = await entriesOf(`void_${voidPendingId}`);
+    assert.ok(voidEntries.length >= 2);
+    const effectFields = (voidEntries[0].changes as Record<string, unknown>[]).map((c) => c.field);
+    assert.deepEqual(effectFields, ["stats.treasuryRubars", "stats.culture"]);
+    await verifyOk(fixtureRegistry);
+  }
+  console.log("ok S0-F02 e2e: two effects, one doc, both land (prep §4.0 F-02 fixture)");
+
+  // ---- S0-F01 (e2e): the order-book read plan. Structures are seeded
+  // directly (the suite's fixture pattern) and removed afterwards; the
+  // action cites only ONE resting order — the descriptor's read plan
+  // must still read the whole resting set.
+  {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const fs = context.firestore();
+      await setDoc(doc(fs, "sim_cities/cityA/structures", "ob1"), { structureId: "ob1", status: "resting", priceRubars: 100 });
+      await setDoc(doc(fs, "sim_cities/cityA/structures", "ob2"), { structureId: "ob2", status: "resting", priceRubars: 250 });
+      await setDoc(doc(fs, "sim_cities/cityA/structures", "ob3"), { structureId: "ob3", status: "built", priceRubars: 999 });
+    });
+    const confirmStoredPreview = async (actionId: string) => {
+      const snap = await getDoc(doc(ownerA.firestore(), "sim_actions", actionId));
+      const action = snap.data() as Record<string, unknown>;
+      assert.equal(action.status, "awaiting_confirmation");
+      const preview = action.preview as Record<string, unknown>;
+      await updateDoc(doc(ownerA.firestore(), "sim_actions", actionId), {
+        confirmation: {
+          confirmedByUid: "ownerA",
+          confirmedAt: Timestamp.now(),
+          previewHash: preview.previewHash,
+          authorityType: "owner",
+        },
+        status: "confirmed",
+        updatedAt: Timestamp.now(),
+      });
+    };
+
+    const obAction = await submitAction(ownerA, "ownerA", "fixture_orderbook", {
+      cityId: "cityA",
+      citations: { recordPaths: ["sim_cities/cityA/structures/ob1"] },
+    });
+    await previewAndConfirm(ownerA, "ownerA", obAction, fixtureRegistry);
+    const obSummary = await wake({ registry: fixtureRegistry });
+    assert.ok(obSummary.actionsCommitted.includes(obAction), "orderbook action committed");
+    assert.equal((await cityStats("cityA")).fixtureRestingOrders, 2, "both resting orders counted — the uncited ob2 was read");
+    assert.equal((await cityStats("cityA")).fixtureOrderBookRubars, 350, "100 + 250; the built ob3 is excluded");
+    const obManifest = await adminDoc(`sim_resolutions/${obAction}`);
+    const queryInputs = (obManifest?.queryInputs ?? []) as Record<string, unknown>[];
+    assert.equal(queryInputs.length, 1, "the manifest's input set binds the query read");
+    assert.deepEqual(queryInputs[0].resultPaths, [
+      "sim_cities/cityA/structures/ob1",
+      "sim_cities/cityA/structures/ob2",
+    ]);
+    assert.match(queryInputs[0].digest as string, /^[0-9a-f]{64}$/);
+
+    // Membership moves between preview and wake -> stale, no entry.
+    const ob2Action = await submitAction(ownerA, "ownerA", "fixture_orderbook", { cityId: "cityA" });
+    await previewAction(deps(fixtureRegistry), ob2Action, { now: nowIso() });
+    await env.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "sim_cities/cityA/structures", "ob2"), { status: "built" });
+    });
+    await confirmStoredPreview(ob2Action);
+    const staleSummary = await wake({ registry: fixtureRegistry });
+    assert.ok(staleSummary.actionsStale.includes(ob2Action), "a moved result set is a stale preview");
+    assert.equal((await entriesOf(ob2Action)).length, 0, "stale: no Log entry");
+    assert.equal((await cityStats("cityA")).fixtureRestingOrders, 2, "state untouched by the stale action");
+    await previewAndConfirm(ownerA, "ownerA", ob2Action, fixtureRegistry);
+    const ob2Summary = await wake({ registry: fixtureRegistry });
+    assert.ok(ob2Summary.actionsCommitted.includes(ob2Action));
+    assert.equal((await cityStats("cityA")).fixtureRestingOrders, 1);
+    assert.equal((await cityStats("cityA")).fixtureOrderBookRubars, 100);
+
+    for (const id of ["ob1", "ob2", "ob3"]) {
+      await adminDb.doc(`sim_cities/cityA/structures/${id}`).delete();
+    }
+    await verifyOk(fixtureRegistry);
+  }
+  console.log("ok S0-F01: read plan binds the full query set; citations cannot narrow a money read; membership change goes stale");
+
+  // ---- S0-F07 (e2e): prepared payloads bound at preview, stored on
+  // the action, committed verbatim; a swapped payload goes stale.
+  {
+    const previewWithPrepared = async (actionId: string, prepared: PreparedPayload) => {
+      await previewAction(deps(fixtureRegistry), actionId, { now: nowIso(), prepared });
+    };
+    const confirmStored = async (actionId: string) => {
+      const snap = await getDoc(doc(ownerA.firestore(), "sim_actions", actionId));
+      const action = snap.data() as Record<string, unknown>;
+      assert.equal(action.status, "awaiting_confirmation");
+      const preview = action.preview as Record<string, unknown>;
+      await updateDoc(doc(ownerA.firestore(), "sim_actions", actionId), {
+        confirmation: {
+          confirmedByUid: "ownerA",
+          confirmedAt: Timestamp.now(),
+          previewHash: preview.previewHash,
+          authorityType: "owner",
+        },
+        status: "confirmed",
+        updatedAt: Timestamp.now(),
+      });
+      return action;
+    };
+
+    // No payload: the judgment refuses — even though the member's own
+    // action text begs for one (the handler never reads it).
+    const treasuryJ0 = await treasury("cityA");
+    const noPayload = await submitConfirmWake(ownerA, "ownerA", "fixture_judgment", { cityId: "cityA" });
+    const noPayloadAction = await adminDoc(`sim_actions/${noPayload.actionId}`);
+    assert.equal(noPayloadAction?.status, "rejected");
+    assert.equal((noPayloadAction?.failure as Record<string, unknown>)?.code, "PREPARED_PAYLOAD_REQUIRED");
+    assert.equal(await treasury("cityA"), treasuryJ0);
+
+    // Payload A: preview binds it, the doc stores it, the commit uses
+    // it, the manifest records it.
+    const payloadA: PreparedPayload = { classification: { creditRubars: 1200 }, inputHash: "s0-judg-a" };
+    const jA = await submitAction(ownerA, "ownerA", "fixture_judgment", { cityId: "cityA" });
+    await previewWithPrepared(jA, payloadA);
+    const storedA = await confirmStored(jA);
+    assert.equal(storedA.preparedInputHash, "s0-judg-a", "payload hash stored on the action at preview time");
+    assert.equal((storedA.preview as Record<string, unknown>).preparedInputHash, "s0-judg-a", "preview binds the payload");
+    const wakeA = await wake({ registry: fixtureRegistry });
+    assert.ok(wakeA.actionsCommitted.includes(jA));
+    assert.equal(await treasury("cityA"), treasuryJ0 + 1200, "exactly payload A's credit landed");
+    const manifestA = await adminDoc(`sim_resolutions/${jA}`);
+    const recordedA = manifestA?.preparedPayload as Record<string, unknown>;
+    assert.equal(recordedA?.inputHash, "s0-judg-a", "manifest stores the payload — replay needs no worker call");
+    assert.equal((recordedA?.classification as Record<string, unknown>)?.creditRubars, 1200);
+
+    // Swapped payload: previewed with A2, stored payload replaced by B2
+    // before the wake -> the plan no longer matches the confirmed
+    // preview -> stale, nothing lands. Re-preview with B2 commits B2.
+    const payloadA2: PreparedPayload = { classification: { creditRubars: 700 }, inputHash: "s0-judg-a2" };
+    const payloadB2: PreparedPayload = { classification: { creditRubars: 800 }, inputHash: "s0-judg-b2" };
+    const jSwap = await submitAction(ownerA, "ownerA", "fixture_judgment", { cityId: "cityA" });
+    await previewWithPrepared(jSwap, payloadA2);
+    await confirmStored(jSwap);
+    await env.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "sim_actions", jSwap), {
+        preparedPayload: { ...payloadB2 },
+        preparedInputHash: payloadB2.inputHash,
+      });
+    });
+    const treasurySwap0 = await treasury("cityA");
+    const wakeSwap = await wake({ registry: fixtureRegistry });
+    assert.ok(wakeSwap.actionsStale.includes(jSwap), "a swapped payload cannot commit under the confirmed preview");
+    assert.equal(await treasury("cityA"), treasurySwap0, "nothing landed from the swapped payload");
+    await previewWithPrepared(jSwap, payloadB2);
+    await confirmStored(jSwap);
+    const wakeB2 = await wake({ registry: fixtureRegistry });
+    assert.ok(wakeB2.actionsCommitted.includes(jSwap));
+    assert.equal(await treasury("cityA"), treasurySwap0 + 800, "re-previewed payload B2 commits exactly its own credit");
+    await verifyOk(fixtureRegistry);
+  }
+  console.log("ok S0-F07: payload bound at preview, stored, committed verbatim, recorded in the manifest; swap goes stale");
+
+  // ---- S0-ORDER: the wake-order lock (P4-K24 rider). A dependent
+  // action and an undo of its target are queued for the SAME wake: the
+  // actions phase must commit the dependent FIRST, and the ops phase
+  // must then refuse the undo (the target is no longer a suffix). If
+  // the phases ever swap back, the undo erases the target and this
+  // section fails. The terminal snapshot refresh runs after both.
+  {
+    const treasuryB0 = await treasury("cityB");
+    const a1 = await submitConfirmWake(ownerB, "ownerB", "fixture_adjust", {
+      cityId: "cityB",
+      field: "stats.treasuryRubars",
+      delta: 500,
+    }, { registry: fixtureRegistry });
+    const opId = await createUndoOp(ownerB, "ownerB", a1.actionId);
+    const a2Id = await submitAction(ownerB, "ownerB", "fixture_adjust", {
+      cityId: "cityB",
+      field: "stats.treasuryRubars",
+      delta: 5,
+      citations: { resolutionIds: [a1.actionId] },
+    });
+    await previewAndConfirm(ownerB, "ownerB", a2Id, fixtureRegistry);
+    const orderSummary = await wake({ registry: fixtureRegistry });
+    assert.ok(orderSummary.actionsCommitted.includes(a2Id), "the dependent action commits in the shared wake");
+    assert.equal(orderSummary.undoOpsProcessed, 1);
+    assert.equal(
+      (await readOp(opId))?.status,
+      "refused",
+      "the undo is refused BECAUSE the dependent landed first — actions before ops (brief §1.3, P4-K24)"
+    );
+    assert.equal(await treasury("cityB"), treasuryB0 + 505, "both actions stand; nothing was erased");
+    const snapshotDocNow = await adminDoc("sim_dashboard_snapshots/current");
+    assert.equal(
+      snapshotDocNow?.asOfSeq,
+      await headSeq(),
+      "the Phase 3 terminal snapshot refresh ran last in the wake, after actions and ops"
+    );
+    await verifyOk(fixtureRegistry);
+  }
+  console.log("ok S0-ORDER: wake order locked — actions commit, per-action scans, ops after; snapshot refresh terminal");
 
   // ======================================================================
   // Final: the whole standing world verifies under the fixture registry
