@@ -956,6 +956,53 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // --- Sim layer: dashboard read model (Phase 3) -----------------------
+    // The snapshot is a disposable, public-tier projection (Phase 3 brief
+    // §2.1/§3.4): members and guests read the identical doc; only the
+    // fabric committer writes it, under a shape fence. A missing doc is a
+    // legitimate state (client fallback reads), so delete is denied to
+    // everyone — deletion-as-repair is the ops script's Admin-scope
+    // recovery, not a rules path.
+    function validSnapshot(data) {
+      return data.asOfSeq is int && data.asOfSeq >= 0
+        && data.cityCards is list
+        && data.latestSummaries is list && data.latestSummaries.size() <= 10
+        && data.openContestCards is list
+        && (data.generatedByResolutionId == null || data.generatedByResolutionId is string)
+        && (data.townHallCard == null || data.townHallCard is map)
+        && data.updatedAt is timestamp;
+    }
+
+    match /sim_dashboard_snapshots/{docId} {
+      allow read: if isViewer() && docId == 'current';
+      allow create, update: if isFabricCommitter() && docId == 'current'
+        && validSnapshot(request.resource.data);
+      allow delete: if false;
+    }
+
+    // Dashboard prefs (Phase 3 brief §2.2/§5, Dana A.5): presentation
+    // state, not world state — the one sim-prefixed collection a browser
+    // writes, fenced to the owning FULL member (the full-member fence is
+    // what excludes guests; a bare uid match would let a guest write
+    // their own doc). Read is owner-only: nobody's layout is anyone
+    // else's business. Element-level panel validation is not expressible
+    // in rules (no list iteration); the client's normalization
+    // (lib/dashboard/prefs.ts) is total, so a malformed entry degrades
+    // to registry defaults rather than breaking the dashboard.
+    function validPrefs(data) {
+      return data.layoutVersion is int && data.layoutVersion >= 1
+        && data.panels is list && data.panels.size() <= 64
+        && (data.defaultCityId == null || data.defaultCityId is string)
+        && data.updatedAt is timestamp;
+    }
+
+    match /sim_dashboard_prefs/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if isFullMember() && request.auth.uid == uid
+        && validPrefs(request.resource.data);
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
     // --- Sim layer: city state ------------------------------------------
 
     // Phase 2 (brief §9.7): undo's snapshot restore deletes docs the
