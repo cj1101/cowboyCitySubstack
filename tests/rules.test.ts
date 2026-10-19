@@ -1552,6 +1552,57 @@ async function main() {
   }
   console.log("ok sim allocation draft boundary (P1-G7)");
 
+  // ---- P4 Module 0: allocation fence narrowing (build-prep P4-K14).
+  // Brief §3.3 makes allocation commit an allocate_season0 ACTION through
+  // the play loop; the committer — never the owner — sets commit_requested,
+  // and the first versions doc is a fabric write inside the commit
+  // transaction (brief §1.2). Exactly one commit path exists (P4-G12-C1).
+  {
+    const allocRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_stat_allocations", "cityA");
+    // The owner can no longer flip the status to commit_requested: under
+    // the Phase 1 fence this exact write succeeded.
+    await assertFails(updateDoc(allocRef(ownerA), { status: "commit_requested" }));
+    // Draft saves still work — the narrowing removes the commit path, not
+    // the draft path.
+    await assertSucceeds(
+      updateDoc(allocRef(ownerA), {
+        draftVersion: 2,
+        status: "draft",
+        updatedAt: Timestamp.now(),
+      })
+    );
+    // The one remaining commit path: the committer sets commit_requested.
+    await assertSucceeds(
+      updateDoc(allocRef(fabricCommitter), { status: "commit_requested" })
+    );
+    await assertSucceeds(
+      updateDoc(allocRef(fabricCommitter), { status: "draft" })
+    );
+    // Versions: the Phase 1 owner-create clause is gone — an owner create
+    // fails even with authorUid == their own uid (the old condition).
+    const versionDoc = {
+      source: "first_login",
+      authorUid: "ownerA",
+      previewHash: "d".repeat(64),
+      commitSeq: 7,
+    };
+    await assertFails(
+      setDoc(
+        doc(ownerA.firestore(), "sim_stat_allocations", "cityA", "versions", "vOwner"),
+        versionDoc
+      )
+    );
+    // The committer writes the first version.
+    await assertSucceeds(
+      setDoc(
+        doc(fabricCommitter.firestore(), "sim_stat_allocations", "cityA", "versions", "v1"),
+        versionDoc
+      )
+    );
+  }
+  console.log("ok sim allocation fence narrowing (P4 Module 0, P4-K14)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)

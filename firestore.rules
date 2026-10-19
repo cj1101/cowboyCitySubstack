@@ -1322,10 +1322,16 @@ service cloud.firestore {
         && request.resource.data.status == 'not_started';
       // Owner draft saves: draft fields only; baseline, budget, and every
       // commit field are untouchable from a browser (field-equality checks).
+      // Phase 4 narrowing (build-prep P4-K14, brief §3.3): owners may only
+      // ever target 'draft'. 'commit_requested' is set by the committer
+      // when queueing the confirmed allocate_season0 action — allocation
+      // commit is a Resolution Event through the play loop, so the status
+      // flip alone creates no queue item, no preview, and no Log entry.
+      // Exactly one commit path exists.
       allow update: if isFabricCommitter()
         || (simCityOwner(cityId)
             && resource.data.status in ['not_started', 'draft']
-            && request.resource.data.status in ['draft', 'commit_requested']
+            && request.resource.data.status in ['draft']
             && request.resource.data.baselineHash == resource.data.baselineHash
             && request.resource.data.baselineStats == resource.data.baselineStats
             && request.resource.data.pointBudget == resource.data.pointBudget
@@ -1340,8 +1346,12 @@ service cloud.firestore {
       match /versions/{version} {
         allow read: if isAdmin() || simCityOwner(cityId)
           || (isViewer() && resource.data.commitSeq != null);
-        allow create: if isFabricCommitter()
-          || (simCityOwner(cityId) && request.resource.data.authorUid == request.auth.uid);
+        // Committer-only create (Phase 4, build-prep P4-K14): the first
+        // version is a fabric write inside the allocation commit
+        // transaction (brief §1.2). The Phase 1 owner-create clause is
+        // removed — it was a second, unaudited route to a commit-shaped
+        // record, and no client ever used it.
+        allow create: if isFabricCommitter();
         allow update: if false;
         allow delete: if isFabricCommitter();
       }
