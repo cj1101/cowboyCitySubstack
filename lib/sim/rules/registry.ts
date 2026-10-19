@@ -21,6 +21,7 @@ import {
   snapshotDoc,
   withDocField,
   RESOLVER_RULES_VERSION,
+  type CollectionQuerySpec,
   type PreparedPayload,
   type ResolutionPlan,
   type SimAction,
@@ -35,7 +36,7 @@ import {
   type BaselineVersion,
 } from "../baseline/registry";
 import { buildPendingDraft, type PendingTemplate } from "./pendingRules";
-import { fieldChange, planWrite, rejectedPlan, ruleEffectDraft, summaryDraft } from "./planHelpers";
+import { fieldChange, planWrite, plannedDoc, rejectedPlan, ruleEffectDraft, summaryDraft } from "./planHelpers";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -52,6 +53,26 @@ export interface HandlerContext {
 
 export type HandlerFn = (ctx: HandlerContext) => ResolutionPlan;
 
+/** Seeds for a descriptor's read-plan hook (Phase 4 Step 0, F-01): the
+ * action itself plus the docs already read for the plan's base paths —
+ * stored records, so a hook can derive further reads (a listing's
+ * corporation doc, an election record) from server-side state. Seeds
+ * NEVER come from actor-supplied citations: citations may add reads to
+ * the base set, but the hook is resolver-side code and its reads cannot
+ * be narrowed or replaced by the actor's nominations. */
+export interface ReadPlanSeeds {
+  action: SimAction;
+  seedDocs: ReadonlyMap<string, Record<string, unknown> | null>;
+}
+
+/** What a read-plan hook declares beyond the base doc paths: extra doc
+ * paths and/or collection queries, materialized into the snapshot and
+ * bound into the manifest's input set (see resolver.materializeSnapshot). */
+export interface DescriptorReadPlan {
+  paths?: string[];
+  queries?: CollectionQuerySpec[];
+}
+
 export interface RuleDescriptor {
   id: string;
   actionKinds: string[];
@@ -60,6 +81,10 @@ export interface RuleDescriptor {
   defaultBaselineSections: string[];
   mayCreatePendings: boolean;
   handlers: Record<string, HandlerFn>;
+  /** F-01 read-plan hook: declares the collection/graph reads this
+   * descriptor's handlers need, beyond the base doc-path derivation.
+   * Absent = doc-path reads only (the Phase 2 contract). */
+  readPlan?: (seeds: ReadPlanSeeds) => DescriptorReadPlan;
   summary: string;
 }
 
@@ -780,6 +805,189 @@ function verifyPublicationHandler(ctx: HandlerContext): ResolutionPlan {
 }
 
 // ---------------------------------------------------------------------------
+// FIXTURE-ORDERBOOK (Phase 4 Step 0, F-01) — the engine fixture for the
+// read-plan contract: an order-book-shaped collection read. The read
+// plan (descriptor code, resolver-side) declares the resting-orders
+// query; the handler reads ONLY the materialized result set from the
+// snapshot and derives the city's resting-order count/total from it.
+// Actor citations play no part in sourcing the read — an actor who
+// cites a subset of the book still gets the whole book read (the F-01
+// negative fixture in the Sim core suite proves it).
+// ---------------------------------------------------------------------------
+
+function orderbookReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const params = (seeds.action.structuredAction ?? {}) as Record<string, unknown>;
+  const cityId =
+    (typeof params.cityId === "string" ? params.cityId : undefined) ??
+    seeds.action.targetCityIds[0] ??
+    "";
+  return {
+    queries: [
+      {
+        id: "resting-orders",
+        collectionPath: `sim_cities/${cityId}/structures`,
+        filters: [{ field: "status", op: "==", value: "resting" }],
+        orderBy: [{ field: "priceRubars", direction: "asc" }],
+        limit: 50,
+      },
+    ],
+  };
+}
+
+function orderbookHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "FIXTURE-ORDERBOOK";
+  const denied = requireAuthority(ctx, descriptorId, descriptorId);
+  if (denied) return denied;
+  const cityId = actionCityId(ctx.action);
+  const cityPath = `sim_cities/${cityId}`;
+  const record = ctx.snapshot.queries.find(
+    (q) => q.spec.id === "resting-orders" && q.spec.collectionPath === `${cityPath}/structures`
+  );
+  if (!record) {
+    return rejectedPlan(
+      descriptorId,
+      "READ_PLAN_MISSING",
+      [descriptorId],
+      "The resting-orders collection read was not materialized into the snapshot — a handler never improvises a read outside its declared read plan (F-01)."
+    );
+  }
+  const city = snapshotDoc(ctx.snapshot, cityPath);
+  if (!city) {
+    return rejectedPlan(descriptorId, "CITY_NOT_FOUND", [descriptorId], `no sim city record for ${cityId}`);
+  }
+  let total = 0;
+  for (const path of record.resultPaths) {
+    const doc = snapshotDoc(ctx.snapshot, path);
+    if (doc && typeof doc.priceRubars === "number") total += doc.priceRubars as number;
+  }
+  const count = record.resultPaths.length;
+  const beforeCount = docField(city, "stats.fixtureRestingOrders") ?? null;
+  const beforeTotal = docField(city, "stats.fixtureOrderBookRubars") ?? null;
+  let afterCity = withDocField(city, "stats.fixtureRestingOrders", count);
+  afterCity = withDocField(afterCity, "stats.fixtureOrderBookRubars", total);
+  const plan = emptyPlan(descriptorId);
+  planWrite(plan, ctx.snapshot, cityPath, afterCity, "state", [
+    "stats.fixtureRestingOrders",
+    "stats.fixtureOrderBookRubars",
+  ]);
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId,
+      cityIds: [cityId],
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange("stats.fixtureRestingOrders", beforeCount, count, "resting-order count, derived from the bound collection read (F-01)"),
+        fieldChange("stats.fixtureOrderBookRubars", beforeTotal, total, "resting-order total, derived from the bound collection read (F-01)"),
+      ],
+      recordsUpdated: [cityPath],
+      summaryText: `${descriptorId}: ${count} resting order(s) in ${cityId}, ${total} R total — read from the materialized order-book query, not from actor citations.`,
+    })
+  );
+  plan.entries.push(
+    summaryDraft({
+      actor: ctx.action.actor,
+      actionId: ctx.action.actionId,
+      actionText: ctx.action.actionText,
+      classification: { verb: "orderbook-read", scope: "city", ruleIds: [descriptorId], unruled: false },
+      cityId,
+      cityIds: [cityId],
+      ruleIds: [descriptorId],
+      summaryText: `Order-book read for ${cityId}: ${count} resting, ${total} R.`,
+    })
+  );
+  actorCitations(plan, ctx.citations, ctx.resolutionId);
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
+// FIXTURE-JUDGMENT (Phase 4 Step 0, F-07) — the engine fixture for the
+// prepared-payload contract: a market-style judgment whose value comes
+// ONLY from the worker-prepared payload bound at preview time. The
+// handler reads `ctx.prepared` and NOTHING from the action's
+// structuredAction — the FIXTURE-MARKET `params.judgment` pattern
+// (member supplies the judgment input) is acceptable in a fixture and
+// a fairness breach as a product path: the AI-as-market judges;
+// members never supply the judgment of their own company. The payload
+// binding is source-agnostic (Vera's acceptance instruction): nothing
+// here assumes the credited funds' source — cash, credit, or otherwise.
+// ---------------------------------------------------------------------------
+
+const JUDGMENT_CREDIT_FLOOR = 1;
+const JUDGMENT_CREDIT_CEILING = 5000;
+
+function judgmentHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "FIXTURE-JUDGMENT";
+  const denied = requireAuthority(ctx, descriptorId, descriptorId);
+  if (denied) return denied;
+  const cityId = actionCityId(ctx.action);
+  const cityPath = `sim_cities/${cityId}`;
+  const city = snapshotDoc(ctx.snapshot, cityPath);
+  if (!city) {
+    return rejectedPlan(descriptorId, "CITY_NOT_FOUND", [descriptorId], `no sim city record for ${cityId}`);
+  }
+  if (!ctx.prepared) {
+    return rejectedPlan(
+      descriptorId,
+      "PREPARED_PAYLOAD_REQUIRED",
+      [descriptorId],
+      "This judgment resolves only from a worker-prepared payload bound at preview time (F-07); the action carries none."
+    );
+  }
+  const credit = (ctx.prepared.classification as Record<string, unknown> | undefined)?.creditRubars;
+  if (
+    typeof credit !== "number" ||
+    !Number.isFinite(credit) ||
+    credit < JUDGMENT_CREDIT_FLOOR ||
+    credit > JUDGMENT_CREDIT_CEILING
+  ) {
+    return rejectedPlan(
+      descriptorId,
+      "PREPARED_PAYLOAD_OUT_OF_BOUNDS",
+      [descriptorId],
+      `prepared classification.creditRubars must be a number in [${JUDGMENT_CREDIT_FLOOR}, ${JUDGMENT_CREDIT_CEILING}]`
+    );
+  }
+  const plan = emptyPlan(descriptorId);
+  const current = plannedDoc(plan, ctx.snapshot, cityPath) ?? city;
+  const beforeTreasury = docField(current, "stats.treasuryRubars");
+  const next = withDocField(current, "stats.treasuryRubars", (beforeTreasury as number) + credit);
+  planWrite(plan, ctx.snapshot, cityPath, next, "state", ["stats.treasuryRubars"]);
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId,
+      cityIds: [cityId],
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange(
+          "stats.treasuryRubars",
+          beforeTreasury,
+          (beforeTreasury as number) + credit,
+          `prepared judgment credit (inputHash ${ctx.prepared.inputHash})`
+        ),
+      ],
+      recordsUpdated: [cityPath],
+      summaryText: `${descriptorId}: prepared judgment credited ${credit} R to ${cityId} (payload ${ctx.prepared.inputHash}).`,
+    })
+  );
+  plan.entries.push(
+    summaryDraft({
+      actor: ctx.action.actor,
+      actionId: ctx.action.actionId,
+      actionText: ctx.action.actionText,
+      classification: { verb: "judgment", scope: "city", ruleIds: [descriptorId], unruled: false },
+      cityId,
+      cityIds: [cityId],
+      ruleIds: [descriptorId],
+      summaryText: `Prepared-payload judgment for ${cityId}: +${credit} R.`,
+    })
+  );
+  actorCitations(plan, ctx.citations, ctx.resolutionId);
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
 // Registry + indexes
 // ---------------------------------------------------------------------------
 
@@ -893,6 +1101,27 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     mayCreatePendings: false,
     handlers: { fixture_verify_publication: verifyPublicationHandler },
     summary: "Fixture: a resolution that relies on a publication record (S4 reliance realization).",
+  },
+  "FIXTURE-ORDERBOOK": {
+    id: "FIXTURE-ORDERBOOK",
+    actionKinds: ["fixture_orderbook"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { fixture_orderbook: orderbookHandler },
+    readPlan: orderbookReadPlan,
+    summary: "Fixture (Step 0, F-01): an order-book-shaped collection read, declared by the descriptor's read-plan hook and materialized into the snapshot.",
+  },
+  "FIXTURE-JUDGMENT": {
+    id: "FIXTURE-JUDGMENT",
+    actionKinds: ["fixture_judgment"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { fixture_judgment: judgmentHandler },
+    summary: "Fixture (Step 0, F-07): a judgment resolved only from the worker-prepared payload bound at preview time; the handler never reads judgment from the action itself.",
   },
 };
 

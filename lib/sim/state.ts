@@ -88,6 +88,14 @@ export interface SimAction {
     previewHash: string;
     authorityType: string;
   } | null;
+  /** The worker-prepared payload this action's preview was computed
+   * with (Phase 4 Step 0, F-07), stored on the action doc at preview
+   * time by the dispatcher and passed verbatim to the committer at
+   * commit time: preview, confirmation, and commit all bind the SAME
+   * payload. Never set by intake — a member-supplied judgment is the
+   * FIXTURE-MARKET anti-pattern, a fairness breach as a product path. */
+  preparedPayload?: PreparedPayload | null;
+  preparedInputHash?: string | null;
   claim: {
     cycleId: string;
     leaseId: string;
@@ -127,11 +135,41 @@ export interface SnapshotHead {
   hash: string;
 }
 
+/** A collection read declared by a read plan (Phase 4 Step 0, F-01).
+ * The snapshot is the integrity boundary — heads, previewHash, the
+ * manifest's input set, and the undo closure all derive from it — so a
+ * read a handler needs must be declared here, never improvised inside
+ * the handler (handlers are pure and receive only the snapshot).
+ * Filters are equality-only in v1: the order book, the ballot set, and
+ * holdings reads are all equality + order + limit shapes. */
+export interface CollectionQuerySpec {
+  /** Stable id within the declaring descriptor's read plan. */
+  id: string;
+  collectionPath: string;
+  filters: { field: string; op: "=="; value: unknown }[];
+  orderBy?: { field: string; direction: "asc" | "desc" }[];
+  limit?: number;
+}
+
+/** A materialized collection read: the spec, the result doc paths in
+ * query order, and a digest over the spec + the ordered (path, head
+ * hash) results. Recorded on the snapshot and in the manifest's input
+ * set, so query reads are bound exactly like doc reads — a membership
+ * or content change between preview and commit is a stale preview. */
+export interface SnapshotQueryRecord {
+  spec: CollectionQuerySpec;
+  resultPaths: string[];
+  digest: string;
+}
+
 export interface SimSnapshot {
   /** path -> raw Firestore doc data (Timestamps intact), or null when the
    * doc does not exist. Handlers treat docs as read-only. */
   docs: ReadonlyMap<string, Record<string, unknown> | null>;
   heads: SnapshotHead[];
+  /** Collection reads materialized into this snapshot (F-01); empty for
+   * doc-only snapshots. Result docs are also in `docs`/`heads`. */
+  queries: SnapshotQueryRecord[];
   counterHead: { lastSeq: number; lastEntryHash: string };
   /** Injected ISO instant — the only clock input the resolver ever sees. */
   now: string;

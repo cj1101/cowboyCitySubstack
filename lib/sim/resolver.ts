@@ -16,19 +16,22 @@
  * a deterministic first-class Resolution Event (§4.5).
  */
 
-import { sha256Hex } from "./canonical";
-import { headHashOf } from "./log";
+import { canonicalJson, sha256Hex } from "./canonical";
+import { headHashOf, projectFirestoreValue } from "./log";
 import {
   PENDING_FANOUT_CAP,
   PENDING_GENERATION_CAP,
   docField,
   snapshotDoc,
   withDocField,
+  type CollectionQuerySpec,
   type PreparedPayload,
   type ResolutionPlan,
   type SimAction,
+  type SimChange,
   type SimCitations,
   type SimSnapshot,
+  type SnapshotQueryRecord,
 } from "./state";
 import {
   citableBaselineVersion,
@@ -46,7 +49,7 @@ import {
   pendingKindConfig,
   type DeterminateEffect,
 } from "./rules/pendingRules";
-import { planWrite, ruleEffectDraft, summaryDraft } from "./rules/planHelpers";
+import { planWrite, plannedDoc, ruleEffectDraft, summaryDraft } from "./rules/planHelpers";
 
 export class PlanValidationError extends Error {
   code = "PLAN_INVALID";
@@ -67,46 +70,10 @@ export interface DocReader {
   get(path: string): Promise<Record<string, unknown> | null>;
 }
 
-export async function buildSnapshot(
-  reader: DocReader,
-  paths: readonly string[],
-  now: string
-): Promise<SimSnapshot> {
-  const unique = [...new Set(paths)];
-  const docs = new Map<string, Record<string, unknown> | null>();
-  for (const path of unique) {
-    docs.set(path, await reader.get(path));
-  }
-  const counter = docs.get("sim_counters/log") ?? null;
-  if (!counter || typeof counter.lastSeq !== "number") {
-    throw new SnapshotError(
-      "LOG_NOT_INITIALIZED",
-      "sim_counters/log is missing or malformed — the Log is not initialized (genesis has not run)."
-    );
-  }
-  const heads = unique.map((path) => {
-    const doc = docs.get(path) ?? null;
-    const stateVersion =
-      doc && typeof doc.stateVersion === "number" ? (doc.stateVersion as number) : null;
-    return { path, stateVersion, hash: headHashOf(doc) };
-  });
-  return {
-    docs,
-    heads,
-    counterHead: {
-      lastSeq: counter.lastSeq as number,
-      lastEntryHash: (counter.lastEntryHash as string) ?? "",
-    },
-    now,
-  };
-}
-
-/** Assemble a snapshot from already-read docs (the committer's in-
- * transaction path: reads happen under the transaction, then the pure
- * resolver runs over exactly those docs). */
-export function snapshotFromDocs(
+function assembleSnapshot(
   docs: ReadonlyMap<string, Record<string, unknown> | null>,
-  now: string
+  now: string,
+  queries: SnapshotQueryRecord[]
 ): SimSnapshot {
   const counter = docs.get("sim_counters/log") ?? null;
   if (!counter || typeof counter.lastSeq !== "number") {
@@ -124,12 +91,105 @@ export function snapshotFromDocs(
   return {
     docs,
     heads,
+    queries,
     counterHead: {
       lastSeq: counter.lastSeq as number,
       lastEntryHash: (counter.lastEntryHash as string) ?? "",
     },
     now,
   };
+}
+
+export async function buildSnapshot(
+  reader: DocReader,
+  paths: readonly string[],
+  now: string
+): Promise<SimSnapshot> {
+  const unique = [...new Set(paths)];
+  const docs = new Map<string, Record<string, unknown> | null>();
+  for (const path of unique) {
+    docs.set(path, await reader.get(path));
+  }
+  return assembleSnapshot(docs, now, []);
+}
+
+/** Assemble a snapshot from already-read docs (the committer's in-
+ * transaction path: reads happen under the transaction, then the pure
+ * resolver runs over exactly those docs). The F-01 query records the
+ * dispatcher's plan was computed from ride along (`queries`): the
+ * result DOCS are the transaction's own re-reads (they ride
+ * `snapshotPaths` and are head-compared like any declared read), so a
+ * handler recomputing in-transaction derives from transaction-fresh
+ * docs — but without the records themselves it cannot find its
+ * materialized set at all and every query-plan resolution would
+ * recompute to READ_PLAN_MISSING. Set membership stays bound at the
+ * dispatcher's materialization (in-transaction query re-execution is
+ * the PR-F residual; see CommitRequest.queryRecords). */
+export function snapshotFromDocs(
+  docs: ReadonlyMap<string, Record<string, unknown> | null>,
+  now: string,
+  queries: readonly SnapshotQueryRecord[] = []
+): SimSnapshot {
+  return assembleSnapshot(docs, now, [...queries]);
+}
+
+/** Executes a collection query against the caller's store (the F-01
+ * materialization step runs OUTSIDE the pure resolver, like doc reads). */
+export interface QueryReader {
+  query(
+    spec: CollectionQuerySpec
+  ): Promise<{ path: string; doc: Record<string, unknown> }[]>;
+}
+
+/** The digest binding a query read into the snapshot/manifest input set:
+ * sha256 over the spec and the ordered (path, head-hash) result list. */
+export function digestQueryResults(
+  spec: CollectionQuerySpec,
+  results: readonly { path: string; hash: string }[]
+): string {
+  return sha256Hex(
+    projectFirestoreValue({
+      spec: spec as unknown as Record<string, unknown>,
+      results: results.map((r) => ({ path: r.path, hash: r.hash })),
+    }) as Record<string, unknown>
+  );
+}
+
+/** Materialize a read plan into a snapshot: doc reads plus the plan's
+ * collection queries, every result doc bound into `docs`/`heads`
+ * exactly like a doc-get, and each query recorded (spec + ordered
+ * result paths + digest) on the snapshot for the manifest's input set. */
+export async function materializeSnapshot(
+  reader: DocReader,
+  queryReader: QueryReader | undefined,
+  plan: ActionReadPlan,
+  now: string
+): Promise<SimSnapshot> {
+  const docs = new Map<string, Record<string, unknown> | null>();
+  for (const path of [...new Set(plan.paths)]) {
+    docs.set(path, await reader.get(path));
+  }
+  const queryRecords: SnapshotQueryRecord[] = [];
+  for (const spec of plan.queries) {
+    if (!queryReader) {
+      throw new SnapshotError(
+        "QUERY_READER_MISSING",
+        `read plan declares collection query "${spec.id}" (${spec.collectionPath}) but no query reader was supplied`
+      );
+    }
+    const results = await queryReader.query(spec);
+    const hashed: { path: string; hash: string }[] = [];
+    for (const result of results) {
+      docs.set(result.path, result.doc);
+      hashed.push({ path: result.path, hash: headHashOf(result.doc) });
+    }
+    queryRecords.push({
+      spec,
+      resultPaths: results.map((r) => r.path),
+      digest: digestQueryResults(spec, hashed),
+    });
+  }
+  return assembleSnapshot(docs, now, queryRecords);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +227,36 @@ export function collectActionReadPaths(action: SimAction): string[] {
   for (const id of citations.pendingIds ?? []) paths.add(`sim_pending_consequences/${id}`);
   for (const path of citations.recordPaths ?? []) paths.add(path);
   return [...paths];
+}
+
+/** A full read plan for an action (F-01): doc paths + collection
+ * queries. The base doc paths derive from the action record itself;
+ * the classifying descriptor's read-plan hook adds paths/queries whose
+ * seeds come from the action and from STORED records (the seed docs —
+ * the base paths already read), never from actor nomination alone.
+ * Actor-supplied `citations.recordPaths` remain part of the base set
+ * as ADDITIONAL reliance declarations (their undo-graph role); they
+ * are never the sole source of an authority- or money-critical read —
+ * the descriptor hook is resolver-side code, and a citation can add a
+ * read but can never narrow or replace the plan's own reads. */
+export interface ActionReadPlan {
+  paths: string[];
+  queries: CollectionQuerySpec[];
+}
+
+export function collectActionReadPlan(
+  action: SimAction,
+  seedDocs: ReadonlyMap<string, Record<string, unknown> | null>
+): ActionReadPlan {
+  const paths = new Set(collectActionReadPaths(action));
+  const queries: CollectionQuerySpec[] = [];
+  const descriptor = descriptorForActionKind(action.actionType);
+  if (descriptor?.readPlan) {
+    const extra = descriptor.readPlan({ action, seedDocs });
+    for (const path of extra.paths ?? []) paths.add(path);
+    for (const spec of extra.queries ?? []) queries.push(spec);
+  }
+  return { paths: [...paths], queries };
 }
 
 export function collectRipeningReadPaths(pending: Record<string, unknown>): string[] {
@@ -234,7 +324,16 @@ function citationRefKeys(citations: SimCitations): string[] {
 
 export function validatePlan(
   plan: ResolutionPlan,
-  opts: { baselineRegistry: BaselineRegistry; covertEntriesAllowed: boolean }
+  opts: {
+    baselineRegistry: BaselineRegistry;
+    covertEntriesAllowed: boolean;
+    /** When provided, the F-02 reconciliation runs: every entry change
+     * must chain from the snapshot value through its sibling changes to
+     * the plan's folded write for its doc. Callers that have the
+     * snapshot (the resolver itself; the committer's in-transaction
+     * revalidation) always pass it. */
+    snapshot?: SimSnapshot;
+  }
 ): void {
   const fail = (message: string): never => {
     throw new PlanValidationError(message);
@@ -302,6 +401,89 @@ export function validatePlan(
   for (const entry of plan.entries) {
     for (const path of [...entry.recordsCreated, ...entry.recordsUpdated]) {
       if (!written.has(path)) fail(`entry claims record ${path} but the plan writes no such path`);
+    }
+  }
+
+  // F-02 reconciliation (Phase 4 Step 0): the union of entry changes[]
+  // per (doc path, field) must reconcile with the plan's folded write
+  // for that doc — the first change's `before` is the snapshot value,
+  // each later change chains off its predecessor, and the last change's
+  // `after` is the write's final value. A handler that computed an
+  // after-state from the snapshot instead of the planned doc (the old
+  // planWrite replacement flaw) produces changes that cannot chain, and
+  // fails here instead of committing a Log that claims effects the
+  // state never took. Change fields are target-qualified exactly as
+  // TC-E02 chains them: relative to the entry's city doc, either a
+  // dotted field of the city doc itself (`stats.treasuryRubars`) or a
+  // subcollection doc's field (`structures/<id>.status`).
+  if (opts.snapshot) {
+    const snapshot = opts.snapshot;
+    const norm = (v: unknown): unknown => (v === undefined ? null : v);
+    const sameValue = (a: unknown, b: unknown): boolean =>
+      canonicalJson(projectFirestoreValue(norm(a)) as never) ===
+      canonicalJson(projectFirestoreValue(norm(b)) as never);
+    const resolveTarget = (
+      cityId: string,
+      field: string
+    ): { path: string; docField: string; write: ResolutionPlan["writes"][number] } | null => {
+      const candidates: { path: string; docField: string }[] = [];
+      const sub = /^([^/]+)\/([^/.]+)\.(.+)$/.exec(field);
+      if (sub) {
+        candidates.push({
+          path: `sim_cities/${cityId}/${sub[1]}/${sub[2]}`,
+          docField: sub[3],
+        });
+      }
+      candidates.push({ path: `sim_cities/${cityId}`, docField: field });
+      for (const candidate of candidates) {
+        const write = plan.writes.find((w) => w.path === candidate.path);
+        if (write && write.changedFields.includes(candidate.docField)) {
+          return { ...candidate, write };
+        }
+      }
+      return null;
+    };
+    interface ChangeGroup {
+      path: string;
+      docField: string;
+      write: ResolutionPlan["writes"][number];
+      changes: SimChange[];
+    }
+    const groups = new Map<string, ChangeGroup>();
+    for (const entry of plan.entries) {
+      if (!entry.cityId) continue;
+      for (const change of entry.changes) {
+        const target = resolveTarget(entry.cityId, change.field);
+        if (!target) {
+          fail(
+            `change "${change.field}" (entry city ${entry.cityId}) reconciles with no planned write — the Log would claim an effect the plan does not write (F-02)`
+          );
+          continue;
+        }
+        const key = `${target.path}|${target.docField}`;
+        const group: ChangeGroup = groups.get(key) ?? { ...target, changes: [] };
+        group.changes.push(change);
+        groups.set(key, group);
+      }
+    }
+    for (const group of groups.values()) {
+      const write = group.write;
+      let expected = norm(docField(snapshotDoc(snapshot, group.path), group.docField));
+      for (const change of group.changes) {
+        if (!sameValue(change.before, expected)) {
+          fail(
+            `change "${group.docField}" on ${group.path} claims before=${JSON.stringify(norm(change.before))} but the plan's chain holds ${JSON.stringify(expected)} — an after-state was computed against the snapshot instead of the planned doc (F-02)`
+          );
+        }
+        expected = norm(change.after);
+      }
+      const finalValue =
+        write.op === "delete" ? null : norm(docField(write.afterDoc ?? null, group.docField));
+      if (!sameValue(expected, finalValue)) {
+        fail(
+          `changes for "${group.docField}" on ${group.path} end at ${JSON.stringify(expected)} but the planned write lands ${JSON.stringify(finalValue)} (F-02)`
+        );
+      }
     }
   }
 }
@@ -372,7 +554,7 @@ export function resolveAction(
         : [],
       planHash: "",
     };
-    validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false });
+    validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false, snapshot });
     return finalizePlan(plan);
   }
 
@@ -416,6 +598,7 @@ export function resolveAction(
   validatePlan(plan, {
     baselineRegistry: opts.baselineRegistry,
     covertEntriesAllowed: descriptor.visibility === "covert",
+    snapshot,
   });
   return finalizePlan(plan);
 }
@@ -581,7 +764,7 @@ export function resolveRipening(
     })
   );
 
-  validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false });
+  validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false, snapshot });
   return finalizePlan(plan);
 }
 
@@ -607,16 +790,26 @@ export function resolveVoiding(
     planHash: "",
   };
 
-  const changes: { field: string; before: unknown; after: unknown; formula: string }[] = [];
+  // Voiding effects compose against the PLANNED doc (F-02): two effects
+  // on the same city — the in-repo proof of the old replacement flaw —
+  // now both land, each change chaining off its predecessor. Changes
+  // are grouped per effect city so every change is scoped to the city
+  // whose doc it describes (the TC-E02 chaining convention).
+  const changesByCity = new Map<string, SimChange[]>();
+  const cityOrder: string[] = [];
   const voidEffects = (spec.voidEffects as DeterminateEffect[] | undefined) ?? [];
   for (const effect of voidEffects) {
     const path = `sim_cities/${effect.cityId}`;
-    const city = snapshotDoc(snapshot, path);
-    if (!city) continue;
-    const before = docField(city, effect.field);
+    const current = plannedDoc(plan, snapshot, path);
+    if (!current) continue;
+    const before = docField(current, effect.field);
     if (typeof before !== "number") continue;
-    planWrite(plan, snapshot, path, withDocField(city, effect.field, before + effect.delta), "state", [effect.field]);
-    changes.push({
+    planWrite(plan, snapshot, path, withDocField(current, effect.field, before + effect.delta), "state", [effect.field]);
+    if (!changesByCity.has(effect.cityId)) {
+      changesByCity.set(effect.cityId, []);
+      cityOrder.push(effect.cityId);
+    }
+    changesByCity.get(effect.cityId)?.push({
       field: effect.field,
       before,
       after: before + effect.delta,
@@ -624,18 +817,34 @@ export function resolveVoiding(
     });
   }
 
-  plan.entries.push(
-    ruleEffectDraft({
-      actor: originActor,
-      ruleIds: ["R-33"],
-      cityId: pending.targetCityId as string,
-      cityIds: [pending.targetCityId as string],
-      changes,
-      causedBySeq: originSeq,
-      pendingId,
-      summaryText: `R-33 voiding of ${pendingId}: ${opts.voidReason}.`,
-    })
-  );
+  if (cityOrder.length === 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: originActor,
+        ruleIds: ["R-33"],
+        cityId: pending.targetCityId as string,
+        cityIds: [pending.targetCityId as string],
+        changes: [],
+        causedBySeq: originSeq,
+        pendingId,
+        summaryText: `R-33 voiding of ${pendingId}: ${opts.voidReason}.`,
+      })
+    );
+  }
+  for (const cityId of cityOrder) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: originActor,
+        ruleIds: ["R-33"],
+        cityId,
+        cityIds: [cityId],
+        changes: changesByCity.get(cityId) ?? [],
+        causedBySeq: originSeq,
+        pendingId,
+        summaryText: `R-33 voiding of ${pendingId}: ${opts.voidReason}.`,
+      })
+    );
+  }
   plan.pendingTransitions.push({ pendingId, toStatus: "voided", voidReason: opts.voidReason });
   plan.entries.push(
     summaryDraft({
@@ -649,7 +858,7 @@ export function resolveVoiding(
     })
   );
 
-  validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false });
+  validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false, snapshot });
   return finalizePlan(plan);
 }
 

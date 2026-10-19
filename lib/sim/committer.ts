@@ -78,6 +78,16 @@ export interface CommitRequest {
   plan: ResolutionPlan;
   expectedHeads: SnapshotHead[];
   snapshotPaths: string[];
+  /** The read plan's materialized collection queries (F-01), if any.
+   * Every result doc rides `snapshotPaths`, so the transaction re-reads
+   * and head-compares each one exactly like a declared doc read, and
+   * the records land in the manifest's input set (`queryInputs`) for
+   * the undo closure and audit. Set MEMBERSHIP is bound at the
+   * dispatcher's materialization in the same wake step: this pinned
+   * SDK's Transaction has no typed query read, so in-transaction
+   * re-execution of the query itself waits for the client-SDK upgrade
+   * (PR-F) — noted as the one residual F-01 gap in the Step 0 report. */
+  queryRecords?: import("./state").SnapshotQueryRecord[];
   /** sourceKind "action": the claimed action doc as dispatched. */
   action?: SimAction;
   claimLeaseId?: string | null;
@@ -273,7 +283,13 @@ export async function commitResolution(
     }
 
     // -- Step 4: recompute the plan on the transaction's snapshot --------
-    const txSnapshot = snapshotFromDocs(docs, now);
+    // The read plan's query records (F-01) re-attach here: the result
+    // docs in `docs` are this transaction's re-reads, head-compared
+    // below, and the recompute must see the same materialized set the
+    // dispatcher's plan was computed from — dropping the records makes
+    // every query-plan handler recompute to READ_PLAN_MISSING and the
+    // resolution falls out as a spurious stale preview.
+    const txSnapshot = snapshotFromDocs(docs, now, req.queryRecords ?? []);
     const stateExcluded = new Set([...controlPaths, logEntryPath(counter.lastSeq as number)]);
     const expectedStateHeads = stateHeadsOf(
       { ...txSnapshot, heads: req.expectedHeads },
@@ -340,13 +356,16 @@ export async function commitResolution(
       plan = writeSetTooLargePlan(req, txAction as SimAction);
     }
 
-    // §5.6/§6.3 plan guards, re-run on the final plan.
+    // §5.6/§6.3 plan guards, re-run on the final plan — including the
+    // F-02 changes↔writes reconciliation against this transaction's
+    // snapshot (Phase 4 Step 0).
     try {
       validatePlan(plan, {
         baselineRegistry: deps.baselineRegistry,
         covertEntriesAllowed:
           plan.descriptorId !== null &&
           RULE_DESCRIPTORS[plan.descriptorId]?.visibility === "covert",
+        snapshot: txSnapshot,
       });
     } catch (error) {
       if (error instanceof PlanValidationError) {
@@ -665,6 +684,11 @@ export async function commitResolution(
           : null,
       inputHash,
       inputHeads,
+      queryInputs: req.queryRecords ?? [],
+      // F-07: the prepared payload the resolution consumed, stored with
+      // the manifest — a later replay re-runs the handler against this
+      // record, never a fresh worker call (banking V-B7's requirement).
+      preparedPayload: req.prepared ?? null,
       inputRefKeys,
       dependencyRefKeys,
       outputRefKeys,

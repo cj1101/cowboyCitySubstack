@@ -45,9 +45,12 @@ import { computePreview, type PreviewComputation } from "./preview";
 import {
   buildSnapshot,
   collectActionReadPaths,
+  collectActionReadPlan,
+  materializeSnapshot,
   resolveAction,
-  type DocReader,
+  type QueryReader,
 } from "./resolver";
+import { firestoreQueryReader, firestoreReader } from "./readers";
 import { CommitError, commitResolution, type CommitOutcome } from "./committer";
 import { scanRipeness, type ScanSummary } from "./pending";
 import { processUndoOperation } from "./undo";
@@ -55,15 +58,7 @@ import { wakeChangedWorld } from "./snapshot";
 import { refreshSnapshotAfterWake } from "./snapshotRefresh";
 import type { BaselineRegistry } from "./baseline/registry";
 
-export function firestoreReader(db: Firestore): DocReader {
-  return {
-    async get(path: string) {
-      const segments = path.split("/");
-      const snap = await getDoc(doc(db, segments[0], ...segments.slice(1)));
-      return snap.exists() ? (snap.data() as Record<string, unknown>) : null;
-    },
-  };
-}
+export { firestoreReader } from "./readers";
 
 export interface DispatcherDeps {
   /** Identity for worker-class action bookkeeping (rules: isFabricService). */
@@ -71,6 +66,38 @@ export interface DispatcherDeps {
   /** Identity for commits + snapshot reads (rules: committer). */
   committerDb: Firestore;
   baselineRegistry: BaselineRegistry;
+  /** Executes read-plan collection queries (F-01); defaults to a
+   * reader over `committerDb` — the same identity that reads docs. */
+  queryReader?: QueryReader;
+}
+
+function queryReaderOf(deps: DispatcherDeps): QueryReader {
+  return deps.queryReader ?? firestoreQueryReader(deps.committerDb);
+}
+
+/** The snapshot an action resolves against (F-01): the base doc paths
+ * are read first (the seed docs), the classifying descriptor's
+ * read-plan hook derives any further doc paths + collection queries
+ * from the action and those stored records, and the whole plan is
+ * materialized — query results bound into the snapshot exactly like
+ * doc reads. Returns the snapshot and the full path list (base +
+ * declared + query results) the committer must re-read in-transaction. */
+async function snapshotForAction(
+  deps: DispatcherDeps,
+  action: SimAction,
+  now: string
+): Promise<{ snapshot: Awaited<ReturnType<typeof materializeSnapshot>>; paths: string[] }> {
+  const reader = firestoreReader(deps.committerDb);
+  const seed = await buildSnapshot(reader, collectActionReadPaths(action), now);
+  const readPlan = collectActionReadPlan(action, seed.docs);
+  const snapshot = await materializeSnapshot(reader, queryReaderOf(deps), readPlan, now);
+  const paths = [
+    ...new Set([
+      ...readPlan.paths,
+      ...snapshot.queries.flatMap((q) => q.resultPaths),
+    ]),
+  ];
+  return { snapshot, paths };
 }
 
 export interface WakeSummary {
@@ -87,37 +114,47 @@ async function storePreview(
   deps: DispatcherDeps,
   action: SimAction,
   computation: PreviewComputation,
-  now: string
+  now: string,
+  prepared?: PreparedPayload
 ): Promise<void> {
   await updateDoc(doc(deps.fabricDb, "sim_actions", action.actionId), {
     preview: { ...computation.preview, previewHash: computation.previewHash },
     previewPlanHash: computation.plan.planHash,
     audienceUids: computation.audienceUids,
+    // F-07: the payload this preview was computed with is stored on the
+    // action doc, so the wake commits with the SAME payload the member
+    // confirmed against — never a fresh worker call at commit time.
+    ...(prepared
+      ? {
+          preparedPayload: { ...prepared },
+          preparedInputHash: prepared.inputHash,
+        }
+      : {}),
     status: "awaiting_confirmation",
     claim: null,
     updatedAt: new Date(now),
   });
 }
 
-/** Worker step (§4.2): compute + store the preview for a received action. */
+/** Worker step (§4.2): compute + store the preview for a received action.
+ * `opts.prepared` is the worker-prepared payload for judgment-bearing
+ * action kinds (F-07); when given, it is bound into the preview hash
+ * and stored on the action doc for the commit. */
 export async function previewAction(
   deps: DispatcherDeps,
   actionId: string,
-  opts: { now: string }
+  opts: { now: string; prepared?: PreparedPayload }
 ): Promise<PreviewComputation> {
   const snap = await getDoc(doc(deps.fabricDb, "sim_actions", actionId));
   if (!snap.exists()) throw new Error(`action ${actionId} does not exist`);
   const action = snap.data() as SimAction;
-  const snapshot = await buildSnapshot(
-    firestoreReader(deps.committerDb),
-    collectActionReadPaths(action),
-    opts.now
-  );
+  const { snapshot } = await snapshotForAction(deps, action, opts.now);
   const computation = computePreview(snapshot, action, {
     baselineRegistry: deps.baselineRegistry,
     mode: "preview",
+    prepared: opts.prepared,
   });
-  await storePreview(deps, action, computation, opts.now);
+  await storePreview(deps, action, computation, opts.now, opts.prepared);
   return computation;
 }
 
@@ -229,21 +266,53 @@ export async function runWake(
       continue;
     }
 
-    const paths = collectActionReadPaths(claimed);
-    const snapshot = await buildSnapshot(reader, paths, opts.now);
+    // F-07: the payload stored at preview time rides the commit. A
+    // stored hash that disagrees with the payload's own hash means the
+    // doc was tampered with (or written by a buggy worker): refuse to
+    // resolve under a payload nobody can vouch for.
+    const prepared = claimed.preparedPayload ?? undefined;
+    if (
+      prepared &&
+      typeof claimed.preparedInputHash === "string" &&
+      claimed.preparedInputHash !== prepared.inputHash
+    ) {
+      await releaseAction(
+        deps,
+        action.actionId,
+        leaseId,
+        {
+          status: "confirmed",
+          lastAttempt: {
+            at: new Date(opts.now),
+            code: "PREPARED_HASH_MISMATCH",
+            message:
+              "the stored prepared payload's hash does not match the preview-bound hash; re-preview required.",
+          },
+        },
+        opts.now
+      );
+      summary.actionsFailed.push({ actionId: action.actionId, code: "PREPARED_HASH_MISMATCH" });
+      continue;
+    }
+
+    const { snapshot, paths } = await snapshotForAction(deps, claimed, opts.now);
     const plan = resolveAction(snapshot, claimed, {
       baselineRegistry: deps.baselineRegistry,
       mode: "commit",
+      prepared,
     });
 
     if (plan.planHash !== claimed.previewPlanHash) {
       // State moved since preview: fresh preview, back to
-      // awaiting_confirmation, NO Log entry (§4.4 step 4).
+      // awaiting_confirmation, NO Log entry (§4.4 step 4). The fresh
+      // preview binds the SAME prepared payload (F-07) — the one the
+      // member confirmed against.
       const computation = computePreview(snapshot, claimed, {
         baselineRegistry: deps.baselineRegistry,
         mode: "commit",
+        prepared,
       });
-      await storePreview(deps, claimed, computation, opts.now);
+      await storePreview(deps, claimed, computation, opts.now, prepared);
       summary.actionsStale.push(action.actionId);
       continue;
     }
@@ -260,6 +329,9 @@ export async function runWake(
           plan,
           expectedHeads: snapshot.heads,
           snapshotPaths: paths,
+          queryRecords: snapshot.queries,
+          prepared,
+          preparedInputHash: prepared?.inputHash ?? null,
           action: claimed,
           claimLeaseId: leaseId,
         }
@@ -319,12 +391,13 @@ export async function runWake(
       );
       summary.scans.push(scan);
     } else if (outcome.status === "stale-preview") {
-      const freshSnapshot = await buildSnapshot(reader, paths, opts.now);
+      const { snapshot: freshSnapshot } = await snapshotForAction(deps, claimed, opts.now);
       const computation = computePreview(freshSnapshot, claimed, {
         baselineRegistry: deps.baselineRegistry,
         mode: "commit",
+        prepared,
       });
-      await storePreview(deps, claimed, computation, opts.now);
+      await storePreview(deps, claimed, computation, opts.now, prepared);
       summary.actionsStale.push(action.actionId);
     }
     // "aborted" (claim lost): another committer owns it now; nothing to do.
