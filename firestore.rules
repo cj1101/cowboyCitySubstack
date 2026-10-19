@@ -1176,7 +1176,12 @@ service cloud.firestore {
         && request.resource.data.method.methodRef.size() > 0
         && request.resource.data.collectionResolutionId is string
         && request.resource.data.collectionResolutionId.size() > 0;
-      allow update, delete: if false;
+      allow update: if false;
+      // Erasure is the undo engine's alone (CJ's N-1 ruling: espionage
+      // and intel follow normal undo logic — see phase2-decisions.md
+      // P2-K16). The committer deletes only inside a restore
+      // transaction; everyone else's delete stays denied.
+      allow delete: if isFabricCommitter();
     }
   }
 }

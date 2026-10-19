@@ -1398,7 +1398,12 @@ async function main() {
     await assertFails(
       updateDoc(doc(committerFs, "sim_intel_records", "intel1"), { coverage: {} })
     );
-    await assertFails(deleteDoc(doc(committerFs, "sim_intel_records", "intel1")));
+    // P2-K16 (CJ's N-1 ruling): the committer may delete an intel
+    // record — solely as the undo engine's restore path. (Was
+    // assertFails under the brief §9 never-delete aside; N-1 +
+    // brief §8.6 + the P2-G8 matrix govern. Publications above stay
+    // never-delete.)
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_intel_records", "intel1")));
     await assertFails(deleteDoc(doc(fabricWorker.firestore(), "sim_cities", "cityA")));
   }
   console.log("ok sim structural refusal (P1-G1)");

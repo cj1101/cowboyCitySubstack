@@ -1256,11 +1256,15 @@ async function main() {
       cityId: "cityA",
       note: "watch the docks",
     });
+    // Guard (fix round 4): assert the resolution landed before reading
+    // its entries — a silent commit failure here surfaced as a bare
+    // TypeError on the summary entry's seq.
+    assert.equal(
+      (await adminDoc(`sim_actions/${covert.actionId}`))?.status,
+      "resolved",
+      "the covert collection action must resolve (its entries are read below)"
+    );
     const covertEntries = await entriesOf(covert.actionId);
-    if (covertEntries.length === 0) {
-      console.log("DIAG3 covert wake:", JSON.stringify(covert.summary));
-      console.log("DIAG3 covert action:", JSON.stringify(await adminDoc(`sim_actions/${covert.actionId}`))?.slice(0, 500));
-    }
     assert.ok(covertEntries.every((e) => e.visibility === "actor-private"));
     const summaryEntry = covertEntries[covertEntries.length - 1];
     await assertSucceeds(

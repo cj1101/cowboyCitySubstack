@@ -507,7 +507,19 @@ function covertNoteHandler(ctx: HandlerContext): ResolutionPlan {
     schemaVersion: 2,
     kind: "covert-note",
     subjectCityId: cityId,
+    collectorCityId: cityId,
     collectorUid: ctx.action.actor.memberId,
+    // The means contract (Phase 1 rules posture, CJ's means doctrine):
+    // an intel record exists only with a logged means behind it. The
+    // collection action itself is this fixture's means — the same
+    // methodRef shape the Phase 1 rules tests use for survey intel.
+    method: {
+      kindLabel: "covert-note",
+      methodRef:
+        typeof params.methodRef === "string" && params.methodRef.length > 0
+          ? params.methodRef
+          : `sim_actions:${ctx.action.actionId}`,
+    },
     collectionResolutionId: ctx.resolutionId,
     summary: typeof params.note === "string" ? params.note : "covert note",
     status: "held",
