@@ -156,6 +156,12 @@ export default function SettingsPage() {
           </div>
           <Link href="/drafts" className="text-accent-gold text-sm block">Drafts and scheduled posts</Link>
         </div>
+        <div className="border-t border-primary-brown pt-4 space-y-3">
+          <h2 className="text-xl font-bold text-accent-gold">Your sim records</h2>
+          <p className="text-sm text-text-muted">Your bug reports and your private assessments of published claims.</p>
+          <Link href="/reports" className="text-accent-gold text-sm block">Your reports</Link>
+          <Link href="/settings/trust" className="text-accent-gold text-sm block">Your assessments of published claims</Link>
+        </div>
       </div>
     </div>
   );

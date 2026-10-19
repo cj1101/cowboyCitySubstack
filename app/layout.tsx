@@ -4,6 +4,7 @@ import { AuthProvider } from "@/components/auth/AuthProvider";
 import { FactionProvider } from "@/components/factions/FactionContext";
 import { MembershipGate } from "@/components/auth/MembershipGate";
 import { NavBar } from "@/components/layout/NavBar";
+import { BugReportChrome } from "@/components/bugs/BugReportChrome";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -31,10 +32,12 @@ export default function RootLayout({
       <body className="antialiased" style={{ backgroundColor: "#f7f6f3", color: "#3f3d39" }}>
         <AuthProvider>
           <FactionProvider>
-            <NavBar />
-            <main className="app-main">
-              <MembershipGate>{children}</MembershipGate>
-            </main>
+            <BugReportChrome>
+              <NavBar />
+              <main className="app-main">
+                <MembershipGate>{children}</MembershipGate>
+              </main>
+            </BugReportChrome>
           </FactionProvider>
         </AuthProvider>
       </body>
