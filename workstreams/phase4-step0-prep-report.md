@@ -165,3 +165,106 @@ pure):**
 itself remains CI's venue (sandbox cannot run the emulator): Theo to push
 `4ec7e90` + this report commit onto PR #25's branch and re-read the Sim
 core job.
+
+## Fix round 2 — PR #25 Sim core failure, second exposure (Rafe, 2026-10-19)
+
+**CI result that triggered this round:** on head `f2e1360` (the fix-round-1
+push), required build GREEN, Rules GREEN, Sim core FAILED on exactly one
+assertion — S0-F01 (e2e), `tests/sim-core.test.ts:1659`: "orderbook action
+committed", actual `false`, expected `true`. S0-F02 pure AND e2e passed in
+the same run (fix round 1 verified in CI). The full log is preserved at
+`~/workspace/cowboy-city/pr25-simcore-log-r2.txt`. This is the sequential-
+exposure pattern the round-1 report anticipated: the suite aborts at the
+first failure, so S0-F01/F-07/ORDER had never executed in CI before this
+run. S0-F07 and S0-ORDER still have not — if a later fixture surfaces in
+the next run, it will be the same pattern, not a new regression class.
+
+**Verdict: ENGINE bug — in Step 0's own F-01 plumbing. The test and the
+fixture are correct; no assertion changed.**
+
+**Root cause, proven in pure logic before any fix was attempted** (harness
+mirroring the two production snapshot paths over one in-memory store —
+the suite's own seeded values: ob1 resting/100, ob2 resting/250, ob3
+built/999, action citing only ob1):
+
+1. Dispatcher path (`snapshotForAction` → `materializeSnapshot`): the
+   plan resolves exactly as the F-01 contract requires — the query binds
+   the full resting set despite the subset citation, changes
+   `fixtureRestingOrders: null → 2`, `fixtureOrderBookRubars: null → 350`.
+   The test's preview/confirm therefore stored a good plan; `previewPlanHash`
+   is sound. (This is also why the failure was silent: nothing about the
+   preview looks wrong.)
+2. Committer path (`commitResolution` step 4): the in-transaction
+   recompute runs over `snapshotFromDocs(docs, now)`, which hardcoded
+   `queries: []`. The orderbook handler looks up its materialized record
+   in `ctx.snapshot.queries`, finds none, and returns the
+   `READ_PLAN_MISSING` rejection plan. Recomputed planHash ≠ the
+   dispatcher's planHash, and the committer's step-4 comparison returns
+   `{ status: "stale-preview" }` — a *spurious* stale: the world never
+   moved. The dispatcher files the action under `actionsStale`, stores
+   a fresh (identical) preview, and the action never commits. Hence
+   `actionsCommitted` excludes it, deterministically, on every wake.
+3. The carrying contract existed and was documented: `CommitRequest.
+   queryRecords` states the records ride the request so the transaction
+   can re-verify the query read "exactly like a doc read", and the
+   dispatcher passes `queryRecords: snapshot.queries`. Only the last
+   hop was missing — `commitResolution` never handed them to the
+   snapshot its recompute runs over. No query-plan action of any kind
+   could ever have committed; FIXTURE-ORDERBOOK is simply the first
+   query-plan action kind in the system, which is why Phase 2 (doc-path
+   read plans only) never exposed it.
+
+**The fix** (commit `97d7c6e`, engine only):
+
+- `lib/sim/resolver.ts` — `snapshotFromDocs(docs, now, queries = [])`
+  now takes the plan's `SnapshotQueryRecord[]` and passes them to
+  `assembleSnapshot`. Comment records the contract: result DOCS are the
+  transaction's own re-reads; the records are what let the recompute
+  find its materialized set.
+- `lib/sim/committer.ts` — step 4 builds the tx snapshot as
+  `snapshotFromDocs(docs, now, req.queryRecords ?? [])`.
+- `lib/sim/readers.ts` — header comment corrected: it claimed the
+  committer re-executes queries in-transaction via
+  `buildFirestoreQuery`; it never did (that is the PR-F residual), and
+  the stale claim is part of how the missing hop read as covered.
+
+**Why parity is safe, not just hopeful:** with the records re-attached,
+the recompute handler derives count/total from `snapshot.docs` — the
+transaction's re-reads — keyed by the recorded `resultPaths`. Any
+content change to a result doc since materialization is caught twice:
+the head comparison (`expectedStateHeads` vs tx heads — every result
+doc rides `snapshotPaths`) and the planHash comparison itself. A result
+doc deleted since materialization reads back `null` and trips the same
+checks. What remains uncaught in-transaction is only a *new* doc
+joining the result set between the dispatcher's materialization and
+the commit — the already-documented PR-F residual (this pinned SDK's
+Transaction has no typed query read), unchanged by this fix and not
+worsened by it: membership changes between **preview and wake** are
+caught by the dispatcher's own planHash comparison over a fresh
+materialization, which is exactly the S0-F01 e2e's second half, and
+that path never reaches the committer. F-02's null-honesty and the
+"citations never source a money/authority read" rule are untouched —
+the handler, the read-plan hook, and the seeds are all unchanged.
+
+**Evidence:**
+
+- Pure harness (pre-fix tree): dispatcher plan resolved with planHash
+  `832092fc…`; committer-shaped recompute rejected `READ_PLAN_MISSING`,
+  planHash `905191e4…`, parity false. Failure reproduced without the
+  emulator, matching CI's symptom chain end for end.
+- Pure harness (post-fix tree): committer recompute resolves with
+  planHash `832092fc…` — byte-identical to the dispatcher plan.
+- New suite fixture (commit `91c9bb9`): "S0-F01 pure" pins this
+  contract inside `tests/sim-core.test.ts` itself — parity with the
+  records re-attached, `READ_PLAN_MISSING` without — so a future
+  refactor that drops the records fails loudly at this fixture instead
+  of surfacing as a silently-never-committing wake. All additive; no
+  existing assertion touched.
+- `tsc --noEmit` clean; scoped ESLint clean over the four touched
+  files. Full `npm run build` was green pre-round and the engine delta
+  is three files; the e2e re-proof is the Sim core CI job on the
+  updated PR (the sandbox cannot run the emulator — standing finding).
+
+**Commits this round (local, author Rafe — Theo pushes):**
+`97d7c6e` engine fix; `91c9bb9` suite pure fixture; this report section.
+The branch tip for the push is the report commit following this section.
