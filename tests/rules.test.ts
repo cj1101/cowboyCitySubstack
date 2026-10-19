@@ -1402,8 +1402,23 @@ async function main() {
     // record — solely as the undo engine's restore path. (Was
     // assertFails under the brief §9 never-delete aside; N-1 +
     // brief §8.6 + the P2-G8 matrix govern. Publications above stay
-    // never-delete.)
-    await assertSucceeds(deleteDoc(doc(committerFs, "sim_intel_records", "intel1")));
+    // never-delete.) Exercised on a throwaway record: intel1 above is
+    // shared fixture state for later sections and must survive.
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_intel_records", "intelUndoRestore"), {
+        collectorUid: "ownerA",
+        collectorCityId: "cityA",
+        targetCityId: "cityB",
+        targetBusinessId: null,
+        method: { kindLabel: "survey", methodRef: "sim_actions:test" },
+        collectionResolutionId: "test-resolution",
+        collectedAtSeq: 2,
+        coverage: null,
+        reliability: null,
+        findings: [],
+      })
+    );
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_intel_records", "intelUndoRestore")));
     await assertFails(deleteDoc(doc(fabricWorker.firestore(), "sim_cities", "cityA")));
   }
   console.log("ok sim structural refusal (P1-G1)");

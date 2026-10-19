@@ -1267,6 +1267,7 @@ async function main() {
     const covertEntries = await entriesOf(covert.actionId);
     assert.ok(covertEntries.every((e) => e.visibility === "actor-private"));
     const summaryEntry = covertEntries[covertEntries.length - 1];
+    console.log("DIAG4 summary entry:", JSON.stringify({ seq: summaryEntry?.seq, actor: summaryEntry?.actor, visibility: summaryEntry?.visibility, docId: summaryEntry ? logEntryDocId(summaryEntry.seq as number) : null }));
     await assertSucceeds(
       getDoc(doc(ownerA.firestore(), "sim_log_entries", logEntryDocId(summaryEntry.seq as number)))
     );
