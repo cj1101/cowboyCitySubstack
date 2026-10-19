@@ -80,3 +80,88 @@ Verified against the merged tree before building: dispatcher order is **actions 
 - Expected CI: required `Install · Typecheck · Lint · Build` + non-required `Rules tests` + `Sim core tests` (the S0 sections run there). **Do not** add either emulator job to branch protection in this PR.
 - Merge on green per standing delegation. **Module 0 starts only after this PR is green in CI** (P4-K17).
 - Koda noting items riding this PR's review, per standing pattern: systems-spec v2 + Banking Rider 1 acceptance (already signed by Theo), P2-K16.
+
+---
+
+## Fix round 1 — PR #25 Sim core failure (Rafe, 2026-10-19)
+
+**CI result that triggered this round:** required build GREEN, Rules GREEN,
+Sim core FAILED on exactly one assertion — S0-F02 (e2e),
+`tests/sim-core.test.ts:1604`: "second void effect on the same doc landed
+too (F-02)", actual `null`, expected `1`. The S0-F02 pure harness passed in
+the same run and the entire Phase 2 battery passed.
+
+**Verdict: TEST bug. The engine is correct; no engine code changed.**
+
+**Root cause, derived from the scenario's own numbers (CK7 standard):**
+
+1. The e2e fixture's second void effect was `stats.culture` delta +1, and
+   the assertion was `cityStats("cityA").culture === cultureBefore + 1`
+   where `cultureBefore` was read from the live city doc and cast
+   `as number`.
+2. Under the landed genesis template (`lib/sim/template.ts`, decision
+   K-3 — Vera-agreed), all eight allocatable indices are **null** at
+   genesis ("present keys, no invented value") and stay null until the
+   Phase 4 allocation commit; only the bookkeeping counts
+   (households/housingUnits/treasuryRubars) are numeric zeroes. So
+   `cultureBefore` was `null`, and the assertion's "expected 1" was the
+   JavaScript artifact `null + 1 === 1` — not a scenario number.
+3. `resolveVoiding` applies a void stat-delta only when the field's
+   current value is a number: `if (typeof before !== "number") continue;`.
+   A delta against an unallocated index is skipped, and — critically for
+   the F-02 contract — the skipped effect produces **no change entry**, so
+   the Log claims exactly what state holds. This skip is pre-existing
+   Phase 2 semantics (verified verbatim in the resolver at `8239716`,
+   before Step 0 touched the function); the ripening path's posture is
+   the same rule stated louder (it throws on a non-numeric field). It is
+   the null-honesty rule: the engine never invents an index value. Making
+   the engine "fix" this (treat null as 0) would fabricate an allocation
+   CJ's even-start design explicitly defers to the owner.
+4. Therefore the fixture chose a field that cannot legally move
+   pre-allocation. Both halves of the e2e's F-02 claim were unpassable
+   under any correct engine: the value assertion (above) and the
+   changes-list assertion (`["stats.treasuryRubars", "stats.culture"]` —
+   a skipped effect logs no change).
+
+**Local evidence (pure tsx harness against a genesis-shaped snapshot —
+stats exactly `templateStats()`, run in the sandbox where the resolver is
+pure):**
+
+- Case A — the failing fixture's exact effects (treasury +30, culture +1):
+  folded write = one write for `sim_cities/cityA`, treasury 0→30, culture
+  still `null`; changes = `[["stats.treasuryRubars", 0, 30]]` only. The
+  fold (the actual Step 0 change) works; the culture effect is skipped by
+  the rule above.
+- Case B — the fixed effects (treasury +30, households +1): folded write
+  has treasury 30 **and** households 0→1; changes =
+  `[["stats.treasuryRubars", 0, 30], ["stats.households", 0, 1]]`, in
+  order. Two effects, one doc, both land, Log matches state — the F-02
+  contract, exercised against fields that can move at genesis.
+
+**The fix (commit `4ec7e90`, tests only):**
+
+- Second void effect retargeted `stats.culture +1` → `stats.households +1`
+  (true bookkeeping zero, numeric from genesis, same city doc — the
+  two-effects-one-doc claim is preserved in full; the *same-field*
+  chaining case remains covered by the S0-F02 pure fixture, treasury
+  30+12 chained off a numeric snapshot).
+- `cultureBefore` capture replaced by `householdsBefore`, with a new
+  guard assertion that it is a number (fails loudly if the template
+  posture ever changes, instead of silently re-entering null arithmetic).
+- Value assertion: `households === householdsBefore + 1` (households is
+  read dynamically; no other suite section reads `stats.households`, so
+  the +1 perturbs nothing downstream).
+- Changes-list assertion updated to
+  `["stats.treasuryRubars", "stats.households"]`.
+- One assertion **added** (strengthening, not weakening): after the
+  voiding, `stats.culture` is still `null` — pinning the semantics that
+  caused the original failure, so a future engine change that starts
+  inventing index values fails this suite.
+- The e2e block comment now records why an index field cannot be used
+  here, so the fixture is not "fixed back" later.
+
+**No assertion was weakened; no engine file was touched.** Local checks:
+`tsc --noEmit` clean, ESLint over `tests/sim-core.test.ts` clean. The e2e
+itself remains CI's venue (sandbox cannot run the emulator): Theo to push
+`4ec7e90` + this report commit onto PR #25's branch and re-read the Sim
+core job.
