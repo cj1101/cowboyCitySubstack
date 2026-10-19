@@ -49,6 +49,8 @@ export interface DashboardCoreData {
   asOfSeq: number | null;
   /** sim_world/current's lastCommittedSeq; null pre-genesis. */
   worldSeq: number | null;
+  /** sim_world/current's sharedCityId (the §5.3 chain's step 3); null pre-genesis. */
+  sharedCityId: string | null;
   snapshot: Record<string, unknown> | null;
   generatedByResolutionId: string | null;
   cityCards: CityCard[];
@@ -131,12 +133,15 @@ export async function loadDashboardCore(db: Firestore): Promise<DashboardCoreDat
   ]);
   const worldSeq =
     typeof world?.lastCommittedSeq === "number" ? world.lastCommittedSeq : null;
+  const sharedCityId =
+    typeof world?.sharedCityId === "string" ? world.sharedCityId : null;
 
   if (snapshot) {
     return {
       freshness: snapshotIsCurrent(snapshot, world) ? "current" : "stale",
       asOfSeq: typeof snapshot.asOfSeq === "number" ? snapshot.asOfSeq : null,
       worldSeq,
+      sharedCityId,
       snapshot,
       generatedByResolutionId:
         typeof snapshot.generatedByResolutionId === "string"
@@ -173,6 +178,7 @@ export async function loadDashboardCore(db: Firestore): Promise<DashboardCoreDat
     freshness: "missing",
     asOfSeq: null,
     worldSeq,
+    sharedCityId,
     snapshot: null,
     generatedByResolutionId: null,
     cityCards: await fallbackCards(db, recentPublic),
