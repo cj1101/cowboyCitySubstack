@@ -64,6 +64,26 @@ export async function addCityPin(
   return ref.id;
 }
 
+/**
+ * Update a city pin in place — move (nx/ny) and edit (title, note,
+ * category, wiki links) on the SAME doc. Added by the Phase 3 entities
+ * module per geography-maps-design.md conflict C-2: realm pins always
+ * had `updateRealmPin`; city pins had add/delete only, and a move via
+ * delete+recreate would change the pin id and sever every
+ * `linkedPinId` pointing at it. The rules already permit the update
+ * (member + faction owner/admin, title/coordinate fences evaluate
+ * against the post-update doc, so a coordinates-only patch passes).
+ */
+export async function updateCityPin(
+  cityId: string,
+  pinId: string,
+  patch: Partial<Omit<MapPin, "id">>
+): Promise<void> {
+  const data = realmPinFields(patch);
+  if (Object.keys(data).length === 0) throw new Error("Nothing to save on that pin.");
+  await updateDoc(doc(getClientDb(), "factions", cityId, "pins", pinId), data);
+}
+
 export async function deleteCityPin(cityId: string, pinId: string): Promise<void> {
   await deleteDoc(doc(getClientDb(), "factions", cityId, "pins", pinId));
 }
