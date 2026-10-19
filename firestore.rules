@@ -1020,11 +1020,19 @@ service cloud.firestore {
     // the surviving rules text is purged by the spec owners — P2-D1.)
 
     match /sim_log_entries/{entryId} {
-      allow read: if isViewer()
-        && (resource.data.get('visibility', 'public') == 'public'
-            || isAdmin()
-            || (isFullMember()
-                && resource.data.get('actor', {}).get('memberId', '') == request.auth.uid));
+      // The fabric branch is load-bearing, not a convenience: the undo
+      // engine's restore transaction must READ the target's entries
+      // (chain verification, brief §8.5) before it may delete them —
+      // including actor-private ones, whose whole point is that no
+      // member surface can read them. Fabric identities are the
+      // trusted service layer (same posture as sim_resolutions §9.3);
+      // member/guest visibility semantics are unchanged.
+      allow read: if isFabricService()
+        || (isViewer()
+          && (resource.data.get('visibility', 'public') == 'public'
+              || isAdmin()
+              || (isFullMember()
+                  && resource.data.get('actor', {}).get('memberId', '') == request.auth.uid)));
       allow create: if isFabricCommitter() && validNewLogEntry(entryId);
       allow update: if false;
       allow delete: if isFabricCommitter();
@@ -1167,7 +1175,12 @@ service cloud.firestore {
     }
 
     match /sim_intel_records/{intelId} {
-      allow read: if isAdmin()
+      // Fabric read: the undo restore transaction re-reads every doc
+      // in the target's write set (brief §8.5) — an intel record in
+      // the set must be readable by the committer or no covert
+      // resolution could ever be undone (P2-K16).
+      allow read: if isFabricService()
+        || isAdmin()
         || (isFullMember() && resource.data.collectorUid == request.auth.uid)
         || (isFullMember() && ownsListedCity(resource.data.collectorCityId));
       // No ref, no record: a logged means is a creation requirement, in rules.

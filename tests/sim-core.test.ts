@@ -1267,19 +1267,6 @@ async function main() {
     const covertEntries = await entriesOf(covert.actionId);
     assert.ok(covertEntries.every((e) => e.visibility === "actor-private"));
     const summaryEntry = covertEntries[covertEntries.length - 1];
-    console.log("DIAG4 summary entry:", JSON.stringify({ seq: summaryEntry?.seq, actor: summaryEntry?.actor, visibility: summaryEntry?.visibility, docId: summaryEntry ? logEntryDocId(summaryEntry.seq as number) : null }));
-    for (const [label, path] of [
-      ["userDoc", "users/ownerA"],
-      ["publicEntry", `sim_log_entries/${logEntryDocId(4)}`],
-      ["covertEntry", `sim_log_entries/${logEntryDocId(summaryEntry.seq as number)}`],
-    ] as const) {
-      try {
-        const snap = await getDoc(doc(ownerA.firestore(), path.split("/")[0], path.split("/")[1]));
-        console.log(`DIAG5 ${label}: OK exists=${snap.exists()}`);
-      } catch (e) {
-        console.log(`DIAG5 ${label}: FAIL ${(e as Error).message.slice(0, 120)}`);
-      }
-    }
     await assertSucceeds(
       getDoc(doc(ownerA.firestore(), "sim_log_entries", logEntryDocId(summaryEntry.seq as number)))
     );
