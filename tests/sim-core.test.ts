@@ -1869,7 +1869,28 @@ async function main() {
   // the phases ever swap back, the undo erases the target and this
   // section fails. The terminal snapshot refresh runs after both.
   {
-    const treasuryB0 = await treasury("cityB");
+    // Clamp derivation (fix round 3, PR #25): cityB's treasury entering
+    // this section is 530, and fixture_adjust writes are absolute,
+    // clamped writes (FIXTURE-ADJUST handler: after = clamp(before +
+    // delta, 0, 1000)) — the +500/+5 below would saturate at the
+    // ceiling (530 -> clamp(1030) = 1000 -> clamp(1005) = 1000), so a
+    // naive base + 505 expectation is unreachable AND the saturated
+    // value cannot discriminate "both stand" from "a1 alone stands".
+    // De-saturate to the clamp floor first: from base 0 the sequence
+    // resolves with no clamp interference (500, then 505 — both under
+    // the ceiling), and the closing value discriminates all three
+    // outcomes — both stand: 505; undo executed (a1 erased): 0 or 5;
+    // dependent missing: 500. Same lesson as the CK6/CK7 fix rounds.
+    let treasuryB0 = await treasury("cityB");
+    if (treasuryB0 > 0) {
+      await submitConfirmWake(ownerB, "ownerB", "fixture_adjust", {
+        cityId: "cityB",
+        field: "stats.treasuryRubars",
+        delta: -treasuryB0,
+      }, { registry: fixtureRegistry });
+      treasuryB0 = await treasury("cityB");
+      assert.equal(treasuryB0, 0, "the de-saturating adjust lands exactly on the clamp floor");
+    }
     const a1 = await submitConfirmWake(ownerB, "ownerB", "fixture_adjust", {
       cityId: "cityB",
       field: "stats.treasuryRubars",
@@ -1891,6 +1912,8 @@ async function main() {
       "refused",
       "the undo is refused BECAUSE the dependent landed first — actions before ops (brief §1.3, P4-K24)"
     );
+    // treasuryB0 is 0 here (de-saturated above), so this is 505 with no
+    // clamp step in between — see the derivation at the section top.
     assert.equal(await treasury("cityB"), treasuryB0 + 505, "both actions stand; nothing was erased");
     const snapshotDocNow = await adminDoc("sim_dashboard_snapshots/current");
     assert.equal(
