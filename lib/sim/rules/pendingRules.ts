@@ -30,7 +30,7 @@ import {
   type SimSnapshot,
 } from "../state";
 import { deriveDelay, hasLiveConnection, type DelayDerivation } from "./arithmetic";
-import { fieldChange, planWrite } from "./planHelpers";
+import { fieldChange, planWrite, plannedDoc } from "./planHelpers";
 
 export class PendingSpecError extends Error {
   code = "PENDING_SPEC_INVALID";
@@ -373,13 +373,16 @@ export function applyRipeningEffect(
     const path = `sim_cities/${effect.cityId}`;
     const city = snapshotDoc(snapshot, path);
     if (!city) throw new RipeningPreparationError(`ripening target city doc missing: ${path}`);
-    const before = docField(city, effect.field);
+    // Compose against the PLANNED doc (F-02): a second effect on the
+    // same doc in this plan chains off the first effect's after-state,
+    // so the folded write and the changes[] agree.
+    const current = plannedDoc(plan, snapshot, path) ?? city;
+    const before = docField(current, effect.field);
     if (typeof before !== "number") {
       throw new RipeningPreparationError(`ripening field is not numeric: ${effect.field}`);
     }
-    const afterDoc = withDocField(city, effect.field, before + effect.delta);
+    const afterDoc = withDocField(current, effect.field, before + effect.delta);
     planWrite(plan, snapshot, path, afterDoc, "state", [effect.field]);
-    // Fold further writes to the same doc into the same plan write.
     changes.push(
       fieldChange(effect.field, before, before + effect.delta, `ripening payloadSpec effect (${pending.pendingId as string})`)
     );
@@ -391,13 +394,15 @@ export function applyRipeningEffect(
     if (typeof spec.fundPath === "string" && typeof spec.fundDisbursementRubars === "number") {
       const fund = snapshotDoc(snapshot, spec.fundPath);
       if (fund) {
-        const disbursed = (fund.disbursedRubars as number) + spec.fundDisbursementRubars;
-        const remaining = (fund.remainingRubars as number) - spec.fundDisbursementRubars;
+        // Planned-doc read (F-02), as in applyStatDelta above.
+        const fundCurrent = plannedDoc(plan, snapshot, spec.fundPath) ?? fund;
+        const disbursed = (fundCurrent.disbursedRubars as number) + spec.fundDisbursementRubars;
+        const remaining = (fundCurrent.remainingRubars as number) - spec.fundDisbursementRubars;
         planWrite(
           plan,
           snapshot,
           spec.fundPath,
-          { ...fund, disbursedRubars: disbursed, remainingRubars: remaining },
+          { ...fundCurrent, disbursedRubars: disbursed, remainingRubars: remaining },
           "state",
           ["disbursedRubars", "remainingRubars"]
         );
@@ -406,8 +411,8 @@ export function applyRipeningEffect(
         // every fund's disbursements in the city into one sequence.
         const fundFieldBase = spec.fundPath.split("/").slice(2).join("/");
         changes.push(
-          fieldChange(`${fundFieldBase}.disbursedRubars`, fund.disbursedRubars, disbursed, "fund disbursement at ripening (R-33)"),
-          fieldChange(`${fundFieldBase}.remainingRubars`, fund.remainingRubars, remaining, "fund disbursement at ripening (R-33)")
+          fieldChange(`${fundFieldBase}.disbursedRubars`, fundCurrent.disbursedRubars, disbursed, "fund disbursement at ripening (R-33)"),
+          fieldChange(`${fundFieldBase}.remainingRubars`, fundCurrent.remainingRubars, remaining, "fund disbursement at ripening (R-33)")
         );
       }
     }

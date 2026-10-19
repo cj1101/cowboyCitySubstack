@@ -340,13 +340,16 @@ export async function commitResolution(
       plan = writeSetTooLargePlan(req, txAction as SimAction);
     }
 
-    // §5.6/§6.3 plan guards, re-run on the final plan.
+    // §5.6/§6.3 plan guards, re-run on the final plan — including the
+    // F-02 changes↔writes reconciliation against this transaction's
+    // snapshot (Phase 4 Step 0).
     try {
       validatePlan(plan, {
         baselineRegistry: deps.baselineRegistry,
         covertEntriesAllowed:
           plan.descriptorId !== null &&
           RULE_DESCRIPTORS[plan.descriptorId]?.visibility === "covert",
+        snapshot: txSnapshot,
       });
     } catch (error) {
       if (error instanceof PlanValidationError) {
