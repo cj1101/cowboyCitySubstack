@@ -1,0 +1,202 @@
+================================================================================
+BUG REPORTING — RULES + INDEX SNIPPETS FOR THE PHASE 3 INTEGRATION
+Author: June (Muse UX) · Source of truth: workstreams/bug-reporting-and-cd-design.md
+(§2.4, §3.4, §3.5, Appendix B) and phase3-implementation-brief.md §11.4.
+
+FOR THE BUILD LEAD — this file is a snippet, not a patch. Paste each block into
+the landed files on the Phase 3 integration branch (current master), in the
+places named. Vocabulary targets master's landed helpers (isSignedIn(),
+isViewer(), isFullMember(), isAdmin()). NOTHING in this module edits
+firestore.rules / storage.rules / firestore.indexes.json directly.
+
+Rulings carried: filing is MEMBERS ONLY [CJ]; report data is NEVER mirrored to
+GitHub [CJ]; notifications per report are exactly the two events in design
+§3.5. QA matrix: QA v2 §19 / RPT-a..j and the Phase 3 gate P3-G9/P3-G12.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1) firestore.rules — NEW BLOCK: bug_reports
+   Paste inside the top-level `match /databases/{database}/documents { ... }`,
+   beside the other Phase 3 additive blocks (brief §11).
+--------------------------------------------------------------------------------
+
+    // Bug reports (Phase 3, per bug-reporting design Appendix B): site-
+    // operations data, not world data. Members file [CJ: members only];
+    // a report is readable by its reporter and by sheriffs/admins only;
+    // it never appears in any feed or member export. The field allowlist
+    // + caps below are the §2.4 privacy boundary in rules form: no field
+    // outside this list can be written by any client, so no private sim
+    // data or other member's content can be smuggled into a record.
+    function validBugReportCreate() {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+          'tryingToDo', 'whatHappened', 'expected', 'severity', 'kind',
+          'screenshotPath',
+          'route', 'surface', 'entityRef', 'buildId', 'asOfSeq',
+          'browserFamily', 'osFamily', 'viewport',
+          'reporterUid', 'reporterName', 'clientAt',
+          'status', 'searchTokens', 'createdAt'
+        ])
+        && d.reporterUid == request.auth.uid
+        && d.status == 'new'
+        && d.tryingToDo is string && d.tryingToDo.size() > 0 && d.tryingToDo.size() <= 200
+        && d.whatHappened is string && d.whatHappened.size() > 0 && d.whatHappened.size() <= 4000
+        && (!('expected' in d) || (d.expected is string && d.expected.size() <= 2000))
+        && d.severity in ['stops-me', 'its-wrong', 'annoying', 'tiny']
+        && d.kind in ['looks-broken', 'number-wrong', 'didnt-save', 'wont-load', 'text', 'other', 'not-sure']
+        && (!('screenshotPath' in d) || (d.screenshotPath is string
+            && d.screenshotPath.matches('bug-reports/' + request.auth.uid + '/.*')))
+        && (!('route' in d) || (d.route is string && d.route.size() <= 300))
+        && (!('surface' in d) || d.surface in ['dashboard', 'city', 'log', 'forum', 'maps', 'market', 'wiki', 'other'])
+        && (!('entityRef' in d) || (d.entityRef is string && d.entityRef.size() <= 120))
+        && (!('buildId' in d) || (d.buildId is string && d.buildId.size() <= 80))
+        && (!('asOfSeq' in d) || (d.asOfSeq is int && d.asOfSeq >= 0))
+        && (!('browserFamily' in d) || (d.browserFamily is string && d.browserFamily.size() <= 40))
+        && (!('osFamily' in d) || (d.osFamily is string && d.osFamily.size() <= 40))
+        && (!('viewport' in d) || (d.viewport is map
+            && d.viewport.keys().hasOnly(['w', 'h'])
+            && d.viewport.w is int && d.viewport.h is int))
+        && d.reporterName is string && d.reporterName.size() > 0 && d.reporterName.size() <= 100
+        && (!('clientAt' in d) || d.clientAt is timestamp)
+        && d.searchTokens is list && d.searchTokens.size() <= 80
+        && d.createdAt == request.time;
+    }
+
+    // Reporter edit (design Appendix B / RPT-c): typed fields ONLY, and
+    // only while the report is `new` or `needs-info`. The one status move
+    // a reporter may make is answering a needs-info question, which
+    // returns the report to `new` (lib/bugs/reports.ts updateReporterReport).
+    // screenshotPath, context, identity, triage and fix-link fields are
+    // not reporter-writable after create.
+    function validBugReportReporterUpdate() {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      return resource.data.reporterUid == request.auth.uid
+        && resource.data.status in ['new', 'needs-info']
+        && affected.hasOnly(['tryingToDo', 'whatHappened', 'expected', 'severity', 'kind', 'searchTokens', 'status'])
+        && (!affected.hasAny(['status'])
+            || (resource.data.status == 'needs-info' && request.resource.data.status == 'new'))
+        && request.resource.data.tryingToDo is string
+        && request.resource.data.tryingToDo.size() > 0 && request.resource.data.tryingToDo.size() <= 200
+        && request.resource.data.whatHappened is string
+        && request.resource.data.whatHappened.size() > 0 && request.resource.data.whatHappened.size() <= 4000
+        && (!('expected' in request.resource.data)
+            || (request.resource.data.expected is string && request.resource.data.expected.size() <= 2000))
+        && request.resource.data.severity in ['stops-me', 'its-wrong', 'annoying', 'tiny']
+        && request.resource.data.kind in ['looks-broken', 'number-wrong', 'didnt-save', 'wont-load', 'text', 'other', 'not-sure']
+        && request.resource.data.searchTokens is list && request.resource.data.searchTokens.size() <= 80;
+    }
+
+    // Sheriff triage write (design §3.4 / RPT-c): triage fields, fix-link
+    // fields, severity re-grade, and the mirrored canonicalStatus on
+    // duplicates (lib/bugs/types.ts — RPT-h needs it on the record).
+    // Reporter identity, typed text, context and createdAt are immutable
+    // here too — a sheriff edits the triage layer, never the report.
+    function validBugReportTriageUpdate() {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      return affected.hasOnly([
+          'status', 'triageNote', 'duplicateOf', 'canonicalStatus',
+          'severity', 'fixBranch', 'fixPrUrl', 'previewUrl',
+          'shippedInBuild', 'updatedAt'
+        ])
+        && request.resource.data.status in ['new', 'seen', 'needs-info', 'accepted',
+            'fixed-in-preview', 'shipped', 'duplicate', 'not-a-bug', 'wont-fix']
+        && (!('triageNote' in request.resource.data)
+            || (request.resource.data.triageNote is string && request.resource.data.triageNote.size() <= 2000))
+        && (!('duplicateOf' in request.resource.data)
+            || (request.resource.data.duplicateOf is string && request.resource.data.duplicateOf.size() <= 128))
+        && (!('canonicalStatus' in request.resource.data)
+            || request.resource.data.canonicalStatus in ['new', 'seen', 'needs-info', 'accepted',
+                'fixed-in-preview', 'shipped', 'duplicate', 'not-a-bug', 'wont-fix'])
+        && (!('severity' in request.resource.data)
+            || request.resource.data.severity in ['stops-me', 'its-wrong', 'annoying', 'tiny'])
+        && (!('fixBranch' in request.resource.data)
+            || (request.resource.data.fixBranch is string && request.resource.data.fixBranch.size() <= 200))
+        && (!('fixPrUrl' in request.resource.data)
+            || (request.resource.data.fixPrUrl is string && request.resource.data.fixPrUrl.size() <= 500))
+        && (!('previewUrl' in request.resource.data)
+            || (request.resource.data.previewUrl is string && request.resource.data.previewUrl.size() <= 500))
+        && (!('shippedInBuild' in request.resource.data)
+            || (request.resource.data.shippedInBuild is string && request.resource.data.shippedInBuild.size() <= 80))
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    match /bug_reports/{reportId} {
+      // Read: the reporter (their own loop-closure view) and sheriffs.
+      // A guest reads nothing; a member reads nobody else's report —
+      // including a canonical report linked from their duplicate (RPT-h:
+      // they see its mirrored canonicalStatus field, never the record).
+      allow read: if isAdmin()
+        || (isFullMember() && resource.data.reporterUid == request.auth.uid);
+      // Create: full members only — guests may NOT file [CJ ruling].
+      allow create: if isFullMember() && validBugReportCreate();
+      allow update: if (isFullMember() && validBugReportReporterUpdate())
+        || (isAdmin() && validBugReportTriageUpdate());
+      // Closed reports are kept; deletion is an Admin-SDK act, never a
+      // client one (design Appendix B).
+      allow delete: if false;
+    }
+
+
+--------------------------------------------------------------------------------
+2) firestore.rules — ONE-LINE AMENDMENT: notifications type allowlist
+   In match /notifications/{notificationId}, allow create: add 'report' to
+   the type list so the two design §3.5 events can be written by notify().
+
+     ... request.resource.data.type in ['mention', 'reference', 'reply',
+           'dm', 'approval', 'treaty', 'reaction', 'comment', 'report'] && ...
+
+   Companion code change (Build Lead, lib/types.ts): add "report" to the
+   NotificationType union. lib/bugs/reports.ts already sends type "report"
+   with kind "needs-info" | "shipped" and href "/reports" (and casts until
+   the union lands).
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+3) storage.rules — NEW BLOCK: bug report screenshots
+   Design §2.2: a new Storage family beside posts/ / factions/ / users/.
+   Reporter-picked images only; stored under bug-reports/{uid}/{reportId}/…
+   Readable by the owning reporter and sheriffs — nobody else, ever.
+
+    match /bug-reports/{uid}/{reportId}/{fileName} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+      allow write: if isFullMember()
+        && request.auth.uid == uid
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size <= 10 * 1024 * 1024;
+      allow delete: if isAdmin();
+    }
+
+   NOTE for the Build Lead: match the landed storage.rules helper set —
+   if it has no isFullMember()/isAdmin() under those names, translate to
+   its equivalents (the posture is the contract: owner-member write,
+   image-only, ≤10 MB, owner-or-admin read).
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+4) firestore.indexes.json — TWO composite indexes (design Appendix B)
+   Add to the "indexes" array:
+
+    {
+      "collectionGroup": "bug_reports",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "reporterUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bug_reports",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+
+   These serve lib/bugs/reports.ts listMyReports (Your Reports page) and
+   listReportsByStatus (Sheriff queue filters). The unfiltered triage list
+   is a single-field createdAt ordering and needs no composite.
+================================================================================

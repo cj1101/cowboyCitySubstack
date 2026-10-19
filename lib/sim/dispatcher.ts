@@ -12,6 +12,11 @@
  *      AFTER the actions it carried have committed, so an op's
  *      execution-time revalidation sees everything that landed in its
  *      wake (TC-U07). Processing an op never triggers a scan.
+ *   3. Terminal snapshot refresh (Phase 3 brief §3.2; the writer Phase
+ *      2's P2-D9 deferred): if the wake changed the world, run the
+ *      dashboard snapshot projection once and write it in its own
+ *      transaction. Failure-isolated — a failed refresh never fails a
+ *      resolution, and an empty wake writes nothing.
  *
  * The dispatcher itself performs no domain writes: action claim/preview
  * bookkeeping goes through the fabric identity's rules-bound updates;
@@ -46,6 +51,8 @@ import {
 import { CommitError, commitResolution, type CommitOutcome } from "./committer";
 import { scanRipeness, type ScanSummary } from "./pending";
 import { processUndoOperation } from "./undo";
+import { wakeChangedWorld } from "./snapshot";
+import { refreshSnapshotAfterWake } from "./snapshotRefresh";
 import type { BaselineRegistry } from "./baseline/registry";
 
 export function firestoreReader(db: Firestore): DocReader {
@@ -336,6 +343,14 @@ export async function runWake(
   for (const opDoc of opsSnap.docs) {
     await processUndoOperation(deps.committerDb, opDoc.id, { now: opts.now });
     summary.undoOpsProcessed += 1;
+  }
+
+  // Terminal snapshot refresh (Phase 3 brief §3.2): one projection per
+  // world-changing wake, in its own transaction, failure-isolated (the
+  // adapter never throws). An empty wake writes nothing — there is
+  // nothing new to project, and §0.1.1 forbids implying otherwise.
+  if (wakeChangedWorld(summary)) {
+    await refreshSnapshotAfterWake(deps, opts.now);
   }
 
   return summary;

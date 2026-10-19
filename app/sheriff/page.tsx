@@ -10,6 +10,7 @@ import { SheriffQueue } from "@/components/sheriff/SheriffQueue";
 import { PostModeration } from "@/components/sheriff/PostModeration";
 import { UserManagement } from "@/components/sheriff/UserManagement";
 import { FactionManagement } from "@/components/sheriff/FactionManagement";
+import { ReportsPanel } from "@/components/sheriff/ReportsPanel";
 
 export default function SheriffDashboardPage() {
   const { user, profile, loading } = useAuth();
@@ -95,6 +96,9 @@ export default function SheriffDashboardPage() {
           </p>
           <FactionManagement />
         </section>
+
+        {/* Bug reports triage + on-demand backup (Phase 3 brief §9). */}
+        <ReportsPanel />
       </div>
     </div>
   );

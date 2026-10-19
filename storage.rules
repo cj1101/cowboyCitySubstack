@@ -146,6 +146,23 @@ service firebase.storage {
       allow delete: if isMember();
     }
 
+    // Bug report screenshots (Phase 3 §11.4; bug-reporting design §2.2).
+    // Reporter-picked images only, under the reporter's own prefix.
+    // Readable by the owning reporter and sheriffs/admins — nobody else,
+    // ever. (The snippet's isFullMember() is translated to this file's
+    // landed member gate, isMember(): storage.rules carries no
+    // accessLevel fence; the strict members-only fence lives on the
+    // Firestore bug_reports record itself, and a screenshot object
+    // without a rules-valid report pointing at it is inert.)
+    match /bug-reports/{uid}/{reportId}/{fileName} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+      allow write: if isMember()
+        && request.auth.uid == uid
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size <= 10 * 1024 * 1024;
+      allow delete: if isAdmin();
+    }
+
     match /realm/{fileName} {
       allow get: if isSignedIn();
       allow list: if isAdmin();
