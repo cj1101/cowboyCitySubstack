@@ -682,7 +682,7 @@ service cloud.firestore {
       allow create: if isMember() &&
         request.resource.data.recipientUid is string &&
         request.resource.data.read == false &&
-        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval', 'treaty', 'reaction', 'comment'] &&
+        request.resource.data.type in ['mention', 'reference', 'reply', 'dm', 'approval', 'treaty', 'reaction', 'comment', 'report'] &&
         (!('kind' in request.resource.data) ||
           (request.resource.data.kind is string &&
             request.resource.data.kind.size() > 0 &&
@@ -1001,6 +1001,151 @@ service cloud.firestore {
       allow create, update: if isFullMember() && request.auth.uid == uid
         && validPrefs(request.resource.data);
       allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Trust assessments (Phase 3 brief §2.3/§11.3): per-user presentation
+    // state — a member's own marks on published claims, never a system
+    // verdict. Owner-written under the full-member fence; readable by
+    // the owner and by members the owner lists in sharedWith (that view
+    // only — it confers no other access). The fabric committer gets NO
+    // write here (TC-P12(v)): assessments are the member's own hand
+    // only, so no NPC or fabric path can mark a claim in anyone's view.
+    // A claim's publisher has no read of anyone's marks on it. Per-mark
+    // field validation (stance enum, note ≤ 500) is not expressible in
+    // rules (no map-value iteration); the caps below are, and the
+    // client (lib/trust in the exports/trust module) validates the rest.
+    function validAssessments(data) {
+      return data.marks is map && data.marks.size() <= 1000
+        && data.sharedWith is list && data.sharedWith.size() <= 50
+        && data.updatedAt is timestamp;
+    }
+
+    match /sim_trust_assessments/{uid} {
+      allow read: if request.auth != null
+        && (request.auth.uid == uid
+            || request.auth.uid in resource.data.sharedWith);
+      allow create, update: if isFullMember() && request.auth.uid == uid
+        && validAssessments(request.resource.data);
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // --- Site operations: bug reports (Phase 3 §11.4) --------------------
+    // Verbatim from bug-reporting-and-cd-design.md Appendix B, via the
+    // bugs module's integration snippet (lib/bugs/firestore-rules.snippet
+    // .txt in the module clone). Site-operations data, not world data.
+    // Members file [CJ: members only]; a report is readable by its
+    // reporter and by sheriffs/admins only; it never appears in any feed
+    // or member export. The field allowlist + caps below are the design
+    // §2.4 privacy boundary in rules form: no field outside this list
+    // can be written by any client, so no private sim data or other
+    // member's content can be smuggled into a record.
+    function validBugReportCreate() {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+          'tryingToDo', 'whatHappened', 'expected', 'severity', 'kind',
+          'screenshotPath',
+          'route', 'surface', 'entityRef', 'buildId', 'asOfSeq',
+          'browserFamily', 'osFamily', 'viewport',
+          'reporterUid', 'reporterName', 'clientAt',
+          'status', 'searchTokens', 'createdAt'
+        ])
+        && d.reporterUid == request.auth.uid
+        && d.status == 'new'
+        && d.tryingToDo is string && d.tryingToDo.size() > 0 && d.tryingToDo.size() <= 200
+        && d.whatHappened is string && d.whatHappened.size() > 0 && d.whatHappened.size() <= 4000
+        && (!('expected' in d) || (d.expected is string && d.expected.size() <= 2000))
+        && d.severity in ['stops-me', 'its-wrong', 'annoying', 'tiny']
+        && d.kind in ['looks-broken', 'number-wrong', 'didnt-save', 'wont-load', 'text', 'other', 'not-sure']
+        && (!('screenshotPath' in d) || (d.screenshotPath is string
+            && d.screenshotPath.matches('bug-reports/' + request.auth.uid + '/.*')))
+        && (!('route' in d) || (d.route is string && d.route.size() <= 300))
+        && (!('surface' in d) || d.surface in ['dashboard', 'city', 'log', 'forum', 'maps', 'market', 'wiki', 'other'])
+        && (!('entityRef' in d) || (d.entityRef is string && d.entityRef.size() <= 120))
+        && (!('buildId' in d) || (d.buildId is string && d.buildId.size() <= 80))
+        && (!('asOfSeq' in d) || (d.asOfSeq is int && d.asOfSeq >= 0))
+        && (!('browserFamily' in d) || (d.browserFamily is string && d.browserFamily.size() <= 40))
+        && (!('osFamily' in d) || (d.osFamily is string && d.osFamily.size() <= 40))
+        && (!('viewport' in d) || (d.viewport is map
+            && d.viewport.keys().hasOnly(['w', 'h'])
+            && d.viewport.w is int && d.viewport.h is int))
+        && d.reporterName is string && d.reporterName.size() > 0 && d.reporterName.size() <= 100
+        && (!('clientAt' in d) || d.clientAt is timestamp)
+        && d.searchTokens is list && d.searchTokens.size() <= 80
+        && d.createdAt == request.time;
+    }
+
+    // Reporter edit (design Appendix B / RPT-c): typed fields ONLY, and
+    // only while the report is `new` or `needs-info`. The one status move
+    // a reporter may make is answering a needs-info question, which
+    // returns the report to `new` (lib/bugs/reports.ts
+    // updateReporterReport). screenshotPath, context, identity, triage
+    // and fix-link fields are not reporter-writable after create.
+    function validBugReportReporterUpdate() {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      return resource.data.reporterUid == request.auth.uid
+        && resource.data.status in ['new', 'needs-info']
+        && affected.hasOnly(['tryingToDo', 'whatHappened', 'expected', 'severity', 'kind', 'searchTokens', 'status'])
+        && (!affected.hasAny(['status'])
+            || (resource.data.status == 'needs-info' && request.resource.data.status == 'new'))
+        && request.resource.data.tryingToDo is string
+        && request.resource.data.tryingToDo.size() > 0 && request.resource.data.tryingToDo.size() <= 200
+        && request.resource.data.whatHappened is string
+        && request.resource.data.whatHappened.size() > 0 && request.resource.data.whatHappened.size() <= 4000
+        && (!('expected' in request.resource.data)
+            || (request.resource.data.expected is string && request.resource.data.expected.size() <= 2000))
+        && request.resource.data.severity in ['stops-me', 'its-wrong', 'annoying', 'tiny']
+        && request.resource.data.kind in ['looks-broken', 'number-wrong', 'didnt-save', 'wont-load', 'text', 'other', 'not-sure']
+        && request.resource.data.searchTokens is list && request.resource.data.searchTokens.size() <= 80;
+    }
+
+    // Sheriff triage write (design §3.4 / RPT-c): triage fields, fix-link
+    // fields, severity re-grade, and the mirrored canonicalStatus on
+    // duplicates (lib/bugs/types.ts — RPT-h needs it on the record).
+    // Reporter identity, typed text, context and createdAt are immutable
+    // here too — a sheriff edits the triage layer, never the report.
+    function validBugReportTriageUpdate() {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      return affected.hasOnly([
+          'status', 'triageNote', 'duplicateOf', 'canonicalStatus',
+          'severity', 'fixBranch', 'fixPrUrl', 'previewUrl',
+          'shippedInBuild', 'updatedAt'
+        ])
+        && request.resource.data.status in ['new', 'seen', 'needs-info', 'accepted',
+            'fixed-in-preview', 'shipped', 'duplicate', 'not-a-bug', 'wont-fix']
+        && (!('triageNote' in request.resource.data)
+            || (request.resource.data.triageNote is string && request.resource.data.triageNote.size() <= 2000))
+        && (!('duplicateOf' in request.resource.data)
+            || (request.resource.data.duplicateOf is string && request.resource.data.duplicateOf.size() <= 128))
+        && (!('canonicalStatus' in request.resource.data)
+            || request.resource.data.canonicalStatus in ['new', 'seen', 'needs-info', 'accepted',
+                'fixed-in-preview', 'shipped', 'duplicate', 'not-a-bug', 'wont-fix'])
+        && (!('severity' in request.resource.data)
+            || request.resource.data.severity in ['stops-me', 'its-wrong', 'annoying', 'tiny'])
+        && (!('fixBranch' in request.resource.data)
+            || (request.resource.data.fixBranch is string && request.resource.data.fixBranch.size() <= 200))
+        && (!('fixPrUrl' in request.resource.data)
+            || (request.resource.data.fixPrUrl is string && request.resource.data.fixPrUrl.size() <= 500))
+        && (!('previewUrl' in request.resource.data)
+            || (request.resource.data.previewUrl is string && request.resource.data.previewUrl.size() <= 500))
+        && (!('shippedInBuild' in request.resource.data)
+            || (request.resource.data.shippedInBuild is string && request.resource.data.shippedInBuild.size() <= 80))
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    match /bug_reports/{reportId} {
+      // Read: the reporter (their own loop-closure view) and sheriffs.
+      // A guest reads nothing; a member reads nobody else's report —
+      // including a canonical report linked from their duplicate (RPT-h:
+      // they see its mirrored canonicalStatus field, never the record).
+      allow read: if isAdmin()
+        || (isFullMember() && resource.data.reporterUid == request.auth.uid);
+      // Create: full members only — guests may NOT file [CJ ruling].
+      allow create: if isFullMember() && validBugReportCreate();
+      allow update: if (isFullMember() && validBugReportReporterUpdate())
+        || (isAdmin() && validBugReportTriageUpdate());
+      // Closed reports are kept; deletion is an Admin-SDK act, never a
+      // client one (design Appendix B).
+      allow delete: if false;
     }
 
     // --- Sim layer: city state ------------------------------------------

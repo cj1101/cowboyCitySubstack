@@ -23,6 +23,7 @@ const LABELS: Record<NotificationType, string> = {
   treaty: "Treaty",
   reaction: "Reaction",
   comment: "Comment",
+  report: "Bug report",
 };
 
 export function notificationLabel(item: Pick<AppNotification, "type" | "kind">): string {

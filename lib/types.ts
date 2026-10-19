@@ -311,7 +311,8 @@ export type NotificationType =
   | "approval"
   | "treaty"
   | "reaction"
-  | "comment";
+  | "comment"
+  | "report";
 
 /** Extra detail for type "treaty". Invites, counters, and ratifications stay one notice type. */
 export type TreatyNoticeKind = "invite" | "counter" | "ratified";
