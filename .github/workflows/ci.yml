@@ -133,3 +133,59 @@ jobs:
             firebase-debug.log
           if-no-files-found: ignore
           retention-days: 14
+
+  sim-core-tests:
+    # =========================================================================
+    # NON-REQUIRED — do NOT add this job to branch protection.
+    #
+    # Purpose: run the Phase 2 engine suite (tests/sim-core.test.ts: the
+    # resolver core, committer, pendings/AGR, undo battery, Baseline
+    # fail-closed checks) against the Firestore + Auth emulators in a
+    # clean environment. Like the rules suite, it has never run locally:
+    # the dev sandbox's emulator rejects its own rules upload (the known
+    # loopback defect), so Actions is the authoritative venue.
+    #
+    # Failure semantics mirror the rules job: a red run shows its real
+    # color, never continue-on-error, and never blocks merges — only
+    # "Install · Typecheck · Lint · Build" is branch-protected. The
+    # distinct name ("Sim core tests (non-required)") keeps it visually
+    # separate. Promotion follows the same separate-PR path as the rules
+    # job after green, stable runs on unmodified master.
+    # =========================================================================
+    name: Sim core tests (non-required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java (Firebase emulators)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Same pin as the required job and Vercel (Node 24).
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sim core tests (Firebase emulators)
+        # Emulators are local processes: no secrets, no firebase login,
+        # no project access needed.
+        run: npm run test:sim
+
+      - name: Upload emulator debug logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-core-emulator-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            firestore-debug.log
+            firebase-debug.log
+          if-no-files-found: ignore
+          retention-days: 14

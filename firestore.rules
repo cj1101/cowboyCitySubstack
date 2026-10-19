@@ -142,7 +142,26 @@ service cloud.firestore {
         && request.resource.data.prevHash.size() == 64
         && request.resource.data.entryHash is string
         && request.resource.data.entryHash.size() == 64
-        && request.resource.data.hashVersion == 'cowboy-canonical-json-v1';
+        // Phase 2 (brief §9.1): v1 survives ONLY as the genesis carve-out —
+        // the already-landed seq-1 entry must remain creatable-verifiable
+        // in fixtures forever, and no second v1 entry may ever be written.
+        // v2 requires the four Phase 2 fields, present with typed values on
+        // every entry (Felix's no-optional-fields discipline).
+        && ((request.resource.data.hashVersion == 'cowboy-canonical-json-v1'
+             && request.resource.data.seq == 1
+             && request.resource.data.kind == 'genesis'
+             && request.resource.data.resolutionId == 'genesis')
+            || (request.resource.data.hashVersion == 'cowboy-canonical-json-v2'
+                && request.resource.data.keys().hasAll(
+                     ['pendingId', 'wakeActionId', 'executedDuringSeq', 'generation'])
+                && (request.resource.data.pendingId == null
+                    || request.resource.data.pendingId is string)
+                && (request.resource.data.wakeActionId == null
+                    || request.resource.data.wakeActionId is string)
+                && (request.resource.data.executedDuringSeq == null
+                    || request.resource.data.executedDuringSeq is int)
+                && (request.resource.data.generation == null
+                    || request.resource.data.generation is map)));
     }
 
     function isFactionMember(factionId) {
@@ -939,95 +958,166 @@ service cloud.firestore {
 
     // --- Sim layer: city state ------------------------------------------
 
+    // Phase 2 (brief §9.7): undo's snapshot restore deletes docs the
+    // erased resolution created and recreates docs it destroyed — the
+    // committer gains delete on every world-state surface the undo engine
+    // may restore. Publications and intel are deliberately NOT in this
+    // amendment: their never-delete posture stands (§9.7), and
+    // resolutions touching them are undo-ineligible via S4 instead.
     match /sim_cities/{cityId} {
       allow read: if isViewer();
       allow create: if isFabricCommitter()
         && request.resource.data.factionId == cityId
         && request.resource.data.baseline.baselineHash is string;
       allow update: if isFabricCommitter();
-      allow delete: if false;
+      allow delete: if isFabricCommitter();
 
       match /structures/{structureId} {
         allow read: if isViewer();
         allow create, update: if isFabricCommitter();
-        allow delete: if false;
+        allow delete: if isFabricCommitter();
       }
 
       match /households/{householdId} {
         allow read: if isViewer();
         allow create, update: if isFabricCommitter();
-        allow delete: if false;
+        allow delete: if isFabricCommitter();
       }
 
       match /figures/{figureId} {
         allow read: if isViewer();
         allow create, update: if isFabricCommitter();
-        allow delete: if false;
+        allow delete: if isFabricCommitter();
       }
 
       match /corporations/{corpId} {
         allow read: if isViewer();
         allow create, update: if isFabricCommitter();
-        allow delete: if false;
+        allow delete: if isFabricCommitter();
       }
 
       match /laws/{lawId} {
         allow read: if isViewer();
         allow create, update: if isFabricCommitter();
-        allow delete: if false;
+        allow delete: if isFabricCommitter();
       }
     }
 
     match /sim_character_extensions/{characterId} {
       allow read: if isViewer();
       allow create, update: if isFabricCommitter();
-      allow delete: if false;
+      allow delete: if isFabricCommitter();
     }
 
     // --- Sim layer: the Log ----------------------------------------------
-    // Phase 1 posture (Phase 1 brief §1.4): create-only for EVERY identity,
-    // committer included. The Phase 2 undo amendment adds committer delete
-    // (never update) when the dependency-check engine ships. Do not add a
-    // delete path before then.
+    // Phase 2 amendment (brief §9.2/§9.3): the lawful undo must be able to
+    // ERASE — Log entries and manifests are committer-deletable, NEVER
+    // updatable by any identity (an update path on history is the one door
+    // that never opens). Reads are unchanged from Phase 1: the actor-view
+    // rule is what keeps N-1 real — another member cannot read your
+    // actor-private entries AT ALL, not merely "the UI hides them".
+    // (Append-only as a TOTAL doctrine was the mechanism CJ struck down;
+    // the surviving rules text is purged by the spec owners — P2-D1.)
 
     match /sim_log_entries/{entryId} {
-      allow read: if isViewer()
-        && (resource.data.get('visibility', 'public') == 'public'
-            || isAdmin()
-            || (isFullMember()
-                && resource.data.get('actor', {}).get('memberId', '') == request.auth.uid));
+      // The fabric branch is load-bearing, not a convenience: the undo
+      // engine's restore transaction must READ the target's entries
+      // (chain verification, brief §8.5) before it may delete them —
+      // including actor-private ones, whose whole point is that no
+      // member surface can read them. Fabric identities are the
+      // trusted service layer (same posture as sim_resolutions §9.3);
+      // member/guest visibility semantics are unchanged.
+      allow read: if isFabricService()
+        || (isViewer()
+          && (resource.data.get('visibility', 'public') == 'public'
+              || isAdmin()
+              || (isFullMember()
+                  && resource.data.get('actor', {}).get('memberId', '') == request.auth.uid)));
       allow create: if isFabricCommitter() && validNewLogEntry(entryId);
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isFabricCommitter();
     }
 
     match /sim_resolutions/{resolutionId} {
-      allow read: if isViewer();
+      // Manifests hold full before/after snapshots of other members'
+      // cities; the audit surface (Phase 8) reads them under its own
+      // entitlement model. Phase 2 narrows the Phase 1 viewer read to
+      // admin + fabric (brief §9.3).
+      allow read: if isAdmin() || isFabricService();
       allow create: if isFabricCommitter();
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isFabricCommitter();
     }
 
     // --- Sim layer: action intake (first client surface is Phase 4) -----
 
     match /sim_actions/{actionId} {
-      allow read: if isAdmin()
+      allow read: if isAdmin() || isFabricService()
         || (isFullMember() && resource.data.actor.memberId == request.auth.uid)
         || (isFullMember()
             && request.auth.uid in resource.data.get('audienceUids', []));
+      // Phase 2 tightening (brief §9.4): an action is born ONLY as
+      // 'received', with preview/confirmation and all resolution fields
+      // null. A member can no longer mint a born-'awaiting_confirmation'
+      // action carrying a self-authored preview.
       allow create: if isFullMember()
         && request.resource.data.actor.memberId == request.auth.uid
-        && request.resource.data.status in ['received', 'awaiting_confirmation']
+        && request.resource.data.status == 'received'
+        && request.resource.data.preview == null
+        && request.resource.data.confirmation == null
         && request.resource.data.resolutionId == null
         && request.resource.data.firstLogSeq == null
         && request.resource.data.lastLogSeq == null;
-      // The actor may confirm only the exact preview the fabric stored.
+      // The member confirmation (brief §9.4) — REPLACES the Phase 1 clause,
+      // which pinned status to the PRE-transition value and so made
+      // confirmation impossible for every action (P2-D7, a latent Phase 1
+      // bug caught in Phase 2 design and proven by P2-G9's positive case):
+      // the member may move ONLY awaiting_confirmation -> confirmed,
+      // touching ONLY confirmation/status/updatedAt, and the confirmation
+      // must be bound to the stored preview's hash. The fabric branch is
+      // unchanged.
       allow update: if isFabricService()
         || (isFullMember()
             && resource.data.actor.memberId == request.auth.uid
+            && resource.data.status == 'awaiting_confirmation'
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['confirmation', 'status', 'updatedAt'])
-            && request.resource.data.status == 'awaiting_confirmation'
+            && request.resource.data.status == 'confirmed'
             && request.resource.data.confirmation.confirmedByUid == request.auth.uid
             && request.resource.data.confirmation.previewHash == resource.data.preview.previewHash);
+      // The committer deletes the source action inside a lawful undo
+      // (§8.5: the intake record of an erased resolution goes with it).
+      allow delete: if isFabricCommitter();
+    }
+
+    // --- Sim layer: pending consequences (Phase 2, brief §9.5) -----------
+    // The document is audience-scoped — but the pending's EXISTENCE is a
+    // public Log fact (its creation entry is realm-public). The seed and
+    // payloadSpec inside this doc therefore never face a non-audience
+    // reader (Felix N3 discipline, enforced here).
+
+    match /sim_pending_consequences/{pendingId} {
+      allow read: if isAdmin() || isFabricService()
+        || (isFullMember()
+            && request.auth.uid in resource.data.get('audienceUids', []));
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    // --- Sim layer: undo operations (Phase 2, brief §9.6) ----------------
+    // A member asks; the fabric checks and executes. The completion proof
+    // is content-free (counts + hashes only, §2.5) and this doc is the
+    // ONLY surviving trace of an erased resolution. Deleted by nobody.
+
+    match /sim_undo_operations/{opId} {
+      allow read: if isAdmin() || isFabricService()
+        || (isFullMember() && resource.data.requesterUid == request.auth.uid);
+      allow create: if isFullMember()
+        && request.resource.data.requesterUid == request.auth.uid
+        && request.resource.data.status == 'requested'
+        && request.resource.data.targetResolutionId is string
+        && request.resource.data.dependencyReport == null
+        && request.resource.data.completion == null;
+      allow update: if isFabricService();
       allow delete: if false;
     }
 
@@ -1053,14 +1143,15 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['allocations', 'spentPoints', 'draftVersion',
                            'draftHash', 'authorUid', 'status', 'updatedAt']));
-      allow delete: if false;
+      allow delete: if isFabricCommitter();
 
       match /versions/{version} {
         allow read: if isAdmin() || simCityOwner(cityId)
           || (isViewer() && resource.data.commitSeq != null);
         allow create: if isFabricCommitter()
           || (simCityOwner(cityId) && request.resource.data.authorUid == request.auth.uid);
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isFabricCommitter();
       }
     }
 
@@ -1084,7 +1175,12 @@ service cloud.firestore {
     }
 
     match /sim_intel_records/{intelId} {
-      allow read: if isAdmin()
+      // Fabric read: the undo restore transaction re-reads every doc
+      // in the target's write set (brief §8.5) — an intel record in
+      // the set must be readable by the committer or no covert
+      // resolution could ever be undone (P2-K16).
+      allow read: if isFabricService()
+        || isAdmin()
         || (isFullMember() && resource.data.collectorUid == request.auth.uid)
         || (isFullMember() && ownsListedCity(resource.data.collectorCityId));
       // No ref, no record: a logged means is a creation requirement, in rules.
@@ -1093,7 +1189,12 @@ service cloud.firestore {
         && request.resource.data.method.methodRef.size() > 0
         && request.resource.data.collectionResolutionId is string
         && request.resource.data.collectionResolutionId.size() > 0;
-      allow update, delete: if false;
+      allow update: if false;
+      // Erasure is the undo engine's alone (CJ's N-1 ruling: espionage
+      // and intel follow normal undo logic — see phase2-decisions.md
+      // P2-K16). The committer deletes only inside a restore
+      // transaction; everyone else's delete stays denied.
+      allow delete: if isFabricCommitter();
     }
   }
 }

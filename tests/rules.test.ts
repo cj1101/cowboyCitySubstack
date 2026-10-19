@@ -1257,6 +1257,9 @@ async function main() {
     fabricRole: "worker",
   });
 
+  // Phase 2: the entry fixture is the v2 form (brief §9.1) — v1 survives
+  // only as the genesis carve-out, so a seq-2 fixture must be v2, with the
+  // four Phase 2 fields present (null when N/A).
   const validEntry = {
     seq: 2,
     resolutionSeq: 2,
@@ -1264,7 +1267,7 @@ async function main() {
     entryIndexWithinResolution: 0,
     kind: "action-summary",
     resolvedAt: "2026-10-17T00:00:00.000Z",
-    rulesVersion: "sim-rules-0.1.0-phase1",
+    rulesVersion: "sim-rules-0.2.0-phase2",
     actor: {
       type: "member",
       memberId: "ownerA",
@@ -1292,9 +1295,13 @@ async function main() {
     summaryText: "test entry",
     visibility: "public",
     baseline: null,
+    pendingId: null,
+    wakeActionId: null,
+    executedDuringSeq: null,
+    generation: null,
     prevHash: "a".repeat(64),
     entryHash: "b".repeat(64),
-    hashVersion: "cowboy-canonical-json-v1",
+    hashVersion: "cowboy-canonical-json-v2",
   };
 
   // ---- P1-G1: TC-C01 structural refusal — the single write path.
@@ -1367,17 +1374,23 @@ async function main() {
         kind: "not-a-kind",
       })
     );
-    // Create-only records: update/delete denied for EVERY identity,
-    // committer and admin included; delete denied on any sim doc.
+    // Create-only records: update denied for EVERY identity, committer and
+    // admin included. Phase 2 amendment (brief §9): DELETE is now the
+    // committer's undo path on Log/resolutions/state — but for everyone
+    // else, and for publications/intel (never-delete stands), it stays
+    // denied. Committer-delete success is asserted in the Phase 2 section
+    // below, on fresh fixture docs, so these Phase 1 docs survive for the
+    // read-surface checks.
     await assertFails(
       updateDoc(doc(committerFs, "sim_log_entries", logEntryDocId(2)), { major: true })
     );
-    await assertFails(deleteDoc(doc(committerFs, "sim_log_entries", logEntryDocId(2))));
     await assertFails(deleteDoc(doc(adminD.firestore(), "sim_log_entries", logEntryDocId(2))));
+    await assertFails(deleteDoc(doc(fabricWorker.firestore(), "sim_log_entries", logEntryDocId(2))));
+    await assertFails(deleteDoc(doc(ownerA.firestore(), "sim_log_entries", logEntryDocId(2))));
     await assertFails(
       updateDoc(doc(committerFs, "sim_resolutions", "test-resolution"), { x: 1 })
     );
-    await assertFails(deleteDoc(doc(committerFs, "sim_resolutions", "test-resolution")));
+    await assertFails(deleteDoc(doc(fabricWorker.firestore(), "sim_resolutions", "test-resolution")));
     await assertFails(
       updateDoc(doc(ownerA.firestore(), "sim_publications", "pubMembers"), { status: "retracted" })
     );
@@ -1385,7 +1398,28 @@ async function main() {
     await assertFails(
       updateDoc(doc(committerFs, "sim_intel_records", "intel1"), { coverage: {} })
     );
-    await assertFails(deleteDoc(doc(committerFs, "sim_cities", "cityA")));
+    // P2-K16 (CJ's N-1 ruling): the committer may delete an intel
+    // record — solely as the undo engine's restore path. (Was
+    // assertFails under the brief §9 never-delete aside; N-1 +
+    // brief §8.6 + the P2-G8 matrix govern. Publications above stay
+    // never-delete.) Exercised on a throwaway record: intel1 above is
+    // shared fixture state for later sections and must survive.
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_intel_records", "intelUndoRestore"), {
+        collectorUid: "ownerA",
+        collectorCityId: "cityA",
+        targetCityId: "cityB",
+        targetBusinessId: null,
+        method: { kindLabel: "survey", methodRef: "sim_actions:test" },
+        collectionResolutionId: "test-resolution",
+        collectedAtSeq: 2,
+        coverage: null,
+        reliability: null,
+        findings: [],
+      })
+    );
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_intel_records", "intelUndoRestore")));
+    await assertFails(deleteDoc(doc(fabricWorker.firestore(), "sim_cities", "cityA")));
   }
   console.log("ok sim structural refusal (P1-G1)");
 
@@ -1398,7 +1432,12 @@ async function main() {
     await assertSucceeds(
       getDoc(doc(memberC.firestore(), "sim_log_entries", logEntryDocId(1)))
     );
-    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_resolutions", "test-resolution")));
+    // Phase 2 (§9.3): manifest reads narrow to admin + fabric — manifests
+    // carry full before/after snapshots of other members' cities.
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_resolutions", "test-resolution")));
+    await assertSucceeds(getDoc(doc(adminD.firestore(), "sim_resolutions", "test-resolution")));
+    await assertSucceeds(getDoc(doc(fabricWorker.firestore(), "sim_resolutions", "test-resolution")));
+    await assertSucceeds(getDoc(doc(fabricCommitter.firestore(), "sim_resolutions", "test-resolution")));
     // Counters: admin + fabric only.
     await assertFails(getDoc(doc(memberC.firestore(), "sim_counters", "log")));
     await assertFails(getDoc(doc(ownerA.firestore(), "sim_counters", "log")));
@@ -1512,6 +1551,300 @@ async function main() {
     );
   }
   console.log("ok sim allocation draft boundary (P1-G7)");
+
+  // ======================================================================
+  // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
+  // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)
+  // and use fresh doc ids, so the Phase 1 fixtures above stay untouched.
+  // ======================================================================
+
+  // ---- P2-G9a: §9.1 entry shape — v1 is genesis-only; v2 field discipline.
+  {
+    const committerFs = fabricCommitter.firestore();
+    // v1 at seq != 1 is refused even for the committer.
+    await assertFails(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(9)), {
+        ...validEntry,
+        seq: 9,
+        hashVersion: "cowboy-canonical-json-v1",
+      })
+    );
+    // v2 missing one of the four Phase 2 fields is refused.
+    const { generation: _dropped, ...entryMissingGeneration } = validEntry;
+    await assertFails(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(9)), {
+        ...entryMissingGeneration,
+        seq: 9,
+      })
+    );
+    // v2 with a wrongly-typed Phase 2 field is refused.
+    await assertFails(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(9)), {
+        ...validEntry,
+        seq: 9,
+        executedDuringSeq: "not-an-int",
+      })
+    );
+    // The well-formed v2 entry succeeds — and the committer can delete it
+    // (the undo path), while update stays denied for every identity.
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(9)), {
+        ...validEntry,
+        seq: 9,
+      })
+    );
+    await assertFails(
+      updateDoc(doc(committerFs, "sim_log_entries", logEntryDocId(9)), { major: true })
+    );
+    await assertFails(
+      updateDoc(doc(adminD.firestore(), "sim_log_entries", logEntryDocId(9)), { major: true })
+    );
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_log_entries", logEntryDocId(9))));
+  }
+  console.log("ok sim entry v2 shape + committer delete (P2-G9a)");
+
+  // ---- P2-G9b: §9.3/§9.7 — manifest + state committer deletes.
+  {
+    const committerFs = fabricCommitter.firestore();
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_resolutions", "test-resolution-del"), {
+        resolutionId: "test-resolution-del",
+      })
+    );
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_resolutions", "test-resolution-del")));
+    // State delete (undo restore): the committer deletes the throwaway
+    // city doc created in P1-G1, and a structure under an existing city.
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_cities", "cityNew")));
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_cities", "cityB", "structures", "del-me"), { name: "Tmp" })
+    );
+    await assertSucceeds(
+      deleteDoc(doc(committerFs, "sim_cities", "cityB", "structures", "del-me"))
+    );
+    await assertFails(deleteDoc(doc(memberC.firestore(), "sim_cities", "cityB")));
+  }
+  console.log("ok sim manifest/state committer deletes (P2-G9b)");
+
+  // ---- P2-G9c: §9.4 — the confirmation fix (P2-D7), positive + negatives.
+  {
+    const actionBase = {
+      schemaVersion: 2,
+      clientRequestId: "req-x",
+      idempotencyKey: "req-x",
+      source: "web",
+      actor: {
+        type: "member",
+        memberId: "ownerA",
+        npcId: null,
+        onBehalfOfMemberId: null,
+        mandateId: null,
+        mandateVersion: null,
+        envelopeId: null,
+      },
+      actionType: "fixture_adjust",
+      actionText: "nudge",
+      structuredAction: { cityId: "cityA", field: "stats.treasuryRubars", delta: 1 },
+      targetCityIds: ["cityA"],
+      threadRef: null,
+      audienceUids: ["ownerA"],
+      previewPlanHash: "plan-hash-1",
+      claim: null,
+      lastAttempt: null,
+      resolutionId: null,
+      firstLogSeq: null,
+      lastLogSeq: null,
+      failure: null,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    };
+    const awaitingDoc = {
+      ...actionBase,
+      status: "awaiting_confirmation",
+      preview: { previewHash: "hash-1", summaryText: "s" },
+      confirmation: null,
+    };
+    await env.withSecurityRulesDisabled(async (context) => {
+      const fs = context.firestore();
+      await setDoc(doc(fs, "sim_actions", "actConfirmOk"), awaitingDoc);
+      await setDoc(doc(fs, "sim_actions", "actConfirmWrongHash"), awaitingDoc);
+      await setDoc(doc(fs, "sim_actions", "actConfirmWrongMember"), awaitingDoc);
+      await setDoc(doc(fs, "sim_actions", "actConfirmExtraKey"), awaitingDoc);
+      await setDoc(doc(fs, "sim_actions", "actStillReceived"), {
+        ...awaitingDoc,
+        status: "received",
+      });
+      await setDoc(doc(fs, "sim_actions", "actDelete"), {
+        ...actionBase,
+        status: "received",
+        preview: null,
+        confirmation: null,
+      });
+    });
+    const confirmWith = (hash: string) => ({
+      confirmation: {
+        confirmedByUid: "ownerA",
+        confirmedAt: Timestamp.now(),
+        previewHash: hash,
+        authorityType: "owner",
+      },
+      status: "confirmed",
+      updatedAt: Timestamp.now(),
+    });
+    const ownerAFs = ownerA.firestore();
+    // The positive case Phase 1 could never pass: the one lawful
+    // confirmation (exact stored hash, only the fenced keys, the
+    // awaiting -> confirmed transition) SUCCEEDS.
+    await assertSucceeds(updateDoc(doc(ownerAFs, "sim_actions", "actConfirmOk"), confirmWith("hash-1")));
+    // Wrong preview hash: refused.
+    await assertFails(
+      updateDoc(doc(ownerAFs, "sim_actions", "actConfirmWrongHash"), confirmWith("hash-2"))
+    );
+    // Another member cannot confirm ownerA's action.
+    await assertFails(
+      updateDoc(doc(ownerB.firestore(), "sim_actions", "actConfirmWrongMember"), confirmWith("hash-1"))
+    );
+    // Touching any key outside the fence is refused.
+    await assertFails(
+      updateDoc(doc(ownerAFs, "sim_actions", "actConfirmExtraKey"), {
+        ...confirmWith("hash-1"),
+        resolutionId: "forged",
+      })
+    );
+    // Confirmation from 'received' (no preview step) is refused.
+    await assertFails(
+      updateDoc(doc(ownerAFs, "sim_actions", "actStillReceived"), confirmWith("hash-1"))
+    );
+    // Create tightening: born-received with nulls succeeds; born-awaiting
+    // or carrying a self-authored preview fails.
+    await assertSucceeds(
+      setDoc(doc(ownerAFs, "sim_actions", "actBorn"), {
+        ...actionBase,
+        status: "received",
+        preview: null,
+        previewPlanHash: null,
+        confirmation: null,
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerAFs, "sim_actions", "actBornBad"), {
+        ...actionBase,
+        status: "awaiting_confirmation",
+        preview: null,
+        confirmation: null,
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerAFs, "sim_actions", "actBornBad2"), {
+        ...actionBase,
+        status: "received",
+        preview: { previewHash: "self-authored" },
+        confirmation: null,
+      })
+    );
+    // The committer deletes the source action inside an undo; members can't.
+    await assertFails(deleteDoc(doc(ownerAFs, "sim_actions", "actDelete")));
+    await assertSucceeds(
+      deleteDoc(doc(fabricCommitter.firestore(), "sim_actions", "actDelete"))
+    );
+  }
+  console.log("ok sim confirmation clause fix + create tightening (P2-G9c)");
+
+  // ---- P2-G9d: §9.5 pendings — audience-scoped reads, committer-only writes.
+  {
+    const pendingDoc = {
+      pendingId: "pend_rules_1",
+      kind: "delayed-stat-effect",
+      status: "pending",
+      audienceUids: ["ownerA"],
+      payloadSpec: { mode: "determinate", secret: "seed-material" },
+    };
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "sim_pending_consequences", "pend_rules_1"),
+        pendingDoc
+      );
+    });
+    const read = (actor: typeof ownerA) =>
+      getDoc(doc(actor.firestore(), "sim_pending_consequences", "pend_rules_1"));
+    await assertSucceeds(read(ownerA));
+    await assertSucceeds(read(adminD));
+    await assertSucceeds(read(fabricWorker));
+    // Seed non-disclosure: a non-audience member cannot read the doc at all.
+    await assertFails(read(memberC));
+    await assertFails(read(ownerB));
+    await assertFails(read(guestG));
+    // Writes: committer only.
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_pending_consequences", "pend_rules_2"), pendingDoc)
+    );
+    const committerFs = fabricCommitter.firestore();
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_pending_consequences", "pend_rules_2"), {
+        ...pendingDoc,
+        pendingId: "pend_rules_2",
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(committerFs, "sim_pending_consequences", "pend_rules_2"), { attempts: 1 })
+    );
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_pending_consequences", "pend_rules_1"), { attempts: 1 })
+    );
+    await assertSucceeds(deleteDoc(doc(committerFs, "sim_pending_consequences", "pend_rules_2")));
+  }
+  console.log("ok sim pendings rules surface (P2-G9d)");
+
+  // ---- P2-G9e: §9.6 undo operations — member asks, fabric decides.
+  {
+    const opDoc = {
+      opId: "op_rules_1",
+      requesterUid: "ownerA",
+      targetResolutionId: "test-resolution",
+      status: "requested",
+      dependencyReport: null,
+      completion: null,
+      failure: null,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    };
+    const ownerAFs = ownerA.firestore();
+    await assertSucceeds(setDoc(doc(ownerAFs, "sim_undo_operations", "op_rules_1"), opDoc));
+    // Born in the wrong status, for someone else, or with a pre-filled
+    // report/completion: all refused.
+    await assertFails(
+      setDoc(doc(ownerAFs, "sim_undo_operations", "op_rules_2"), { ...opDoc, status: "checking" })
+    );
+    await assertFails(
+      setDoc(doc(ownerAFs, "sim_undo_operations", "op_rules_3"), {
+        ...opDoc,
+        requesterUid: "ownerB",
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerAFs, "sim_undo_operations", "op_rules_4"), {
+        ...opDoc,
+        completion: { forged: true },
+      })
+    );
+    // The requester reads their own op; another member cannot.
+    await assertSucceeds(getDoc(doc(ownerAFs, "sim_undo_operations", "op_rules_1")));
+    await assertFails(getDoc(doc(ownerB.firestore(), "sim_undo_operations", "op_rules_1")));
+    await assertSucceeds(getDoc(doc(adminD.firestore(), "sim_undo_operations", "op_rules_1")));
+    // Only the fabric moves an operation.
+    await assertFails(
+      updateDoc(doc(ownerAFs, "sim_undo_operations", "op_rules_1"), { status: "checking" })
+    );
+    await assertSucceeds(
+      updateDoc(doc(fabricWorker.firestore(), "sim_undo_operations", "op_rules_1"), {
+        status: "checking",
+      })
+    );
+    // Deleted by nobody, committer included.
+    await assertFails(
+      deleteDoc(doc(fabricCommitter.firestore(), "sim_undo_operations", "op_rules_1"))
+    );
+  }
+  console.log("ok sim undo operations rules surface (P2-G9e)");
 
   await env.cleanup();
   assert.ok(true);

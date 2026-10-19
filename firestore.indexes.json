@@ -178,6 +178,88 @@
         { "fieldPath": "actor.memberId", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "sim_pending_consequences",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAtSeq", "order": "ASCENDING" },
+        { "fieldPath": "pendingId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_pending_consequences",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "targetCityId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAtSeq", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_pending_consequences",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "chainId", "order": "ASCENDING" },
+        { "fieldPath": "createdAtSeq", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_resolutions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "dependencyRefKeys", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "firstSeq", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_resolutions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "actionId", "order": "ASCENDING" },
+        { "fieldPath": "firstSeq", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "resolutionId", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "pendingId", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "causedBySeq", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_undo_operations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "requesterUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_undo_operations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -209,6 +291,21 @@
     {
       "collectionGroup": "sim_actions",
       "fieldPath": "preview",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_pending_consequences",
+      "fieldPath": "payloadSpec",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "fieldPath": "generation",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_log_entries",
+      "fieldPath": "stateHeadsAfter",
       "indexes": []
     }
   ]
