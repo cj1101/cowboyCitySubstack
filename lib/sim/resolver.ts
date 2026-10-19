@@ -24,12 +24,14 @@ import {
   docField,
   snapshotDoc,
   withDocField,
+  type CollectionQuerySpec,
   type PreparedPayload,
   type ResolutionPlan,
   type SimAction,
   type SimChange,
   type SimCitations,
   type SimSnapshot,
+  type SnapshotQueryRecord,
 } from "./state";
 import {
   citableBaselineVersion,
@@ -68,46 +70,10 @@ export interface DocReader {
   get(path: string): Promise<Record<string, unknown> | null>;
 }
 
-export async function buildSnapshot(
-  reader: DocReader,
-  paths: readonly string[],
-  now: string
-): Promise<SimSnapshot> {
-  const unique = [...new Set(paths)];
-  const docs = new Map<string, Record<string, unknown> | null>();
-  for (const path of unique) {
-    docs.set(path, await reader.get(path));
-  }
-  const counter = docs.get("sim_counters/log") ?? null;
-  if (!counter || typeof counter.lastSeq !== "number") {
-    throw new SnapshotError(
-      "LOG_NOT_INITIALIZED",
-      "sim_counters/log is missing or malformed — the Log is not initialized (genesis has not run)."
-    );
-  }
-  const heads = unique.map((path) => {
-    const doc = docs.get(path) ?? null;
-    const stateVersion =
-      doc && typeof doc.stateVersion === "number" ? (doc.stateVersion as number) : null;
-    return { path, stateVersion, hash: headHashOf(doc) };
-  });
-  return {
-    docs,
-    heads,
-    counterHead: {
-      lastSeq: counter.lastSeq as number,
-      lastEntryHash: (counter.lastEntryHash as string) ?? "",
-    },
-    now,
-  };
-}
-
-/** Assemble a snapshot from already-read docs (the committer's in-
- * transaction path: reads happen under the transaction, then the pure
- * resolver runs over exactly those docs). */
-export function snapshotFromDocs(
+function assembleSnapshot(
   docs: ReadonlyMap<string, Record<string, unknown> | null>,
-  now: string
+  now: string,
+  queries: SnapshotQueryRecord[]
 ): SimSnapshot {
   const counter = docs.get("sim_counters/log") ?? null;
   if (!counter || typeof counter.lastSeq !== "number") {
@@ -125,12 +91,95 @@ export function snapshotFromDocs(
   return {
     docs,
     heads,
+    queries,
     counterHead: {
       lastSeq: counter.lastSeq as number,
       lastEntryHash: (counter.lastEntryHash as string) ?? "",
     },
     now,
   };
+}
+
+export async function buildSnapshot(
+  reader: DocReader,
+  paths: readonly string[],
+  now: string
+): Promise<SimSnapshot> {
+  const unique = [...new Set(paths)];
+  const docs = new Map<string, Record<string, unknown> | null>();
+  for (const path of unique) {
+    docs.set(path, await reader.get(path));
+  }
+  return assembleSnapshot(docs, now, []);
+}
+
+/** Assemble a snapshot from already-read docs (the committer's in-
+ * transaction path: reads happen under the transaction, then the pure
+ * resolver runs over exactly those docs). */
+export function snapshotFromDocs(
+  docs: ReadonlyMap<string, Record<string, unknown> | null>,
+  now: string
+): SimSnapshot {
+  return assembleSnapshot(docs, now, []);
+}
+
+/** Executes a collection query against the caller's store (the F-01
+ * materialization step runs OUTSIDE the pure resolver, like doc reads). */
+export interface QueryReader {
+  query(
+    spec: CollectionQuerySpec
+  ): Promise<{ path: string; doc: Record<string, unknown> }[]>;
+}
+
+/** The digest binding a query read into the snapshot/manifest input set:
+ * sha256 over the spec and the ordered (path, head-hash) result list. */
+export function digestQueryResults(
+  spec: CollectionQuerySpec,
+  results: readonly { path: string; hash: string }[]
+): string {
+  return sha256Hex(
+    projectFirestoreValue({
+      spec: spec as unknown as Record<string, unknown>,
+      results: results.map((r) => ({ path: r.path, hash: r.hash })),
+    }) as Record<string, unknown>
+  );
+}
+
+/** Materialize a read plan into a snapshot: doc reads plus the plan's
+ * collection queries, every result doc bound into `docs`/`heads`
+ * exactly like a doc-get, and each query recorded (spec + ordered
+ * result paths + digest) on the snapshot for the manifest's input set. */
+export async function materializeSnapshot(
+  reader: DocReader,
+  queryReader: QueryReader | undefined,
+  plan: ActionReadPlan,
+  now: string
+): Promise<SimSnapshot> {
+  const docs = new Map<string, Record<string, unknown> | null>();
+  for (const path of [...new Set(plan.paths)]) {
+    docs.set(path, await reader.get(path));
+  }
+  const queryRecords: SnapshotQueryRecord[] = [];
+  for (const spec of plan.queries) {
+    if (!queryReader) {
+      throw new SnapshotError(
+        "QUERY_READER_MISSING",
+        `read plan declares collection query "${spec.id}" (${spec.collectionPath}) but no query reader was supplied`
+      );
+    }
+    const results = await queryReader.query(spec);
+    const hashed: { path: string; hash: string }[] = [];
+    for (const result of results) {
+      docs.set(result.path, result.doc);
+      hashed.push({ path: result.path, hash: headHashOf(result.doc) });
+    }
+    queryRecords.push({
+      spec,
+      resultPaths: results.map((r) => r.path),
+      digest: digestQueryResults(spec, hashed),
+    });
+  }
+  return assembleSnapshot(docs, now, queryRecords);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +217,36 @@ export function collectActionReadPaths(action: SimAction): string[] {
   for (const id of citations.pendingIds ?? []) paths.add(`sim_pending_consequences/${id}`);
   for (const path of citations.recordPaths ?? []) paths.add(path);
   return [...paths];
+}
+
+/** A full read plan for an action (F-01): doc paths + collection
+ * queries. The base doc paths derive from the action record itself;
+ * the classifying descriptor's read-plan hook adds paths/queries whose
+ * seeds come from the action and from STORED records (the seed docs —
+ * the base paths already read), never from actor nomination alone.
+ * Actor-supplied `citations.recordPaths` remain part of the base set
+ * as ADDITIONAL reliance declarations (their undo-graph role); they
+ * are never the sole source of an authority- or money-critical read —
+ * the descriptor hook is resolver-side code, and a citation can add a
+ * read but can never narrow or replace the plan's own reads. */
+export interface ActionReadPlan {
+  paths: string[];
+  queries: CollectionQuerySpec[];
+}
+
+export function collectActionReadPlan(
+  action: SimAction,
+  seedDocs: ReadonlyMap<string, Record<string, unknown> | null>
+): ActionReadPlan {
+  const paths = new Set(collectActionReadPaths(action));
+  const queries: CollectionQuerySpec[] = [];
+  const descriptor = descriptorForActionKind(action.actionType);
+  if (descriptor?.readPlan) {
+    const extra = descriptor.readPlan({ action, seedDocs });
+    for (const path of extra.paths ?? []) paths.add(path);
+    for (const spec of extra.queries ?? []) queries.push(spec);
+  }
+  return { paths: [...paths], queries };
 }
 
 export function collectRipeningReadPaths(pending: Record<string, unknown>): string[] {

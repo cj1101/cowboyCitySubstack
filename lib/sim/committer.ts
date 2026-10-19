@@ -78,6 +78,16 @@ export interface CommitRequest {
   plan: ResolutionPlan;
   expectedHeads: SnapshotHead[];
   snapshotPaths: string[];
+  /** The read plan's materialized collection queries (F-01), if any.
+   * Every result doc rides `snapshotPaths`, so the transaction re-reads
+   * and head-compares each one exactly like a declared doc read, and
+   * the records land in the manifest's input set (`queryInputs`) for
+   * the undo closure and audit. Set MEMBERSHIP is bound at the
+   * dispatcher's materialization in the same wake step: this pinned
+   * SDK's Transaction has no typed query read, so in-transaction
+   * re-execution of the query itself waits for the client-SDK upgrade
+   * (PR-F) — noted as the one residual F-01 gap in the Step 0 report. */
+  queryRecords?: import("./state").SnapshotQueryRecord[];
   /** sourceKind "action": the claimed action doc as dispatched. */
   action?: SimAction;
   claimLeaseId?: string | null;
@@ -668,6 +678,7 @@ export async function commitResolution(
           : null,
       inputHash,
       inputHeads,
+      queryInputs: req.queryRecords ?? [],
       inputRefKeys,
       dependencyRefKeys,
       outputRefKeys,

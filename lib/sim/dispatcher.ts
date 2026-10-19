@@ -45,9 +45,12 @@ import { computePreview, type PreviewComputation } from "./preview";
 import {
   buildSnapshot,
   collectActionReadPaths,
+  collectActionReadPlan,
+  materializeSnapshot,
   resolveAction,
-  type DocReader,
+  type QueryReader,
 } from "./resolver";
+import { firestoreQueryReader, firestoreReader } from "./readers";
 import { CommitError, commitResolution, type CommitOutcome } from "./committer";
 import { scanRipeness, type ScanSummary } from "./pending";
 import { processUndoOperation } from "./undo";
@@ -55,15 +58,7 @@ import { wakeChangedWorld } from "./snapshot";
 import { refreshSnapshotAfterWake } from "./snapshotRefresh";
 import type { BaselineRegistry } from "./baseline/registry";
 
-export function firestoreReader(db: Firestore): DocReader {
-  return {
-    async get(path: string) {
-      const segments = path.split("/");
-      const snap = await getDoc(doc(db, segments[0], ...segments.slice(1)));
-      return snap.exists() ? (snap.data() as Record<string, unknown>) : null;
-    },
-  };
-}
+export { firestoreReader } from "./readers";
 
 export interface DispatcherDeps {
   /** Identity for worker-class action bookkeeping (rules: isFabricService). */
@@ -71,6 +66,38 @@ export interface DispatcherDeps {
   /** Identity for commits + snapshot reads (rules: committer). */
   committerDb: Firestore;
   baselineRegistry: BaselineRegistry;
+  /** Executes read-plan collection queries (F-01); defaults to a
+   * reader over `committerDb` — the same identity that reads docs. */
+  queryReader?: QueryReader;
+}
+
+function queryReaderOf(deps: DispatcherDeps): QueryReader {
+  return deps.queryReader ?? firestoreQueryReader(deps.committerDb);
+}
+
+/** The snapshot an action resolves against (F-01): the base doc paths
+ * are read first (the seed docs), the classifying descriptor's
+ * read-plan hook derives any further doc paths + collection queries
+ * from the action and those stored records, and the whole plan is
+ * materialized — query results bound into the snapshot exactly like
+ * doc reads. Returns the snapshot and the full path list (base +
+ * declared + query results) the committer must re-read in-transaction. */
+async function snapshotForAction(
+  deps: DispatcherDeps,
+  action: SimAction,
+  now: string
+): Promise<{ snapshot: Awaited<ReturnType<typeof materializeSnapshot>>; paths: string[] }> {
+  const reader = firestoreReader(deps.committerDb);
+  const seed = await buildSnapshot(reader, collectActionReadPaths(action), now);
+  const readPlan = collectActionReadPlan(action, seed.docs);
+  const snapshot = await materializeSnapshot(reader, queryReaderOf(deps), readPlan, now);
+  const paths = [
+    ...new Set([
+      ...readPlan.paths,
+      ...snapshot.queries.flatMap((q) => q.resultPaths),
+    ]),
+  ];
+  return { snapshot, paths };
 }
 
 export interface WakeSummary {
@@ -108,11 +135,7 @@ export async function previewAction(
   const snap = await getDoc(doc(deps.fabricDb, "sim_actions", actionId));
   if (!snap.exists()) throw new Error(`action ${actionId} does not exist`);
   const action = snap.data() as SimAction;
-  const snapshot = await buildSnapshot(
-    firestoreReader(deps.committerDb),
-    collectActionReadPaths(action),
-    opts.now
-  );
+  const { snapshot } = await snapshotForAction(deps, action, opts.now);
   const computation = computePreview(snapshot, action, {
     baselineRegistry: deps.baselineRegistry,
     mode: "preview",
@@ -229,8 +252,7 @@ export async function runWake(
       continue;
     }
 
-    const paths = collectActionReadPaths(claimed);
-    const snapshot = await buildSnapshot(reader, paths, opts.now);
+    const { snapshot, paths } = await snapshotForAction(deps, claimed, opts.now);
     const plan = resolveAction(snapshot, claimed, {
       baselineRegistry: deps.baselineRegistry,
       mode: "commit",
@@ -260,6 +282,7 @@ export async function runWake(
           plan,
           expectedHeads: snapshot.heads,
           snapshotPaths: paths,
+          queryRecords: snapshot.queries,
           action: claimed,
           claimLeaseId: leaseId,
         }
@@ -319,7 +342,7 @@ export async function runWake(
       );
       summary.scans.push(scan);
     } else if (outcome.status === "stale-preview") {
-      const freshSnapshot = await buildSnapshot(reader, paths, opts.now);
+      const { snapshot: freshSnapshot } = await snapshotForAction(deps, claimed, opts.now);
       const computation = computePreview(freshSnapshot, claimed, {
         baselineRegistry: deps.baselineRegistry,
         mode: "commit",
