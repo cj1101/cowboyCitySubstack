@@ -88,6 +88,14 @@ export interface SimAction {
     previewHash: string;
     authorityType: string;
   } | null;
+  /** The worker-prepared payload this action's preview was computed
+   * with (Phase 4 Step 0, F-07), stored on the action doc at preview
+   * time by the dispatcher and passed verbatim to the committer at
+   * commit time: preview, confirmation, and commit all bind the SAME
+   * payload. Never set by intake — a member-supplied judgment is the
+   * FIXTURE-MARKET anti-pattern, a fairness breach as a product path. */
+  preparedPayload?: PreparedPayload | null;
+  preparedInputHash?: string | null;
   claim: {
     cycleId: string;
     leaseId: string;

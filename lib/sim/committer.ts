@@ -679,6 +679,10 @@ export async function commitResolution(
       inputHash,
       inputHeads,
       queryInputs: req.queryRecords ?? [],
+      // F-07: the prepared payload the resolution consumed, stored with
+      // the manifest — a later replay re-runs the handler against this
+      // record, never a fresh worker call (banking V-B7's requirement).
+      preparedPayload: req.prepared ?? null,
       inputRefKeys,
       dependencyRefKeys,
       outputRefKeys,

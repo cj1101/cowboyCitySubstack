@@ -59,6 +59,11 @@ export function computePreviewHash(input: {
   snapshot: SimSnapshot;
   plan: ResolutionPlan;
   baselineRegistry: BaselineRegistry;
+  /** The prepared payload's self-declared hash, when the resolution
+   * consumed one (F-07): the preview binds the payload's identity, so
+   * a swapped payload at commit time cannot reproduce the confirmed
+   * preview hash — parity is structural, not conventional. */
+  preparedInputHash?: string | null;
 }): string {
   const citable = citableBaselineVersion(
     input.baselineRegistry,
@@ -83,6 +88,7 @@ export function computePreviewHash(input: {
       baselineVersion: citable?.version ?? null,
       baselineDocHash: citable?.docHash ?? null,
       planHash: input.plan.planHash,
+      preparedInputHash: input.preparedInputHash ?? null,
     }) as Record<string, unknown>
   );
 }
@@ -98,6 +104,7 @@ export function computePreview(
     snapshot,
     plan,
     baselineRegistry: opts.baselineRegistry,
+    preparedInputHash: opts.prepared?.inputHash ?? null,
   });
 
   const summary = plan.entries[plan.entries.length - 1];
@@ -184,6 +191,7 @@ export function computePreview(
     computedAt: snapshot.now,
     planHash: plan.planHash,
     rulesVersion: RESOLVER_RULES_VERSION,
+    preparedInputHash: opts.prepared?.inputHash ?? null,
   };
 
   return { plan, preview, previewHash, audienceUids: [...audience].sort() };
