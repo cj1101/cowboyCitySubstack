@@ -34,7 +34,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "^15.5.27",
-    "firebase-tools": "^15.33.0",
+    "firebase-tools": "^15.34.0",
     "tailwindcss": "^4",
     "tsx": "^4.19.0",
     "typescript": "^5"
