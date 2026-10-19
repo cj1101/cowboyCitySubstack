@@ -495,7 +495,7 @@ export default function DashboardHome() {
             : townHall.status === "error"
               ? { status: "error", onRetry: retry }
               : ready({
-                  termCard: snapshot.townHallCard,
+                  termCard: snapshot!.townHallCard,
                   openMotions: townHall.data.openMotions,
                   recentResolutions: townHall.data.recentResolutions,
                 });

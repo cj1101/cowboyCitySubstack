@@ -36,8 +36,12 @@ import {
   listCityCorporations,
   listCityStructures,
   resolveEntityPage,
-  type EntityPageData,
 } from "@/lib/entity/resolve";
+
+/** Petra's resolve.ts keeps EntityPageData module-local; the route
+ *  host derives it from the resolver's return rather than widening
+ *  the module's exports at integration. */
+type EntityPageData = NonNullable<Awaited<ReturnType<typeof resolveEntityPage>>>;
 import {
   corporationConnections,
   structureConnections,
