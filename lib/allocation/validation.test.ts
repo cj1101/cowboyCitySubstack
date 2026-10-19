@@ -5,18 +5,22 @@
  * Pins:
  * - Vera's locks (pool 400, bounds 0..80, exact-sum commit rule, R-35);
  * - the draft payload fitting the Phase 1 rules fence exactly;
- * - the browser canonical port reproducing the Phase 1 fabric hash
- *   (golden vector: EMPTY_DRAFT_HASH from lib/sim/template.ts).
+ * - the sim layer's canonical module reproducing the Phase 1 fabric hash
+ *   (golden vector: EMPTY_DRAFT_HASH from lib/sim/template.ts) — the
+ *   P4-K15 equivalence pin: the draft hash the browser computes IS the
+ *   fabric's hash, now by construction (one canonical module, imported
+ *   directly; the browser port is deleted).
  */
 
 import assert from "node:assert/strict";
 
-import { canonicalJson, computeDraftHash } from "./canonical";
+import { canonicalJson, sha256Hex } from "../sim/canonical";
 import {
   DRAFT_WRITABLE_FIELDS,
   buildCommitRequestFields,
   buildDraftSaveFields,
   buildVersionSnapshotFields,
+  computeDraftHash,
 } from "./draft";
 import { ALLOCATION_MAX, POINT_BUDGET } from "./stats";
 import {
@@ -155,7 +159,7 @@ async function main(): Promise<void> {
   assert.equal(version.commitSeq, null);
   assert.equal(version.previewHash, null);
 
-  // --- Canonical port == fabric hashes ----------------------------------
+  // --- Sim canonical == fabric hashes (P4-K15 equivalence pin) -----------
   assert.equal(
     canonicalJson({ allocations: {}, spentPoints: null }),
     '{"allocations":{},"spentPoints":null}'
@@ -165,11 +169,16 @@ async function main(): Promise<void> {
     '{"a":{"c":null,"d":[1,2]},"b":1}',
     "keys sort recursively; arrays keep order"
   );
-  const emptyDraftHash = await computeDraftHash({}, null);
+  const emptyDraftHash = computeDraftHash({}, null);
   assert.equal(
     emptyDraftHash,
     "a57492f80041da4a56253deb01eb2ef4075c1468df0c498bf407e3b7be4603fe",
     "golden vector: Phase 1 EMPTY_DRAFT_HASH (lib/sim/template.ts)"
+  );
+  assert.equal(
+    sha256Hex({ allocations: {}, spentPoints: null }),
+    emptyDraftHash,
+    "the module's draft hash is the sim canonical hash itself (no port)"
   );
 
   console.log("lib/allocation: all assertions passed");

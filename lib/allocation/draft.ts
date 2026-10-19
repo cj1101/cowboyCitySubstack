@@ -33,8 +33,27 @@
  * ==========================================================================
  */
 
+import { sha256Hex } from "@/lib/sim/canonical";
+
 import type { AllocatableStat } from "./stats";
 import { sumPoints, validateAllocation, type AllocationValues } from "./validation";
+
+/**
+ * The allocation draft hash, over exactly the input the Phase 1 template
+ * hashes for the empty draft ({ allocations: {}, spentPoints: null } ->
+ * EMPTY_DRAFT_HASH in lib/sim/template.ts). Computed with the sim layer's
+ * canonical module directly (P4-K15: the Phase 2 pure-TS
+ * lib/sim/canonical.ts is isomorphic, so the browser port that used to
+ * live in this module is deleted; the golden-vector test in
+ * validation.test.ts remains the equivalence pin — browser draft-hash ==
+ * fabric hash, which is what P4-G1/P4-G2 bind to).
+ */
+export function computeDraftHash(
+  allocations: Record<string, number>,
+  spentPoints: number | null
+): string {
+  return sha256Hex({ allocations, spentPoints });
+}
 
 /** Allocation control-doc lifecycle, per Phase 1 brief §1.6. */
 export type AllocationStatus =

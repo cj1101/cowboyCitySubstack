@@ -22,10 +22,10 @@ import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
 
 import { getClientDb } from "@/lib/firebase";
 
-import { computeDraftHash } from "./canonical";
 import {
   buildCommitRequestFields,
   buildDraftSaveFields,
+  computeDraftHash,
   type DraftSaveFields,
 } from "./draft";
 import { isCommittable, sumPoints, type AllocationValues } from "./validation";
@@ -52,7 +52,7 @@ export async function saveAllocationDraft(args: {
   authorUid: string;
   previousDraftVersion: number;
 }): Promise<DraftSaveFields> {
-  const draftHash = await computeDraftHash(
+  const draftHash = computeDraftHash(
     { ...args.values },
     sumPoints(args.values)
   );
@@ -83,7 +83,7 @@ export async function requestAllocationCommit(args: {
       "Allocation is not committable: it must spend exactly the pool with every value in bounds."
     );
   }
-  const draftHash = await computeDraftHash(
+  const draftHash = computeDraftHash(
     { ...args.values },
     sumPoints(args.values)
   );
