@@ -401,9 +401,13 @@ export function applyRipeningEffect(
           "state",
           ["disbursedRubars", "remainingRubars"]
         );
+        // Target-qualified change fields (TC-E02 chains over
+        // (target, field) pairs): bare fund field names would chain
+        // every fund's disbursements in the city into one sequence.
+        const fundFieldBase = spec.fundPath.split("/").slice(2).join("/");
         changes.push(
-          fieldChange("disbursedRubars", fund.disbursedRubars, disbursed, "fund disbursement at ripening (R-33)"),
-          fieldChange("remainingRubars", fund.remainingRubars, remaining, "fund disbursement at ripening (R-33)")
+          fieldChange(`${fundFieldBase}.disbursedRubars`, fund.disbursedRubars, disbursed, "fund disbursement at ripening (R-33)"),
+          fieldChange(`${fundFieldBase}.remainingRubars`, fund.remainingRubars, remaining, "fund disbursement at ripening (R-33)")
         );
       }
     }

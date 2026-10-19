@@ -438,7 +438,10 @@ function structureHandler(ctx: HandlerContext): ResolutionPlan {
       cityId,
       cityIds: [cityId],
       ruleIds: [descriptorId],
-      changes: [fieldChange("status", before, status, `${descriptorId} fixture state machine`)],
+      // The change field names its TARGET (TC-E02 chains run over
+      // (target, field) pairs): a bare "status" would chain every
+      // structure's status in the city into one false sequence.
+      changes: [fieldChange(`structures/${structureId}.status`, before, status, `${descriptorId} fixture state machine`)],
       recordsCreated: existing ? [] : [path],
       recordsUpdated: existing ? [path] : [],
       summaryText: `${descriptorId}: structure ${structureId} status → ${status}.`,
