@@ -4,9 +4,14 @@
  * declares WHAT to read (doc paths + collection query specs, via
  * `collectActionReadPlan`); these helpers execute those reads against a
  * caller's Firestore instance, in the caller's identity. The
- * dispatcher uses them for preview/commit snapshots; the committer
- * uses `buildFirestoreQuery` to re-execute a plan's queries inside its
- * transaction, so a query read is re-verified exactly like a doc read.
+ * dispatcher uses them for preview/commit snapshots. Inside the
+ * commit transaction the query is NOT re-executed (this pinned SDK's
+ * Transaction has no typed query read — re-execution is the PR-F
+ * residual): the committer re-reads every result doc under the
+ * transaction and head-compares it exactly like a doc read, and
+ * re-attaches the materialized records to its recompute snapshot
+ * (see CommitRequest.queryRecords), so a query read is re-verified as
+ * far as the SDK allows and never silently dropped.
  */
 
 import {

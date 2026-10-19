@@ -115,12 +115,22 @@ export async function buildSnapshot(
 
 /** Assemble a snapshot from already-read docs (the committer's in-
  * transaction path: reads happen under the transaction, then the pure
- * resolver runs over exactly those docs). */
+ * resolver runs over exactly those docs). The F-01 query records the
+ * dispatcher's plan was computed from ride along (`queries`): the
+ * result DOCS are the transaction's own re-reads (they ride
+ * `snapshotPaths` and are head-compared like any declared read), so a
+ * handler recomputing in-transaction derives from transaction-fresh
+ * docs — but without the records themselves it cannot find its
+ * materialized set at all and every query-plan resolution would
+ * recompute to READ_PLAN_MISSING. Set membership stays bound at the
+ * dispatcher's materialization (in-transaction query re-execution is
+ * the PR-F residual; see CommitRequest.queryRecords). */
 export function snapshotFromDocs(
   docs: ReadonlyMap<string, Record<string, unknown> | null>,
-  now: string
+  now: string,
+  queries: readonly SnapshotQueryRecord[] = []
 ): SimSnapshot {
-  return assembleSnapshot(docs, now, []);
+  return assembleSnapshot(docs, now, [...queries]);
 }
 
 /** Executes a collection query against the caller's store (the F-01

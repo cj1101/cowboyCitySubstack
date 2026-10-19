@@ -283,7 +283,13 @@ export async function commitResolution(
     }
 
     // -- Step 4: recompute the plan on the transaction's snapshot --------
-    const txSnapshot = snapshotFromDocs(docs, now);
+    // The read plan's query records (F-01) re-attach here: the result
+    // docs in `docs` are this transaction's re-reads, head-compared
+    // below, and the recompute must see the same materialized set the
+    // dispatcher's plan was computed from — dropping the records makes
+    // every query-plan handler recompute to READ_PLAN_MISSING and the
+    // resolution falls out as a spurious stale preview.
+    const txSnapshot = snapshotFromDocs(docs, now, req.queryRecords ?? []);
     const stateExcluded = new Set([...controlPaths, logEntryPath(counter.lastSeq as number)]);
     const expectedStateHeads = stateHeadsOf(
       { ...txSnapshot, heads: req.expectedHeads },
