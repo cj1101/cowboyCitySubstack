@@ -1562,7 +1562,17 @@ async function main() {
   }
   console.log("ok S0-F02 pure: voiding folds multi-effect writes; reconciliation catches stale changes");
 
-  // ---- S0-F02 (e2e): two-effect voiding through the full stack.
+  // ---- S0-F02 (e2e): two-effect voiding through the full stack. The
+  // second effect targets stats.households — NOT an allocatable index:
+  // at genesis every index (stats.culture included) is null under the
+  // K-3 template and stays null until Phase 4 allocation, and a
+  // stat-delta against a null field is skipped by design (the engine
+  // never invents an index value; null-honesty). households is a true
+  // bookkeeping zero, numeric from genesis, on the same city doc — so
+  // both effects can and must land. (Fix round 1: the original fixture
+  // used stats.culture +1 and asserted null + 1 === 1 against an actual
+  // null — a test bug; the engine folded correctly throughout. The
+  // same-field chaining case is covered by the pure fixture above.)
   {
     await submitConfirmWake(ownerA, "ownerA", "fixture_structure", {
       cityId: "cityA",
@@ -1570,7 +1580,8 @@ async function main() {
       status: "active",
       name: "Vault Two",
     });
-    const cultureBefore = (await cityStats("cityA")).culture as number;
+    const householdsBefore = (await cityStats("cityA")).households as number;
+    assert.equal(typeof householdsBefore, "number", "households is numeric from genesis (template zero)");
     const scheduled = await submitConfirmWake(ownerA, "ownerA", "fixture_schedule", {
       cityId: "cityA",
       pendingKind: "instant-effect",
@@ -1588,7 +1599,7 @@ async function main() {
       ],
       voidEffects: [
         { type: "stat-delta", cityId: "cityA", field: "stats.treasuryRubars", delta: 30 },
-        { type: "stat-delta", cityId: "cityA", field: "stats.culture", delta: 1 },
+        { type: "stat-delta", cityId: "cityA", field: "stats.households", delta: 1 },
       ],
     });
     const voidPendingId = `pend_${scheduled.actionId}_01`;
@@ -1601,11 +1612,12 @@ async function main() {
     });
     assert.ok(dissolve.summary.scans[0]?.voided.includes(voidPendingId));
     assert.equal(await treasury("cityA"), treasuryBefore + 30, "first void effect landed");
-    assert.equal((await cityStats("cityA")).culture, cultureBefore + 1, "second void effect on the same doc landed too (F-02)");
+    assert.equal((await cityStats("cityA")).households, householdsBefore + 1, "second void effect on the same doc landed too (F-02)");
+    assert.equal((await cityStats("cityA")).culture, null, "unallocated index stays null — a stat-delta never invents a value");
     const voidEntries = await entriesOf(`void_${voidPendingId}`);
     assert.ok(voidEntries.length >= 2);
     const effectFields = (voidEntries[0].changes as Record<string, unknown>[]).map((c) => c.field);
-    assert.deepEqual(effectFields, ["stats.treasuryRubars", "stats.culture"]);
+    assert.deepEqual(effectFields, ["stats.treasuryRubars", "stats.households"]);
     await verifyOk(fixtureRegistry);
   }
   console.log("ok S0-F02 e2e: two effects, one doc, both land (prep §4.0 F-02 fixture)");
