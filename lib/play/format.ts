@@ -31,11 +31,19 @@ export function formatSimValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** A delta field is Rubar-denominated when its (possibly
- * target-qualified) leaf name says so: `treasuryRubars`,
- * `structures/<id>.valueRubars`, … */
+/** Field paths mix separators: dotted stat paths
+ * (`stats.treasuryRubars`) and target-qualified record paths
+ * (`structures/<id>.status` — slash between collection and id, dot
+ * before the leaf). Split on both. */
+export function fieldSegments(field: string): string[] {
+  return field.split(/[./]/).filter((segment) => segment !== "");
+}
+
+/** A delta field is Rubar-denominated when its leaf name says so:
+ * `treasuryRubars`, `structures/<id>.valueRubars`, … */
 export function isRubarField(field: string): boolean {
-  const leaf = field.split(".").pop() ?? field;
+  const segments = fieldSegments(field);
+  const leaf = segments[segments.length - 1] ?? field;
   return /rubars$/i.test(leaf);
 }
 
@@ -54,7 +62,7 @@ export function formatFieldValue(field: string, value: unknown): string {
  * status"; a plain stat field reads as its humanized name.
  */
 export function fieldLabel(field: string): string {
-  const segments = field.split(".");
+  const segments = fieldSegments(field);
   const humanize = (segment: string) =>
     segment
       .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
