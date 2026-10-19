@@ -268,3 +268,67 @@ the handler, the read-plan hook, and the seeds are all unchanged.
 **Commits this round (local, author Rafe — Theo pushes):**
 `97d7c6e` engine fix; `91c9bb9` suite pure fixture; this report section.
 The branch tip for the push is the report commit following this section.
+
+## Fix round 3 — PR #25 Sim core failure, third exposure (Rafe, 2026-10-19)
+
+**Verdict: TEST bug — the fixture-clamp lesson a third time (cf. rounds
+1–2, and the suite's own CK6/CK7 corrections). The wake order, the
+suffix rule, and the engine are all correct; no engine code was
+touched.**
+
+**What CI showed (run 39287713325, head `436c8ea`):** F-02 pure+e2e,
+the new S0-F01 pure fixture, S0-F01 e2e, and S0-F07 all pass. The suite
+reached the final §4.0 fixture, S0-ORDER, and failed at
+`tests/sim-core.test.ts:1894` — "both actions stand; nothing was
+erased", actual 1000, expected 1035.
+
+**Root cause, derived from the fixture's own numbers:**
+- The expected value is computed live as `treasuryB0 + 505`, so CI's
+  1035 fixes the section's entering base: cityB treasury = **530**.
+- Both scenario actions are `fixture_adjust`, whose handler
+  (`lib/sim/rules/registry.ts`, FIXTURE-ADJUST) writes
+  `after = Math.min(1000, Math.max(0, before + delta))` — absolute,
+  clamped to [0,1000]. So a1 (+500) lands clamp(530 + 500) = **1000**
+  and a2 (+5) lands clamp(1000 + 5) = **1000**. CI's actual is the
+  clamp's output exactly; 1035 is unreachable under the fixture
+  semantics at any head in this sequence.
+- Candidates (a) engine/order and (c) snapshot/F-01/F-07 interference
+  are excluded by the same CI run: the section's earlier assertions
+  all passed before the abort — a2 ∈ `actionsCommitted` (line 1889),
+  `undoOpsProcessed` = 1, and the op's status is **"refused"**. The
+  refusal is only reachable when a2's committed resolution cites a1
+  (the dependency that breaks the suffix) — i.e. the dependent landed
+  first and the ops phase refused the undo, per brief §1.3 + Phase 2
+  round 4. Had the phases swapped, the op would read "executed" and
+  a1's entries would be gone.
+
+**Local evidence** (pure tsx harness through the REAL `resolveAction`
++ FIXTURE-ADJUST handler over an in-memory snapshot seeded at 530):
+`530 -> a1 (+500) = 1000 -> a2 (+5) = 1000` — matches CI actual
+exactly. The fixed sequence reproduces as `530 -> (-530) = 0 -> (+500)
+= 500 -> (+5) = 505`.
+
+**The fix** (commit `46432f9`, tests only): the S0-ORDER section now
+de-saturates cityB's treasury to the clamp floor before the scenario —
+one `fixture_adjust` of `−treasuryB0` through the suite's own
+machinery, with the re-read asserted to be exactly 0. From base 0,
++500 and +5 resolve with no clamp interference, and the closing
+assertion (`treasuryB0 + 505`, text unchanged) now discriminates all
+three outcomes: both stand = **505**; undo executed (a1 erased, a2
+stale or alone) = **0 or 5**; dependent missing = **500**. Note the
+assertion as originally written could not even do that much: at the
+saturated ceiling, "both stand" and "a1 alone stands" both read 1000.
+The fix therefore *strengthens* the value check; the derivation is
+recorded in a comment at the section top, in the suite's established
+fix-round style. `tsc --noEmit` and scoped ESLint clean; nothing after
+the section reads cityB's treasury, so the normalization perturbs no
+downstream expectation.
+
+With S0-ORDER green, the entire suite will have executed end-to-end
+in CI for the first time on this branch — every §4.0 fixture plus the
+full Phase 2 battery behind it. E2e re-proof is the Sim core CI job
+on the updated PR.
+
+**Commits this round (local, author Rafe — Theo pushes):**
+`46432f9` test fix; this report section. The branch tip for the push
+is the report commit following this section.
