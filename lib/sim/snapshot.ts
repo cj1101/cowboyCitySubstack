@@ -16,29 +16,24 @@
  *
  * ---------------------------------------------------------------------
  * INTEGRATION POINT — dispatcher terminal step (Phase 3 brief §3.2;
- * Phase 2 brief P2-D9 deferred the writer to this phase).
+ * Phase 2 brief P2-D9 deferred the writer to this phase). LANDED in the
+ * Phase 3 integration pass, after PR #21 merged: `runWake()` in
+ * `lib/sim/dispatcher.ts` ends with exactly
  *
- * Phase 2's `lib/sim/dispatcher.ts` is not on this branch's base yet
- * (PR #21 unmerged at Phase 3 build time), so the call site is recorded
- * here exactly and lands in the integration pass after PR #21 merges.
- * In `runWake()`, immediately before `return summary;`:
- *
- *   // TODO(P2-D9 / Phase 3 brief §3.2): wake-terminal snapshot refresh —
- *   // one projection per world-changing wake, own small transaction,
- *   // failure-isolated (a failed refresh never fails a resolution).
  *   if (wakeChangedWorld(summary)) {
  *     await refreshSnapshotAfterWake(deps, opts.now);
  *   }
  *
- * where `refreshSnapshotAfterWake` is a thin fabric-side adapter (the
- * integration pass adds it next to the dispatcher) that assembles a
- * SnapshotSource over the committer identity, calls fetchSnapshotInputs
- * + projectSnapshot from this module, and writes the result to
- * sim_dashboard_snapshots/current. The ops/recovery path that exists
- * TODAY is scripts/sim-rebuild-snapshot.ts, which implements the same
- * SnapshotSource interface over the Admin SDK (emulator-guarded) — the
- * adapter and the script are interchangeable because the projection is
- * pure over its read set.
+ * immediately before `return summary;`, where `refreshSnapshotAfterWake`
+ * is the thin fabric-side adapter in `lib/sim/snapshotRefresh.ts`: it
+ * assembles a SnapshotSource over the committer identity, calls
+ * fetchSnapshotInputs + projectSnapshot from this module, and writes
+ * the result to sim_dashboard_snapshots/current in its own small
+ * transaction, failure-isolated (a failed refresh never fails a
+ * resolution). The ops/recovery path is scripts/sim-rebuild-snapshot.ts,
+ * which implements the same SnapshotSource interface over the Admin SDK
+ * (emulator-guarded) — the adapter and the script are interchangeable
+ * because the projection is pure over its read set.
  * ---------------------------------------------------------------------
  */
 

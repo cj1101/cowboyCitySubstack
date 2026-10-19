@@ -405,7 +405,7 @@ export default function DashboardHome() {
               >
                 <option value="">Choose a city…</option>
                 {core!.cityCards
-                  .filter((c) => c.ownerUid === user.uid)
+                  .filter((c) => c.ownerUid === user?.uid)
                   .map((c) => (
                     <option key={c.factionId} value={c.factionId}>
                       {c.name}
