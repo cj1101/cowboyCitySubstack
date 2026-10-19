@@ -47,10 +47,14 @@ import {
   PlanValidationError,
   buildSnapshot,
   collectActionReadPaths,
+  collectActionReadPlan,
+  materializeSnapshot,
   resolveAction,
   resolveVoiding,
   snapshotFromDocs,
   validatePlan,
+  type DocReader,
+  type QueryReader,
 } from "../lib/sim/resolver";
 import {
   PRODUCTION_BASELINE_REGISTRY,
@@ -63,7 +67,7 @@ import {
 } from "../lib/sim/baseline/fixtures";
 import { verifyStandingLog, hashWorldStateSlices, type StandingWorld } from "../lib/sim/verify";
 import { planLogWorkbooks, type ExportEntry } from "../lib/export/logWorkbook";
-import type { PreparedPayload, SimActor } from "../lib/sim/state";
+import type { CollectionQuerySpec, PreparedPayload, SimActor } from "../lib/sim/state";
 
 const PROJECT_ID = "cowboycityrealm";
 
@@ -1621,6 +1625,96 @@ async function main() {
     await verifyOk(fixtureRegistry);
   }
   console.log("ok S0-F02 e2e: two effects, one doc, both land (prep §4.0 F-02 fixture)");
+
+  // ---- S0-F01 (pure): the committer recompute contract. The
+  // committer re-derives the plan in-transaction over snapshotFromDocs;
+  // the F-01 query records the dispatcher's plan was computed from must
+  // ride into that snapshot or the recompute finds no materialized set
+  // and every query-plan resolution falls out as a spurious stale
+  // preview (fix round 2: this is the exact shape CI caught in the
+  // e2e below — READ_PLAN_MISSING on recompute, action never commits).
+  {
+    const store = new Map<string, Record<string, unknown> | null>([
+      ["sim_counters/log", { lastSeq: 57, lastEntryHash: "cd".repeat(32) }],
+      ["sim_world/current", { lastCommittedSeq: 57 }],
+      ["sim_cities/cityA", { cityId: "cityA", stats: { treasuryRubars: 1000, households: 0 } }],
+      ["factions/cityA", { factionId: "cityA", ownerUids: ["ownerA"] }],
+      ["sim_cities/cityA/structures/ob1", { structureId: "ob1", status: "resting", priceRubars: 100 }],
+      ["sim_cities/cityA/structures/ob2", { structureId: "ob2", status: "resting", priceRubars: 250 }],
+      ["sim_cities/cityA/structures/ob3", { structureId: "ob3", status: "built", priceRubars: 999 }],
+    ]);
+    const { actionId: pureObId, doc: pureObDoc } = buildActionDoc({
+      actorUid: "ownerA",
+      clientRequestId: "req-s0-f01-pure",
+      actor: memberActor("ownerA"),
+      actionType: "fixture_orderbook",
+      actionText: null,
+      structuredAction: {
+        cityId: "cityA",
+        citations: { recordPaths: ["sim_cities/cityA/structures/ob1"] },
+      },
+      targetCityIds: [],
+      now: nowIso(),
+    });
+    store.set(`sim_actions/${pureObId}`, pureObDoc as unknown as Record<string, unknown>);
+    const pureObAction = pureObDoc as unknown as import("../lib/sim/state").SimAction;
+    const memReader: DocReader = { get: async (p) => store.get(p) ?? null };
+    const memQuery: QueryReader = {
+      query: async (spec: CollectionQuerySpec) => {
+        const prefix = `${spec.collectionPath}/`;
+        let rows = [...store.entries()]
+          .filter(([p, d]) => d && p.startsWith(prefix) && !p.slice(prefix.length).includes("/"))
+          .map(([path, doc]) => ({ path, doc: doc as Record<string, unknown> }));
+        for (const f of spec.filters) rows = rows.filter((r) => r.doc[f.field] === f.value);
+        for (const o of [...(spec.orderBy ?? [])].reverse()) {
+          rows.sort((a, b) =>
+            o.direction === "desc"
+              ? (b.doc[o.field] as number) - (a.doc[o.field] as number)
+              : (a.doc[o.field] as number) - (b.doc[o.field] as number)
+          );
+        }
+        return typeof spec.limit === "number" ? rows.slice(0, spec.limit) : rows;
+      },
+    };
+    const seedSnap = await buildSnapshot(memReader, collectActionReadPaths(pureObAction), nowIso());
+    const purePlan = collectActionReadPlan(pureObAction, seedSnap.docs);
+    const materialized = await materializeSnapshot(memReader, memQuery, purePlan, nowIso());
+    const dispatchedPlan = resolveAction(materialized, pureObAction, {
+      baselineRegistry: fixtureRegistry,
+      mode: "commit",
+    });
+    assert.equal(dispatchedPlan.outcome, "resolved", "materialized plan resolves");
+    const txPaths = [
+      ...new Set([
+        "sim_counters/log",
+        "sim_world/current",
+        `sim_resolutions/${pureObId}`,
+        `sim_actions/${pureObId}`,
+        ...purePlan.paths,
+        ...materialized.queries.flatMap((q) => q.resultPaths),
+      ]),
+    ];
+    const txDocs = new Map(txPaths.map((p) => [p, store.get(p) ?? null]));
+    const bareRecompute = resolveAction(snapshotFromDocs(txDocs, nowIso()), pureObAction, {
+      baselineRegistry: fixtureRegistry,
+      mode: "commit",
+    });
+    assert.equal(bareRecompute.outcome, "rejected", "no records re-attached: recompute cannot resolve");
+    assert.equal(bareRecompute.rejection?.code, "READ_PLAN_MISSING");
+    assert.notEqual(bareRecompute.planHash, dispatchedPlan.planHash);
+    const boundRecompute = resolveAction(
+      snapshotFromDocs(txDocs, nowIso(), materialized.queries),
+      pureObAction,
+      { baselineRegistry: fixtureRegistry, mode: "commit" }
+    );
+    assert.equal(boundRecompute.outcome, "resolved", "records re-attached: recompute resolves");
+    assert.equal(
+      boundRecompute.planHash,
+      dispatchedPlan.planHash,
+      "the committer recompute reproduces the previewed plan exactly (F-01 parity)"
+    );
+  }
+  console.log("ok S0-F01 pure: committer recompute needs the query records re-attached — parity with them, READ_PLAN_MISSING without");
 
   // ---- S0-F01 (e2e): the order-book read plan. Structures are seeded
   // directly (the suite's fixture pattern) and removed afterwards; the
