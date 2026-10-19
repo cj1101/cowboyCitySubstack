@@ -22,7 +22,18 @@
  */
 
 import { doc, serverTimestamp, setDoc, type Firestore } from "firebase/firestore";
-import { PANEL_REGISTRY, getPanel } from "./registry";
+import { PANEL_BY_ID, PANEL_REGISTRY, type PanelId } from "./registry";
+
+/**
+ * Registry lookup by stored panelId string. Integration reconciliation
+ * (Build Lead): the panels module's registry (June) governs — it keys
+ * entries by the PanelId union in PANEL_BY_ID rather than the lead
+ * draft's getPanel() helper. Unknown ids resolve to undefined, which
+ * normalization already treats as "ignore, never an error".
+ */
+function getPanel(panelId: string) {
+  return PANEL_BY_ID[panelId as PanelId];
+}
 
 export const PREFS_LAYOUT_VERSION = 1;
 
