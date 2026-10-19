@@ -1,195 +1,272 @@
 /**
- * The dashboard panel registry (Phase 3 brief §4.2). Frontend-owned
- * (Dana A.5): the single source of panel identity, variants, shipped
- * defaults, and phase gating. All 14 entries exist from day one —
- * registry completeness is what makes stored prefs forward-compatible:
- * a prefs doc referencing a reserved panel is inert, never an error.
+ * lib/dashboard/registry.ts — the dashboard panel registry (Phase 3).
  *
- * "Ship" = renders with real data or its honest empty state in Phase 3.
- * "Reserve" = registered, default hidden, renders nothing until its
- * phase; flipping one live later is a registry-default change, not a
- * rebuild (P3-D3/D5).
+ * Frontend-owned (Dana A.5). This module is pure data + types: no I/O, no
+ * Firestore, no React. It carries two contracts:
+ *
+ *   1. The panel registry itself (phase3-implementation-brief.md §4.2):
+ *      all 14 panel IDs registered from day one so prefs stay
+ *      forward-compatible; 11 ship in Phase 3, 3 are reserve-hidden
+ *      (`deal-spawn`, `market-index`, `portfolio`) and render nothing.
+ *
+ *   2. The snapshot prop contract (brief §2.1, Dana §3.1): the shapes the
+ *      dashboard read path (lib/dashboard/snapshotRead.ts, Build Lead) hands
+ *      to the panel components under components/dashboard/panels/. Panels
+ *      consume these props only — they never read collections themselves.
+ *
+ * Tier discipline (brief §0.1 / CJ §7.4): everything in the snapshot contract
+ * is the PUBLIC-tier projection. Actor-private Log entries contribute
+ * nothing to these shapes — not a summary, not a count, not a gap. A
+ * member's own private entries reach the digest only as the separately
+ * flagged DigestEntry.isOwnPrivate layer the read path merges in
+ * client-side; they are never part of DashboardSnapshot.
  */
 
-export interface PanelVariant {
+// ---------------------------------------------------------------------------
+// Panel registry
+// ---------------------------------------------------------------------------
+
+export type PanelId =
+  | "world-strip"
+  | "my-city"
+  | "digest"
+  | "situations-peek"
+  | "city-grid"
+  | "contests"
+  | "town-hall"
+  | "npc-team"
+  | "sports"
+  | "lore-highlights"
+  | "action-box"
+  | "deal-spawn"
+  | "market-index"
+  | "portfolio";
+
+export interface PanelVariantDef {
   id: string;
-  /** Plain-language name for the Customize editor (brief §5.2). */
+  /** Plain-language name for the Customize editor's variant picker. */
   label: string;
 }
 
-export interface PanelDefinition {
-  panelId: string;
+export interface PanelRegistryEntry {
+  panelId: PanelId;
   title: string;
-  variants: PanelVariant[];
+  variants: PanelVariantDef[];
+  /** Variant used when prefs name none (or an unknown one). Null = none. */
   defaultVariant: string | null;
   defaultVisible: boolean;
   defaultOrder: number;
-  /** The phase in which the panel starts rendering. */
+  /** Phase in which the panel first renders. Reserve panels keep their
+   *  entry (prefs referencing them are inert, never an error) but render
+   *  nothing until their phase. */
   shipsInPhase: 3 | 4 | 5 | 7;
-  /** Guests see the shipped default set only (brief §4.2/§5.4). */
+  reserve: boolean;
+  /** "members" panels are absent for guests — not disabled-looking,
+   *  absent (spec §5.2, TC-G03). */
+  audience: "all" | "members";
   guestVisible: boolean;
-  /** Panels with tabular data offer a per-panel Excel export (§10.2). */
-  exportable: boolean;
 }
 
-function v(id: string, label: string): PanelVariant {
-  return { id, label };
-}
-
-export const PANEL_REGISTRY: PanelDefinition[] = [
+export const PANEL_REGISTRY: PanelRegistryEntry[] = [
   {
     panelId: "world-strip",
     title: "World strip",
-    variants: [v("full", "Full strip"), v("compact", "Compact")],
+    variants: [
+      { id: "full", label: "Full strip" },
+      { id: "compact", label: "Compact strip" },
+    ],
     defaultVariant: "full",
     defaultVisible: true,
     defaultOrder: 0,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: false,
   },
   {
     panelId: "my-city",
     title: "My city",
-    variants: [v("sheet", "Full stat sheet"), v("card", "Compact card")],
+    variants: [
+      { id: "sheet", label: "Full sheet" },
+      { id: "card", label: "Compact card" },
+    ],
     defaultVariant: "sheet",
     defaultVisible: true,
     defaultOrder: 1,
     shipsInPhase: 3,
-    // Guests get the Featured-city form of this panel (brief §5.3).
+    reserve: false,
+    audience: "all", // guests get the Featured city form (brief §5.3)
     guestVisible: true,
-    exportable: true,
   },
   {
     panelId: "digest",
-    title: "Realm digest",
-    variants: [v("standard", "Standard (up to 10)"), v("brief", "Brief (up to 5)")],
+    title: "What Happened",
+    variants: [
+      { id: "standard", label: "Standard (up to 10)" },
+      { id: "brief", label: "Brief (up to 5)" },
+    ],
     defaultVariant: "standard",
     defaultVisible: true,
     defaultOrder: 2,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: true,
   },
   {
     panelId: "situations-peek",
     title: "Situations",
-    variants: [v("standard", "Standard"), v("count-only", "Count only")],
+    variants: [
+      { id: "standard", label: "Count and top items" },
+      { id: "count-only", label: "Count only" },
+    ],
     defaultVariant: "standard",
     defaultVisible: true,
     defaultOrder: 3,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "members", // owner-private data; no export affordance, ever
     guestVisible: false,
-    // No export affordance, ever (brief §4.2/§10.2) — the audience-owner
-    // export arrives inside the Phase 5 queue.
-    exportable: false,
   },
   {
     panelId: "city-grid",
-    title: "Cities",
-    variants: [v("cards", "Cards"), v("table", "Table")],
+    title: "The Realm",
+    variants: [
+      { id: "cards", label: "Cards" },
+      { id: "table", label: "Table (every figure)" },
+    ],
     defaultVariant: "cards",
     defaultVisible: true,
     defaultOrder: 4,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: true,
   },
   {
     panelId: "contests",
-    title: "Contests",
-    variants: [v("standard", "Standard"), v("compact", "Compact")],
+    title: "Contest board",
+    variants: [
+      { id: "standard", label: "Standard" },
+      { id: "compact", label: "Compact" },
+    ],
     defaultVariant: "standard",
     defaultVisible: true,
     defaultOrder: 5,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: false,
   },
   {
     panelId: "town-hall",
     title: "Town Hall",
-    variants: [v("standard", "Standard"), v("compact", "Compact")],
+    variants: [
+      { id: "standard", label: "Standard" },
+      { id: "compact", label: "Compact" },
+    ],
     defaultVariant: "standard",
     defaultVisible: true,
     defaultOrder: 6,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: true,
   },
   {
     panelId: "npc-team",
-    title: "NPC team",
-    variants: [v("mine", "My team"), v("realm", "Realm teams")],
+    title: "NPC teams",
+    variants: [
+      { id: "mine", label: "My team" },
+      { id: "realm", label: "Realm teams" },
+    ],
     defaultVariant: "mine",
     defaultVisible: true,
     defaultOrder: 7,
     shipsInPhase: 3,
-    guestVisible: false,
-    exportable: false,
+    reserve: false,
+    audience: "all", // guests see the realm tab only; the mine tab is member data
+    guestVisible: true,
   },
   {
     panelId: "sports",
     title: "Sports",
-    variants: [v("standard", "Standard"), v("scores-only", "Scores only")],
+    variants: [
+      { id: "standard", label: "Standings and results" },
+      { id: "scores-only", label: "Scores only" },
+    ],
     defaultVariant: "standard",
     defaultVisible: true,
     defaultOrder: 8,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: true,
   },
   {
     panelId: "lore-highlights",
     title: "Lore highlights",
-    variants: [v("recent", "Recent"), v("intertwined", "Intertwined")],
+    variants: [
+      { id: "recent", label: "Most recent" },
+      { id: "intertwined", label: "Intertwined cities" },
+    ],
     defaultVariant: "recent",
     defaultVisible: true,
     defaultOrder: 9,
     shipsInPhase: 3,
+    reserve: false,
+    audience: "all",
     guestVisible: true,
-    exportable: false,
   },
   {
     panelId: "action-box",
-    title: "Act",
+    title: "Take an action",
     variants: [],
     defaultVariant: null,
     defaultVisible: true,
     defaultOrder: 10,
-    shipsInPhase: 3,
+    shipsInPhase: 3, // display-only shell in Phase 3; the play loop is Phase 4
+    reserve: false,
+    audience: "members",
     guestVisible: false,
-    exportable: false,
   },
   {
-    // Reserved (P3-D3): the deal portal and its spawn contract are
-    // Phase 5; a visible spawn panel with nothing behind it would be a
-    // hollow control.
+    // Reserve (brief P3-D3): the deal portal and its spawn contract are
+    // Phase 5. A visible spawn panel with nothing behind it would be a
+    // hollow control (spec §8.1). Flipping this to a visible panel in
+    // Phase 5 is a registry-default change, not a rebuild.
     panelId: "deal-spawn",
-    title: "Deal portal",
+    title: "Deal Room",
     variants: [],
     defaultVariant: null,
     defaultVisible: false,
     defaultOrder: 11,
     shipsInPhase: 5,
+    reserve: true,
+    audience: "members",
     guestVisible: false,
-    exportable: false,
   },
   {
-    // Reserved (P3-D5): no listings exist until Phase 4's market slice.
+    // Reserve (brief P3-D5): no listings exist until Phase 4's market
+    // slice. When it ships, Cato's "live to the Log" contract applies:
+    // the index is derived from Log-priced events, never stored truth.
     panelId: "market-index",
     title: "Market index",
-    variants: [v("standard", "Standard"), v("compact", "Compact")],
+    variants: [
+      { id: "standard", label: "Standard" },
+      { id: "compact", label: "Compact" },
+    ],
     defaultVariant: "standard",
     defaultVisible: false,
     defaultOrder: 12,
     shipsInPhase: 4,
-    guestVisible: false,
-    exportable: true,
+    reserve: true,
+    audience: "all",
+    guestVisible: true,
   },
   {
-    // Reserved (P3-D5): holdings are requester-only data and arrive
-    // with the market slice.
+    // Reserve (brief P3-D5): holdings are requester-only data; the panel
+    // and its export arrive with the Phase 4 market slice.
     panelId: "portfolio",
     title: "Portfolio",
     variants: [],
@@ -197,25 +274,199 @@ export const PANEL_REGISTRY: PanelDefinition[] = [
     defaultVisible: false,
     defaultOrder: 13,
     shipsInPhase: 4,
+    reserve: true,
+    audience: "members",
     guestVisible: false,
-    exportable: true,
   },
 ];
 
-export const PANELS_BY_ID: ReadonlyMap<string, PanelDefinition> = new Map(
-  PANEL_REGISTRY.map((p) => [p.panelId, p])
-);
+export const PANEL_BY_ID: Readonly<Record<PanelId, PanelRegistryEntry>> =
+  Object.fromEntries(PANEL_REGISTRY.map((entry) => [entry.panelId, entry])) as Record<
+    PanelId,
+    PanelRegistryEntry
+  >;
 
-export function getPanel(panelId: string): PanelDefinition | null {
-  return PANELS_BY_ID.get(panelId) ?? null;
+/** Panels that render in Phase 3, in shipped default order. */
+export const SHIPPED_PANELS: PanelRegistryEntry[] = PANEL_REGISTRY.filter(
+  (entry) => !entry.reserve,
+).sort((a, b) => a.defaultOrder - b.defaultOrder);
+
+/** Guest panel set [FINAL — spec §5.2]: shipped defaults, no prefs, no
+ *  participation panels. */
+export const GUEST_PANEL_IDS: PanelId[] = SHIPPED_PANELS.filter(
+  (entry) => entry.guestVisible,
+).map((entry) => entry.panelId);
+
+/** The shipped default layout, in the exact prefs-doc entry shape
+ *  (brief §2.2). A member with no prefs doc and a member who resets to
+ *  defaults render byte-identical DOM (brief §5.1 / spec §5.3.3). */
+export function defaultLayoutPanels(): {
+  panelId: string;
+  visible: boolean;
+  order: number;
+  variant?: string;
+}[] {
+  return [...PANEL_REGISTRY]
+    .sort((a, b) => a.defaultOrder - b.defaultOrder)
+    .map((entry) => ({
+      panelId: entry.panelId,
+      visible: entry.defaultVisible,
+      order: entry.defaultOrder,
+      ...(entry.defaultVariant ? { variant: entry.defaultVariant } : {}),
+    }));
 }
 
-/** Panels that render in Phase 3 (ship or honest-empty), registry order. */
-export function shippedPanels(): PanelDefinition[] {
-  return PANEL_REGISTRY.filter((p) => p.shipsInPhase <= 3);
+// ---------------------------------------------------------------------------
+// Per-panel load state (spec §5.9: one state set for every panel)
+// ---------------------------------------------------------------------------
+
+/**
+ * What snapshotRead hands each panel. "empty" is not a separate status:
+ * a ready panel with empty data renders its own honest empty state.
+ * `stale` rides alongside data — the panel still renders (brief §3.5).
+ */
+export type PanelLoadState<T> =
+  | { status: "loading" }
+  | { status: "error"; onRetry?: () => void }
+  | { status: "ready"; data: T; stale?: boolean };
+
+// ---------------------------------------------------------------------------
+// The snapshot contract (brief §2.1 — sim_dashboard_snapshots/current)
+// ---------------------------------------------------------------------------
+
+/** The eight allocatable indices (Vera's stat-model lock). */
+export type SimIndexKey =
+  | "spirit"
+  | "culture"
+  | "infrastructure"
+  | "stability"
+  | "law"
+  | "influence"
+  | "military"
+  | "defense";
+
+export const SIM_INDEX_LABELS: Record<SimIndexKey, string> = {
+  spirit: "Spirit",
+  culture: "Culture",
+  infrastructure: "Infrastructure",
+  stability: "Stability",
+  law: "Law",
+  influence: "Influence",
+  military: "Military",
+  defense: "Defense",
+};
+
+/**
+ * Compact stats as carried on a city card (Dana §3.1 via brief §2.1: the
+ * six indices + treasury/GDP/population, in their landed sim_cities forms,
+ * nulls preserved). military/defense are optional here: the card contract
+ * names six indices; the full sheet (SimSheet) carries all eight. A writer
+ * that includes them loses nothing — the grid table renders what exists.
+ */
+export interface DashboardCompactStats {
+  spirit: number | null;
+  culture: number | null;
+  infrastructure: number | null;
+  stability: number | null;
+  law: number | null;
+  influence: number | null;
+  military?: number | null;
+  defense?: number | null;
+  treasuryRubars: number | null;
+  gdpRubars: number | null;
+  population: number | null;
 }
 
-/** The guest panel set (brief §4.2): shipped defaults, no prefs. */
-export function guestPanels(): PanelDefinition[] {
-  return shippedPanels().filter((p) => p.guestVisible);
+export interface DashboardCityCard {
+  factionId: string;
+  slug: string;
+  name: string;
+  ownerUid: string | null;
+  ownerDisplay: string | null;
+  /** False for unowned factions and for claimed cities whose sim doc does
+   *  not exist yet — both render as lore cards with no sim section. */
+  hasSimState: boolean;
+  compactStats: DashboardCompactStats | null;
+  activity: {
+    lastChangedSeq: number | null;
+    lastActionSeq: number | null;
+  };
+  /** The city's most recent PUBLIC Log summary line; null when none. */
+  latestHeadline: string | null;
+  links: {
+    city: string;
+    map: string;
+  };
+}
+
+/** One projection of a PUBLIC Log entry (brief §2.1; cap 10). */
+export interface DashboardLatestSummary {
+  seq: number;
+  actorDisplay: string;
+  actorKind: string;
+  cityIds: string[];
+  summaryText: string;
+  major: boolean;
+}
+
+/**
+ * Contest card (brief §2.1). Phase 3 always receives `[]` — no contest
+ * records exist until Phase 7. Standings are never carried here; they
+ * compute from sim_log_entries only (Phase 7 contract, brief §4.3).
+ */
+export interface DashboardContestCard {
+  contestId: string;
+  title: string;
+  statusLabel: string;
+  endConditionLabel: string;
+  href: string;
+}
+
+/**
+ * Town Hall card (brief §2.1). Phase 3 always receives `null` — no
+ * sim_terms records exist until Phase 7, and no panel may promote the
+ * group's lore mayor into a sim office (brief §4.3, P3-D7). The shape is
+ * the Phase 7 contract so the panels need no rework when it populates.
+ */
+export interface DashboardTownHallCard {
+  mayorDisplay: string | null;
+  viceMayorDisplay: string | null;
+  /** Verbatim term state from the term record, e.g. "Term ends 2027-… ·
+   *  election due" — a status, never a countdown (brief §4.3). */
+  termStateLabel: string | null;
+  electionDue: boolean;
+  openMotionCount: number;
+}
+
+export interface DashboardSnapshot {
+  asOfSeq: number;
+  /** The resolution whose commit produced the head entry at asOfSeq;
+   *  null only pre-genesis. An undo never names itself here (brief §2.1). */
+  generatedByResolutionId: string | null;
+  cityCards: DashboardCityCard[];
+  latestSummaries: DashboardLatestSummary[];
+  openContestCards: DashboardContestCard[];
+  townHallCard: DashboardTownHallCard | null;
+  /** Writer-stamped presentation metadata. Freshness is judged by
+   *  asOfSeq vs. the world head, NEVER by this clock (brief §3.3). The
+   *  read path normalizes the stored timestamp to a Date before props. */
+  updatedAt: Date | null;
+}
+
+// ---------------------------------------------------------------------------
+// Shared figure contract (why-links, brief §6.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * A verified figure plus its why-link, precomputed by the read path via
+ * lib/dashboard/whyLink.ts (anchor = the state doc's lastChangedSeq,
+ * resolved against the standing Log at click time). Panels render the
+ * link when present and never invent one: a null (pre-allocation) figure
+ * has no why-link — there is nothing to explain, and its caption says so.
+ */
+export interface DashboardFigure {
+  value: number | null;
+  whyHref?: string;
+  /** Honest caption for a null figure, e.g. "Not yet allocated". */
+  nullCaption?: string;
 }
