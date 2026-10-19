@@ -16,7 +16,7 @@
  * (version, docHash, section titles — never a newer version's text).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
   getDocs,
@@ -32,6 +32,12 @@ import { useAuth } from "@/components/auth/AuthProvider";
 import { getAllFactions } from "@/lib/firestore/posts";
 import type { Faction } from "@/lib/types";
 import { isActorPrivate, mergeVisibleEntries } from "@/lib/sim/log";
+import {
+  parseWhyLinkQuery,
+  resolveAnchorSeq,
+  type WhyLinkQueryState,
+} from "@/lib/stats/whyLink";
+import WhyLinkResults from "@/components/stats/WhyLinkResults";
 import { PRODUCTION_BASELINE_REGISTRY, getBaselineVersion } from "@/lib/sim/baseline/registry";
 import {
   planLogWorkbooks,
@@ -71,6 +77,15 @@ export default function LogPage() {
   const [exportLimit, setExportLimit] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState("");
+  // Why-link landing state (Phase 3 brief §6.2 [AMENDMENT]): a
+  // why-link arrives as /log?city=…&field=…&anchor=… — the city
+  // becomes this page's city filter, the field opens the
+  // field-filtered view (WhyLinkResults), and the anchor resolves
+  // against the standing Log at click time (§6.3: the nearest
+  // standing entry at or below it; an erased anchor leaves no gap
+  // annotation here either).
+  const [whyQuery, setWhyQuery] = useState<WhyLinkQueryState | null>(null);
+  const anchorHandled = useRef(false);
 
   const loadPage = useCallback(
     async (after: QueryDocumentSnapshot<DocumentData> | null) => {
@@ -92,6 +107,37 @@ export default function LogPage() {
     },
     []
   );
+
+  // Why-link query state is read once, from the URL the link built.
+  useEffect(() => {
+    const parsed = parseWhyLinkQuery(
+      new URLSearchParams(window.location.search)
+    );
+    if (parsed.cityId || parsed.fieldPath || parsed.anchorSeq !== null) {
+      setWhyQuery(parsed);
+      if (parsed.cityId) setCityFilter(parsed.cityId);
+    }
+  }, []);
+
+  // Anchor landing (§6.3): once rows are in, expand + scroll to the
+  // nearest standing entry at or below the anchor. Runs once per
+  // landing; deeper anchors are the field view's explicit paging.
+  useEffect(() => {
+    if (anchorHandled.current) return;
+    if (!whyQuery || whyQuery.anchorSeq === null || rows.length === 0) return;
+    const target = resolveAnchorSeq(
+      rows.map((r) => r.seq),
+      whyQuery.anchorSeq
+    );
+    if (target === null) return;
+    anchorHandled.current = true;
+    setExpandedSeq(target);
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`log-entry-${target}`)
+        ?.scrollIntoView({ block: "center" });
+    });
+  }, [whyQuery, rows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,6 +341,15 @@ export default function LogPage() {
           )}
         </div>
 
+        {whyQuery?.fieldPath && whyQuery.cityId ? (
+          <section className="glass-panel p-4" aria-label="Why this figure">
+            <WhyLinkResults
+              queryState={whyQuery}
+              cityName={cities.find((c) => c.id === whyQuery.cityId)?.name}
+            />
+          </section>
+        ) : null}
+
         {loading && rows.length === 0 && <p className="text-text-muted">Loading the Log…</p>}
         {!loading && filtered.length === 0 && (
           <p className="text-text-muted">No standing entries match these filters.</p>
@@ -310,7 +365,7 @@ export default function LogPage() {
               : null;
             const expanded = expandedSeq === row.seq;
             return (
-              <article key={row.seq} className="glass-panel p-4">
+              <article key={row.seq} id={`log-entry-${row.seq}`} className="glass-panel p-4">
                 <button
                   className="w-full text-left"
                   onClick={() => setExpandedSeq(expanded ? null : row.seq)}
