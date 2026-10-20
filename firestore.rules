@@ -1204,6 +1204,23 @@ service cloud.firestore {
         allow create, update: if isFabricCommitter();
         allow delete: if isFabricCommitter();
       }
+
+      // Phase 4 Chains assembly: R-32 fund records (prep SS5 A-3).
+      // Fund terms are published at creation, so posture mirrors the
+      // sibling subcollections exactly: viewer read, committer writes.
+      match /funds/{fundId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if isFabricCommitter();
+      }
+
+      // Phase 4 Chains assembly: R-36 capacity project records —
+      // public sim state, same sibling posture.
+      match /projects/{projectId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if isFabricCommitter();
+      }
     }
 
     match /sim_character_extensions/{characterId} {
