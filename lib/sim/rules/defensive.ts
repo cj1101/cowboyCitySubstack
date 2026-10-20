@@ -75,7 +75,6 @@ import {
   type LogEntryDraft,
   type ResolutionPlan,
   type SimAction,
-  type SimActor,
   type SimCitations,
   type SimSnapshot,
 } from "../state";
