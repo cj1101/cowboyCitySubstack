@@ -1748,6 +1748,53 @@ async function main() {
   }
   console.log("ok sim finance collections posture (P4 Finance assembly)");
 
+  // ---- P4 Defensive assembly: sim_cases posture. Cases are
+  // committer-written only (R-18's resolution opens them inside the
+  // commit transaction; no client write path exists for any identity,
+  // the fabric worker included) and viewer-readable (brief §4.5
+  // publishes the charges realm-wide; anon is not a viewer).
+  {
+    const committerFs = fabricCommitter.firestore();
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_cases", "case_seed1"), {
+        caseId: "case_seed1",
+        status: "open",
+        tier: 2,
+      })
+    );
+
+    const caseRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_cases", "case_seed1");
+    // Any viewer reads a case: owners, plain members, guests.
+    await assertSucceeds(getDoc(caseRef(ownerA)));
+    await assertSucceeds(getDoc(caseRef(memberC)));
+    await assertSucceeds(getDoc(caseRef(guestG)));
+    // Anon is not signed in, hence not a viewer.
+    await assertFails(getDoc(caseRef(anon)));
+    // Client writes are denied for every identity, the fabric worker
+    // included; the committer's write path is the only one (proven by
+    // the seed above).
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_cases", "case_forged"), {
+        caseId: "case_forged",
+        status: "open",
+      })
+    );
+    await assertFails(
+      setDoc(doc(guestG.firestore(), "sim_cases", "case_seed1"), {
+        caseId: "case_seed1",
+        status: "dismissed",
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_cases", "case_worker"), {
+        caseId: "case_worker",
+        status: "open",
+      })
+    );
+  }
+  console.log("ok sim cases posture (P4 Defensive assembly)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)
