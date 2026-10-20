@@ -315,7 +315,12 @@ function applyIndexDelta(
 const LAWS_QUERY_ID = "cat2-laws";
 const STRUCTURES_QUERY_ID = "cat2-structures";
 
-function lawsQuery(cityId: string): CollectionQuerySpec {
+/** The laws read any F-06-invoking descriptor must declare for each
+ * city a fact can name (exported for the Lead's F-10 wiring — flag
+ * F5): the composer reads the operating city's schedule from this
+ * query's materialization, or from the same docs in the snapshot's
+ * doc map when another family's query already materialized them. */
+export function businessLawsQuery(cityId: string): CollectionQuerySpec {
   return { id: LAWS_QUERY_ID, collectionPath: `sim_cities/${cityId}/laws`, filters: [] };
 }
 
