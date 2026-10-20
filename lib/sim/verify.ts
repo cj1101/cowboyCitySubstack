@@ -25,6 +25,12 @@
 import { canonicalJson, sha256Hex } from "./canonical";
 import { computeEntryHash, hashSimDoc, projectFirestoreValue } from "./log";
 import { RULE_DESCRIPTORS } from "./rules/registry";
+import { FINANCE_DESCRIPTORS } from "./rules/finance";
+import {
+  checkConservationEvent,
+  checkStandingRecords,
+  type ConservationEvent,
+} from "../finance/conservation";
 import {
   getBaselineVersion,
   sectionScopeCovers,
@@ -302,6 +308,93 @@ export function verifyStandingLog(input: StandingWorld): {
         resolutionId: lastWriter.resolutionId,
       });
     }
+  }
+
+  // -- Conservation (Phase 4 Finance, P4-K13 / QA H-P45-4) -----------------
+  // The pure conservation checker (lib/finance/conservation.ts), wired
+  // in as the Lead assembly item the finance module specified. The
+  // per-event checks run over the standing resolutions that cite a
+  // finance descriptor (F-01/F-02/F-03/F-05/F-12, B-01–B-04) or write
+  // a finance-only collection (member accounts, bank deposits) — the
+  // checker's grammar covers the finance ledgers only; resolutions of
+  // other families move value into records it does not model (project
+  // paidRubars, fund balances) and are outside its scope by design,
+  // not exempted by convenience. Views adapt from the standing
+  // entries + manifests (the manifest writeSet carries full
+  // before/after docs). Standing stock assertions run over the
+  // finance slices of the authoritative state. Two of the banking
+  // review's assertions are verifier-venue by nature and discharge
+  // here: V-B6 (an undone pair must not half-survive) is this
+  // verifier's undo-aware posture itself — every check runs over
+  // STANDING records only, so a lawfully erased resolution leaves
+  // nothing for a pair to half-survive in; V-B7 (preview parity)
+  // rides the Step 0 prepared-payload binding (the manifest records
+  // the prepared payload; a swapped payload refuses
+  // PREPARED_HASH_MISMATCH before it can become a standing event).
+  const financeRuleIds = new Set(Object.keys(FINANCE_DESCRIPTORS));
+  const isFinancePath = (path: string) =>
+    path.startsWith("sim_member_accounts/") || path.startsWith("sim_bank_deposits/");
+  const loanDocs: Record<string, unknown>[] = [];
+  const depositDocs: Record<string, unknown>[] = [];
+  const accountDocs: Record<string, unknown>[] = [];
+  const cityDocs: Record<string, unknown>[] = [];
+  const corporationDocs: Record<string, unknown>[] = [];
+  for (const [path, docData] of input.stateDocs) {
+    const segments = path.split("/");
+    if (segments[0] === "sim_bank_loans" && segments.length === 2) loanDocs.push(docData);
+    else if (segments[0] === "sim_bank_deposits" && segments.length === 2) depositDocs.push(docData);
+    else if (segments[0] === "sim_member_accounts" && segments.length === 2) accountDocs.push(docData);
+    else if (segments[0] === "sim_cities" && segments.length === 2) cityDocs.push(docData);
+    else if (segments[0] === "sim_cities" && segments.length === 4 && segments[2] === "corporations")
+      corporationDocs.push(docData);
+  }
+  for (const [resolutionId, manifest] of input.manifests) {
+    const resolutionEntries = entriesByResolution.get(resolutionId) ?? [];
+    const writeSet = (manifest.writeSet as Record<string, unknown>[] | undefined) ?? [];
+    const citesFinance = resolutionEntries.some((entry) =>
+      ((entry.ruleIds as string[] | undefined) ?? []).some((id) => financeRuleIds.has(id))
+    );
+    if (!citesFinance && !writeSet.some((w) => isFinancePath(w.path as string))) continue;
+    const event: ConservationEvent = {
+      resolutionId,
+      entries: resolutionEntries.map((entry) => ({
+        seq: entry.seq as number,
+        cityId: (entry.cityId as string | null) ?? null,
+        ruleIds: (entry.ruleIds as string[] | undefined) ?? [],
+        changes:
+          (entry.changes as { field: string; before: unknown; after: unknown }[] | undefined) ??
+          [],
+      })),
+      writeSet: writeSet
+        .filter((w) => w.op === "create" || w.op === "update" || w.op === "delete")
+        .map((w) => ({
+          path: w.path as string,
+          op: w.op as "create" | "update" | "delete",
+          beforeDoc: (w.beforeDoc as Record<string, unknown> | null) ?? null,
+          afterDoc: (w.afterDoc as Record<string, unknown> | null) ?? null,
+        })),
+    };
+    for (const finding of checkConservationEvent(event, { loans: loanDocs }).findings) {
+      push({
+        code: finding.code,
+        message: finding.message,
+        resolutionId,
+        ...(finding.path ? { path: finding.path } : {}),
+      });
+    }
+  }
+  for (const finding of checkStandingRecords({
+    corporations: corporationDocs,
+    deposits: depositDocs,
+    loans: loanDocs,
+    memberAccounts: accountDocs,
+    cities: cityDocs,
+  }).findings) {
+    push({
+      code: finding.code,
+      message: finding.message,
+      ...(finding.path ? { path: finding.path } : {}),
+    });
   }
 
   return { ok: findings.length === 0, findings };
