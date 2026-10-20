@@ -430,3 +430,150 @@ three real defects before landing (the listed-founding creation
 chain, the dotted `taxPayables` changed-field registration, and the
 literal-null chain spelling for absent payable keys) — §4 records
 the convention so the next family does not rediscover it.
+
+---
+
+## 8. Assembly record (Lead — Rafe, 2026-10-20)
+
+Assembled as branch **`p4/cat2-assembled`** in `phase4-clone`, forked
+from the Chains assembly tip (`p4/chains-assembled` @ `90ebdb8` — the
+post-Chains local base; Theo pushes Chains first and verifies trees
+before pushing this). **13 commits**: Felix's 7 cherry-picked with
+authorship preserved (module payload byte-identical to
+`p4-cat2-clone` @ `0c8d538`; the README conflict composed
+payload-delta style — his three additions placed after the Chains
+entries), then 6 Lead commits, one per §5 item.
+
+- **Item 1 — registry.** `BUSINESS_REGISTERED` folds
+  `BUSINESS_FINANCE_ADDITIONS` onto each descriptor (the
+  FINANCE_REGISTERED pattern) and spreads into `RULE_DESCRIPTORS`.
+  **Descriptor count: 44** — Felix's "37 → 41" was counted on his
+  pre-Defensive/pre-Chains base; on the post-Chains registry (40)
+  the family adds exactly its four (R-06, R-07, F-06, F-07). Probe:
+  `found_corporation` → R-06; the four corporation verbs → R-07;
+  `pay_tax_arrears` → F-07; **F-06 present with no action kinds and
+  no handlers** (a resolver step, as designed), finance additions
+  folded (`shortfallClass: "none"`, company/treasury ledgers).
+- **Item 2 — corporation deltas folded.** `CorporationRecord` +
+  `buildCorporationDoc` now carry `paidInCapitalRubars` (0),
+  `sharesOutstanding` (0), `openingReferencePriceRubars` (null),
+  `lastJudgment` (null, typed `{ quality, scale, importance,
+  inputHash }`) as layer 4 of the shape provenance. Play-core's
+  Module 0 section extended with pins for the four defaults; its
+  standing assertions unchanged (field-wise, none broke). R-06's
+  founding spread is untouched — it supplies the real values over
+  the builder defaults. The §5 step-7 note stands: F-03 does not
+  maintain `paidInCapitalRubars`.
+- **Item 3 — verifier gate set.** `financeRuleIds` in
+  `lib/sim/verify.ts` now includes R-06/R-07/F-06/F-07 **and**
+  F-09/F-10/F-11 (Catalogue I's pending ask, same edit). Checker
+  unchanged; **no holdings supply wired** — the share-conservation
+  assertion stays inert until step 7 creates holding records (F1).
+- **Item 4 — F-10 → F-06 wiring (F5 CLOSED).** In `laws.ts`: the
+  F-10 handler composes `composeTaxAssessment` in-event after the
+  payment lines and the recorded fact (fact shape mapped to the
+  composer's `TaxableFact`: `homeCityId` = the corporation record's
+  city), and the outcome (status / assessed / collected / payable
+  delta / rate) surfaces on the event's summary entry classification
+  + text. The F-10 read plan declares the operating city's laws via
+  `businessLawsQuery` (the named service city, else the payer). The
+  laws↔businesses import is function-level both ways (businesses
+  already imports `deriveTaxScheduleFromLaws` from laws) — the
+  tolerated pattern; nothing executes at module-eval time. F-10
+  facts no longer stand recorded-but-unassessed.
+- **Item 5 — rules/indexes: none**, as specced.
+- **Item 6 — CI:** `test:sim` chains `tests/cat2-harness.ts` after
+  the chains harness, existing non-required Sim core job; required
+  check untouched.
+
+**Flags:** F1–F9 ship **as built** (Theo's posture), including F9's
+`checkCityAuthority` gate on unlisted Expand — a genuine cross-city
+exploit closure, named in the PR body. F3's listed cash leg /
+dissolve stay fail-closed until step 7; the M-08/M-09/M-10
+obligations are named in the PR body.
+
+**Verification (assembled tree):** `tsc --noEmit` clean · scoped
+ESLint clean (0 problems) · `next build` green · **cat2 harness
+34/34 post-registration** (every plan through the real
+`validatePlan` + the real conservation checker, now also
+gate-extended) · **cat1 harness all scenarios green** with the
+F-10 wiring live · registry probe above. Play-core's Module 0
+section carries the new pins (emulator venue = CI, as throughout).
+**No defects found inside Felix's fence.**
+
+## 9. PR draft — Phase 4 Catalogue II (step 6)
+
+**Title:** Phase 4 Catalogue II (step 6): businesses & tax (R-06/R-07/F-06/F-07) — registry + corp-record fold, conservation gate extension, F-10 → F-06 wiring (F5 closed)
+
+**Body:**
+
+### Summary
+Felix's step-6 module + Lead assembly. `lib/sim/rules/businesses.ts`
+carries corporation founding and actions in both branches, the
+F-06 business-tax assessment composer, and F-07 arrears payment.
+With this PR, every Catalogue I taxable fact has a live assessment
+path: the F-10 → F-06 invocation Catalogue I declared is wired.
+
+### What lands
+- **R-06 `found_corporation`:** unlisted book verbatim (home GDP
+  +0.4%, industry synergy +0.2% where a completed structure matches,
+  null-GDP skip-and-log; `legacyBookRubars` provenance only, provably
+  absent from valuation inputs). Listed-at-founding: paid-in capital
+  moves founder → company cash, and the opening reference price
+  derives from paid-in capital × the prepared-payload judgment,
+  cap-first rounding (P4-K18: no multiplier ever touches valuation).
+- **R-07 corporation verbs** (Expand / Contract / Relocate /
+  Dissolve): unlisted multipliers verbatim — Expand's budget is
+  treasury-paid under the funded gate, **gated on
+  `checkCityAuthority` over the home city (flag F9): a foreign
+  owner cannot spend a treasury they do not govern** — a real
+  cross-city exploit closure. Listed: coded inputs only; a
+  contentless Contract rejects; M-06 repricing invoked in-event.
+  Ownership is carried as three separate facts (owner member, home
+  city, operating city) and read correctly (P4-G6).
+- **F-06** lands as a descriptor with **no action kinds** — a
+  resolver step: `composeTaxAssessment` computes tax from the
+  operating city's law-derived schedule over the closed fact list,
+  collects the collectible portion company → host treasury (never
+  beyond a bank's unencumbered surface), and records any remainder
+  as a `taxPayables` entry. **F-07 `pay_tax_arrears`** pays a
+  payable down; keys are removed at zero.
+- **Harness:** `tests/cat2-harness.ts`, 34 checks — every resolved
+  plan through the real `validatePlan` and every money event
+  against the real finance conservation checker.
+
+### Assembly (Lead)
+- Registry: family registered, finance additions folded —
+  **44 descriptors**.
+- Module 0's corporation builder/type now carries the four
+  market-founding fields with unlisted defaults (play-core pins
+  extended; standing assertions unchanged).
+- Verifier conservation gate set extended: R-06/R-07/F-06/F-07 plus
+  Catalogue I's F-09/F-10/F-11. No holdings supply wired.
+- **F-10 → F-06 wiring in `laws.ts` (flag F5 closed):** the F-10
+  handler composes the assessment in-event over its recorded
+  contract-payment fact; its read plan declares the operating
+  city's laws query; the outcome rides the event's summary entry.
+
+### Flags (ship as built — Theo's posture)
+F1–F9 per the prep report §6, including F9's treasury-authority
+gate (above) and F4's `Math.round` tax rounding (the engine's
+universal convention). **F3 stays fail-closed:** a listed
+Contract's cash leg rejects with `cash-leg-requires-market-module`
+and a listed Dissolve with `liquidation-requires-market-module` —
+**step 7 obligations, named here: M-08/M-09 must un-block the
+listed Contract cash leg (P4-K22 routing), M-10 the listed
+Dissolve, and M-01/M-02 must create or backfill the founder
+holding record for any company listed at founding before the
+checker's share assertion may be wired with a holdings supply
+(F1).**
+
+### Verification
+Assembly tree: tsc clean; scoped ESLint clean; `next build`
+green; cat2 harness 34/34 post-registration; cat1 harness all
+scenarios green with the wiring live; registry probe (44
+descriptors; F-06 kindless). Emulator suites are CI's venue.
+README updated (module delta composed payload-delta + Lead
+assembly sentence) per the README-with-every-PR rule. Full
+record: `workstreams/p4-cat2-prep-report.md` §8. No production
+deploy or data access.
