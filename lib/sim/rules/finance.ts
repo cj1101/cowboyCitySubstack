@@ -1122,12 +1122,20 @@ function depositReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
 // B-03 — withdraw_deposit (custodial class; amendment §2.5). A
 // withdrawal is of PRINCIPAL: accrued-unsettled interest is not
 // withdrawable — it realizes only through B-04 settlement. A
-// withdrawal that would close the record (principal -> 0) while
-// accrued-unsettled interest stands is refused with the settlement
-// named, so a claim is never silently stranded by closing its record
-// (reading flagged for the Phase 4 gate). Custodial semantics: full
-// payment if UNENCUMBERED cash covers it, otherwise rejection in
-// full — partial payment is forbidden (the no-surprise rule).
+// withdrawal that closes the record (principal -> 0) extinguishes
+// any accrued-unsettled interest UNCLAIMED: that is the depositor's
+// own confirmed act (their preview shows claim and principal
+// distinctly, §2.2), the extinguished figure is printed in the Log
+// entry — never silent — and it touches no recorded claim stock
+// (accrued-unsettled is a derived figure, not a balance), so the
+// conservation checker sees exactly the principal's movement.
+// (Reading flagged for the Phase 4 gate: the stricter alternative —
+// refusing closure until B-04 runs — makes full withdrawal
+// practically unreachable at any positive rate, since dust interest
+// accrues within a few seqs of any settlement.) Custodial
+// semantics: full payment if UNENCUMBERED cash covers it, otherwise
+// rejection in full — partial payment is forbidden (the
+// no-surprise rule).
 // ---------------------------------------------------------------------------
 
 function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
@@ -1171,12 +1179,10 @@ function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
   if (amount > deposit.principalRubars) {
     return rejectedPlan(descriptorId, "withdrawal-exceeds-principal", [descriptorId], `B-03: withdrawal of ${amount} R exceeds the deposit's principal of ${deposit.principalRubars} R. Accrued-unsettled interest is not principal — it realizes only through B-04 settlement.`);
   }
-  if (amount === deposit.principalRubars) {
-    const accrued = accruedUnsettledRubars(deposit, ctx.snapshot.counterHead.lastSeq + 1);
-    if (accrued > 0) {
-      return rejectedPlan(descriptorId, "settle-interest-first", [descriptorId], `B-03: closing deposit ${deposit.depositId} now would strand ${accrued} R of accrued-unsettled interest — settle it under B-04 first, then withdraw the principal.`);
-    }
-  }
+  const closesAccrued =
+    amount === deposit.principalRubars
+      ? accruedUnsettledRubars(deposit, ctx.snapshot.counterHead.lastSeq + 1)
+      : 0;
 
   const plan = emptyPlan(descriptorId);
   const line: TransferLine = {
@@ -1217,7 +1223,7 @@ function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
       ruleIds: [descriptorId],
       changes: depositChanges,
       recordsUpdated: [depositPath],
-      summaryText: `B-03: deposit ${deposit.depositId} principal ${deposit.principalRubars} -> ${newPrincipal} R${closes ? "; the record closes at full withdrawal" : ""}.`,
+      summaryText: `B-03: deposit ${deposit.depositId} principal ${deposit.principalRubars} -> ${newPrincipal} R${closes ? "; the record closes at full withdrawal" : ""}${closes && closesAccrued > 0 ? `; ${closesAccrued} R of accrued-unsettled interest is extinguished unclaimed by the depositor's own closing act (it was a derived figure, never a balance — B-04 is the only path that realizes it)` : ""}.`,
     })
   );
   pushMovementEntries(plan, ctx, descriptorId, [...applied.changes, aggregateChange], (entryCityId) =>
