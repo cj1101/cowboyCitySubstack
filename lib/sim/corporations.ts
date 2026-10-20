@@ -22,6 +22,13 @@
  *     (book value unlisted / market-cap cache at last touching event
  *     listed). Every surface that renders `valuationRubars` labels which
  *     meaning is live, keyed off `listed`; no surface guesses.
+ *  4. Catalogue II (step 6) market-founding fields, folded into this
+ *     builder/type at Lead assembly (Cat II prep §5 item 2):
+ *     `paidInCapitalRubars`, `sharesOutstanding`,
+ *     `openingReferencePriceRubars`, `lastJudgment`. Founding defaults
+ *     are the unlisted zeros/nulls below; R-06's listed branch supplies
+ *     the real values in its founding spread, and step 7 (Market)
+ *     reads them (M-06's carried-scores path reads `lastJudgment`).
  *
  * This module is the shape and the founding builder only. No handler
  * lives here: R-06/R-07 (Catalogue II) create and mutate records through
@@ -74,6 +81,27 @@ export interface CorporationRecord {
   companyCashRubars: number;
   /** Finance §5.3 payables shape — see TaxPayables above. */
   taxPayables: TaxPayables;
+  /** Catalogue II: capital actually paid in at a listed founding
+   * (0 when unlisted). F-03 moves cash only and does not maintain
+   * this figure — it is a founding-time figure unless step 7's
+   * capital-injection composition maintains it (Cat II prep §5). */
+  paidInCapitalRubars: number;
+  /** Catalogue II: shares issued at a listed founding (0 when
+   * unlisted). Issuance/holding records themselves are step 7's. */
+  sharesOutstanding: number;
+  /** Catalogue II: the M-01 opening reference price from paid-in
+   * capital × the founding judgment (cap-first rounding); null when
+   * unlisted. */
+  openingReferencePriceRubars: number | null;
+  /** Catalogue II: the AI-as-market judgment recorded at a listed
+   * founding (null when unlisted or unjudged). M-06's carried-scores
+   * path reads these scores; `inputHash` binds the prepared payload. */
+  lastJudgment: {
+    quality: number;
+    scale: number;
+    importance: number;
+    inputHash: string | null;
+  } | null;
   homeCityId: string;
   marketCityIds: string[];
   linkedStructureIds: string[];
@@ -126,6 +154,10 @@ export function buildCorporationDoc(args: {
     ownerMemberId: args.ownerMemberId,
     companyCashRubars: 0,
     taxPayables: {},
+    paidInCapitalRubars: 0,
+    sharesOutstanding: 0,
+    openingReferencePriceRubars: null,
+    lastJudgment: null,
     homeCityId: args.homeCityId,
     marketCityIds: args.marketCityIds ?? [],
     linkedStructureIds: [],

@@ -331,7 +331,23 @@ export function verifyStandingLog(input: StandingWorld): {
   // rides the Step 0 prepared-payload binding (the manifest records
   // the prepared payload; a swapped payload refuses
   // PREPARED_HASH_MISMATCH before it can become a standing event).
-  const financeRuleIds = new Set(Object.keys(FINANCE_DESCRIPTORS));
+  const financeRuleIds = new Set([
+    ...Object.keys(FINANCE_DESCRIPTORS),
+    // Catalogue I + II assembly (Cat II prep §5 item 3): the budget/
+    // tax families whose events move money through the same ledgers —
+    // F-09/F-10/F-11 (laws) and R-06/R-07/F-06/F-07 (businesses). The
+    // checker evaluates these events as-is; NO holdings supply is
+    // wired into checkStandingRecords, so the share-conservation
+    // assertion stays inert until step 7 creates holding records
+    // (Cat II flag F1).
+    "F-09",
+    "F-10",
+    "F-11",
+    "R-06",
+    "R-07",
+    "F-06",
+    "F-07",
+  ]);
   const isFinancePath = (path: string) =>
     path.startsWith("sim_member_accounts/") || path.startsWith("sim_bank_deposits/");
   const loanDocs: Record<string, unknown>[] = [];

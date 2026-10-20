@@ -53,6 +53,11 @@ import {
   summaryDraft,
 } from "./planHelpers";
 import { corporationPath } from "../corporations";
+import {
+  businessLawsQuery,
+  composeTaxAssessment,
+  type TaxAssessmentOutcome,
+} from "./businesses";
 import type {
   DescriptorReadPlan,
   HandlerContext,
@@ -807,7 +812,17 @@ function contractPayReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   if (cityId && typeof params.budgetId === "string") {
     paths.push(budgetPath(cityId, params.budgetId));
   }
-  return { paths };
+  // F-06 wiring (Catalogue II assembly — Cat II prep §5 item 4, flag
+  // F5): the assessment composer reads the OPERATING city's
+  // law-derived schedule, so this read plan declares that city's
+  // laws query under the composer's own spec (businessLawsQuery).
+  // The operating city is the named service city, else the payer.
+  const operatingCity =
+    typeof params.serviceCityId === "string" ? params.serviceCityId : cityId;
+  return {
+    paths,
+    ...(operatingCity ? { queries: [businessLawsQuery(operatingCity)] } : {}),
+  };
 }
 
 function serviceContractPayHandler(ctx: HandlerContext): ResolutionPlan {
@@ -885,6 +900,7 @@ function serviceContractPayHandler(ctx: HandlerContext): ResolutionPlan {
     })
   );
 
+  let taxOutcome: TaxAssessmentOutcome | null = null;
   if (pay > 0) {
     const cashBefore = num(corp, "companyCashRubars") ?? 0;
     const current = plannedDoc(plan, ctx.snapshot, corpPath) ?? corp;
@@ -892,8 +908,9 @@ function serviceContractPayHandler(ctx: HandlerContext): ResolutionPlan {
     // The taxable fact (§5.2): a contract payment is F-06's business
     // in the operating city — the paying city unless the action names
     // another — when that city is one of the company's operating
-    // cities. F-06 itself is Catalogue II's rule; this event records
-    // the fact in full and declares the invocation.
+    // cities. This event records the fact in full, declares the
+    // invocation, and — since the Catalogue II assembly — composes
+    // the assessment in-event below (flag F5 closed).
     const operatingCity = typeof params.serviceCityId === "string" ? params.serviceCityId : cityId;
     const operatingCities = new Set([corp.homeCityId as string, ...strList(corp.marketCityIds)]);
     const factApplies = operatingCities.has(operatingCity);
@@ -923,6 +940,30 @@ function serviceContractPayHandler(ctx: HandlerContext): ResolutionPlan {
           : `F-10: ${corporationId} books ${pay} R of contract revenue. No F-06 fact arises (operating city ${operatingCity} is not one of the company's operating cities).`,
       })
     );
+
+    if (factApplies) {
+      // F-06 wiring (Catalogue II assembly — prep §5 item 4): the
+      // declared invocation executes. The composer assesses over the
+      // recorded fact against the operating city's law-derived
+      // schedule (declared in this descriptor's read plan), collects
+      // the collectible portion company → operating treasury, and
+      // records any uncollectible remainder as a tax payable — its
+      // entries join this plan after the fact entry, and the outcome
+      // surfaces in the summary entry below.
+      taxOutcome = composeTaxAssessment({
+        plan,
+        snapshot: ctx.snapshot,
+        actor: ctx.action.actor,
+        citingRuleId: "F-10",
+        fact: {
+          kind: "contract-payment",
+          corporationId,
+          homeCityId: corpCity,
+          operatingCityId: operatingCity,
+          baseAmountRubars: pay,
+        },
+      });
+    }
   }
 
   plan.entries.push(
@@ -930,11 +971,31 @@ function serviceContractPayHandler(ctx: HandlerContext): ResolutionPlan {
       actor: ctx.action.actor,
       actionId: ctx.action.actionId,
       actionText: ctx.action.actionText,
-      classification: { verb: "service-contract-pay", scope: "city", ruleIds: ["F-10"], unruled: false },
+      classification: {
+        verb: "service-contract-pay",
+        scope: "city",
+        ruleIds: ["F-10"],
+        unruled: false,
+        ...(taxOutcome
+          ? {
+              taxAssessment: {
+                status: taxOutcome.status,
+                assessedRubars: taxOutcome.assessedRubars,
+                collectedRubars: taxOutcome.collectedRubars,
+                payableDeltaRubars: taxOutcome.payableDeltaRubars,
+                rateBps: taxOutcome.rateBps,
+              },
+            }
+          : {}),
+      },
       cityId,
       cityIds: [...new Set([cityId, corpCity])],
       ruleIds: ["F-10"],
-      summaryText: `Service contract: ${cityId} → ${corporationId}, ${pay} R paid${shortfall > 0 ? `, ${shortfall} R shortfall logged` : ""} for "${serviceRef}".`,
+      summaryText:
+        `Service contract: ${cityId} → ${corporationId}, ${pay} R paid${shortfall > 0 ? `, ${shortfall} R shortfall logged` : ""} for "${serviceRef}".` +
+        (taxOutcome
+          ? ` F-06 assessment (${taxOutcome.status}): ${taxOutcome.assessedRubars} R assessed, ${taxOutcome.collectedRubars} R collected${taxOutcome.payableDeltaRubars > 0 ? `, ${taxOutcome.payableDeltaRubars} R recorded as a tax payable` : ""}${taxOutcome.note ? ` — ${taxOutcome.note}` : ""}.`
+          : ""),
     })
   );
   pruneRecordClaims(plan);
