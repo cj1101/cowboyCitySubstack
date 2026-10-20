@@ -43,6 +43,7 @@ import {
   descriptorForActionKind,
 } from "./rules/registry";
 import {
+  RipeningPreparationError,
   applyRipeningEffect,
   buildPendingDraft,
   evaluateTrickleDown,
@@ -50,6 +51,11 @@ import {
   type DeterminateEffect,
 } from "./rules/pendingRules";
 import { planWrite, plannedDoc, ruleEffectDraft, summaryDraft } from "./rules/planHelpers";
+import {
+  COUNTER_MEANS_QUERY_ID,
+  buildDeliveryPlan,
+  type DeliverySpec,
+} from "./rules/acquisition";
 
 export class PlanValidationError extends Error {
   code = "PLAN_INVALID";
@@ -286,10 +292,42 @@ export function collectRipeningReadPaths(pending: Record<string, unknown>): stri
     paths.add(`factions/${cityId}`);
   }
   if (typeof spec.fundPath === "string") paths.add(spec.fundPath);
+  // Delivery pendings (Phase 4 step 9): the frozen delivery spec
+  // names every doc the delivery re-validates against — the means
+  // record first, then its vehicles and targets (prep §5 item 3).
+  const delivery = spec.delivery as { readPaths?: unknown } | undefined;
+  if (delivery && Array.isArray(delivery.readPaths)) {
+    for (const path of delivery.readPaths) {
+      if (typeof path === "string") paths.add(path);
+    }
+  }
   const condition = (pending.ripenCondition ?? {}) as Record<string, unknown>;
   const preconditions = (condition.preconditions ?? []) as { path: string }[];
   for (const pc of preconditions) paths.add(pc.path);
   return [...paths];
+}
+
+/** The ripening snapshot's collection queries. Only delivery
+ * pendings declare one: the counter-means query, materialized
+ * whole-collection in Phase 4 form — discovery at delivery is
+ * evaluated against the realm's standing counter-means posture
+ * (design §7.3), read from this query record by the delivery
+ * builder. Every other kind declares none and its snapshot
+ * materializes exactly as before. */
+export function collectRipeningReadQueries(
+  pending: Record<string, unknown>
+): CollectionQuerySpec[] {
+  const spec = (pending.payloadSpec ?? {}) as Record<string, unknown>;
+  if (spec.delivery && typeof spec.delivery === "object") {
+    return [
+      {
+        id: COUNTER_MEANS_QUERY_ID,
+        collectionPath: "sim_collection_means",
+        filters: [],
+      },
+    ];
+  }
+  return [];
 }
 
 export function extractCitations(action: SimAction): SimCitations {
@@ -630,6 +668,41 @@ export function resolveRipening(
   const targetCityId = pending.targetCityId as string;
   const kindConfig = pendingKindConfig(pending.kind as string);
   const spec = pending.payloadSpec as Record<string, unknown>;
+
+  // Data acquisition delivery kinds (Phase 4 step 9 assembly): the
+  // plan comes from the acquisition family's delivery builder, which
+  // re-validates the prepared findings against this snapshot and
+  // writes the intel record — a delivery is not a stat effect, so
+  // the R-33 path below cannot express it. Validation keys on the
+  // spec's own rule (R-25/R-27/R-28 — the builder sets it as the
+  // plan's descriptorId), and the covert flag is the frozen spec's
+  // visibility class, never a constant: a covert run's entries stay
+  // actor-private, and discovery surfaces exactly one public entry,
+  // by citation. Citable Baseline: the ratified version in force at
+  // the snapshot's Log head, or null pre-ratification (fail-closed —
+  // attitude findings null with BASELINE_UNRATIFIED_SOURCE).
+  const delivery = spec.delivery as DeliverySpec | undefined;
+  if (delivery) {
+    if (!opts.prepared) {
+      throw new RipeningPreparationError(
+        "generative ripening requires a prepared payload"
+      );
+    }
+    const deliveryPlan = buildDeliveryPlan(snapshot, pending, {
+      prepared: opts.prepared,
+      citableBaseline:
+        citableBaselineVersion(
+          opts.baselineRegistry,
+          snapshot.counterHead.lastSeq
+        )?.version ?? null,
+    });
+    validatePlan(deliveryPlan, {
+      baselineRegistry: opts.baselineRegistry,
+      covertEntriesAllowed: delivery.visibilityClass === "actor-private",
+      snapshot,
+    });
+    return finalizePlan(deliveryPlan);
+  }
 
   const plan: ResolutionPlan = {
     outcome: "resolved",

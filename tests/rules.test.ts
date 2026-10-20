@@ -1843,6 +1843,116 @@ async function main() {
   }
   console.log("ok sim funds/projects posture (P4 Chains assembly)");
 
+  // ---- P4 Acquisition assembly: collection means / posture /
+  // verification adoptions. Means are owner-readable world records
+  // with committer-only writes; the posture record is fabric-only for
+  // EVERYONE else (design C-6 — the city's own owner and admin
+  // included); adoptions are member-readable markers, committer-only
+  // writes.
+  {
+    const committerFs = fabricCommitter.firestore();
+
+    // Means: seeded by the committer (the only write path).
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_collection_means", "means_seed1"), {
+        meansId: "means_seed1",
+        ownerUid: "memberC",
+        ownerCityId: "cityA",
+        status: "active",
+      })
+    );
+    const meansRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_collection_means", "means_seed1");
+    // The owner, an owner of the owner city, admin, and the fabric
+    // identity (materialization + the counter-means query) read it.
+    await assertSucceeds(getDoc(meansRef(memberC)));
+    await assertSucceeds(getDoc(meansRef(ownerA)));
+    await assertSucceeds(getDoc(meansRef(adminD)));
+    await assertSucceeds(getDoc(meansRef(fabricWorker)));
+    // A non-owner member of another city, a guest, and anon do not.
+    await assertFails(getDoc(meansRef(ownerB)));
+    await assertFails(getDoc(meansRef(guestG)));
+    await assertFails(getDoc(meansRef(anon)));
+    // Writes are committer-only — the fabric worker included.
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_collection_means", "means_forged"), {
+        meansId: "means_forged",
+        ownerUid: "memberC",
+        ownerCityId: "cityA",
+        status: "active",
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_collection_means", "means_worker"), {
+        meansId: "means_worker",
+        ownerUid: "fabricWkr",
+        ownerCityId: "cityA",
+        status: "active",
+      })
+    );
+    await assertFails(deleteDoc(doc(memberC.firestore(), "sim_collection_means", "means_seed1")));
+
+    // Posture: fabric service reads; the committer writes. NO client
+    // identity reads it — the city's own owner and admin are the
+    // discriminative denials (C-6 confidentiality).
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_collection_posture", "cityA"), {
+        cityId: "cityA",
+        discoveredRunIds: [],
+      })
+    );
+    const postureRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_collection_posture", "cityA");
+    await assertSucceeds(getDoc(postureRef(fabricCommitter)));
+    await assertSucceeds(getDoc(postureRef(fabricWorker)));
+    await assertFails(getDoc(postureRef(ownerA)));
+    await assertFails(getDoc(postureRef(adminD)));
+    await assertFails(getDoc(postureRef(memberC)));
+    await assertFails(getDoc(postureRef(guestG)));
+    await assertFails(getDoc(postureRef(anon)));
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_collection_posture", "cityA"), {
+        cityId: "cityA",
+        discoveredRunIds: ["run_forged"],
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_collection_posture", "cityB"), {
+        cityId: "cityB",
+        discoveredRunIds: [],
+      })
+    );
+
+    // Adoptions: member-readable, committer-only writes.
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_verification_adoptions", "adopt_seed1"), {
+        reportId: "pub_report1",
+        tier: "material",
+      })
+    );
+    const adoptionRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_verification_adoptions", "adopt_seed1");
+    await assertSucceeds(getDoc(adoptionRef(memberC)));
+    await assertSucceeds(getDoc(adoptionRef(ownerA)));
+    await assertSucceeds(getDoc(adoptionRef(adminD)));
+    // Guests are viewers, not full members; anon is neither.
+    await assertFails(getDoc(adoptionRef(guestG)));
+    await assertFails(getDoc(adoptionRef(anon)));
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_verification_adoptions", "adopt_forged"), {
+        reportId: "pub_forged",
+        tier: "minor",
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_verification_adoptions", "adopt_worker"), {
+        reportId: "pub_worker",
+        tier: "minor",
+      })
+    );
+  }
+  console.log("ok sim acquisition collections posture (P4 Acquisition assembly)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)

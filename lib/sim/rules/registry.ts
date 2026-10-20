@@ -20,7 +20,13 @@
  * Phase 4 step 6: their descriptors live in ./businesses, registered
  * below with their finance §2.4 additions folded on (F-06 carries no
  * action kinds — it is a resolver step composed in-event by citing
- * rules).
+ * rules). R-25–R-31 (Data acquisition — means-gated surveys, covert
+ * collection + discovery, publish/verify/adopt) landed with Phase 4
+ * step 9: their descriptors live in ./acquisition and are spread
+ * below (the family exports an array, keyed by id here; its finance
+ * §2.4 additions ride inline on the descriptors, so no fold). R-29
+ * registers as a descriptor-only stub — its single handler states
+ * the deferral and the export-OFF clause, nothing more.
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -58,6 +64,7 @@ import { DEFENSIVE_DESCRIPTORS } from "./defensive";
 import { CHAINS_DESCRIPTORS, R32_PRODUCT_HANDLERS } from "./chains";
 import { GROWTH_DESCRIPTORS } from "./growth";
 import { BUSINESS_DESCRIPTORS, BUSINESS_FINANCE_ADDITIONS } from "./businesses";
+import { ACQUISITION_DESCRIPTORS } from "./acquisition";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1075,6 +1082,14 @@ const BUSINESS_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntries(
   ])
 );
 
+/** Data acquisition descriptors (Phase 4 step 9 assembly). The
+ * family exports an array; it is keyed by descriptor id here. The
+ * family's finance §2.4 additions ride inline on its descriptors
+ * already, so — unlike finance/businesses — there is no fold. */
+const ACQUISITION_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntries(
+  ACQUISITION_DESCRIPTORS.map((descriptor) => [descriptor.id, descriptor])
+);
+
 export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "R-32": {
     id: "R-32",
@@ -1121,6 +1136,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   ...DEFENSIVE_DESCRIPTORS,
   ...GROWTH_DESCRIPTORS,
   ...BUSINESS_REGISTERED,
+  ...ACQUISITION_REGISTERED,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],

@@ -33,10 +33,14 @@ import { evaluatePrecondition, type StructuredPrecondition } from "./rules/pendi
 import {
   buildSnapshot,
   collectRipeningReadPaths,
+  collectRipeningReadQueries,
+  materializeSnapshot,
   resolveRipening,
   resolveVoiding,
   type DocReader,
+  type QueryReader,
 } from "./resolver";
+import { firestoreQueryReader } from "./readers";
 import { CommitError, commitResolution } from "./committer";
 import type { BaselineRegistry } from "./baseline/registry";
 
@@ -201,6 +205,10 @@ export interface ScanDeps {
   committerDb: Firestore;
   baselineRegistry: BaselineRegistry;
   reader: DocReader;
+  /** Query executor for ripening read plans that declare collection
+   * queries (Phase 4 step 9: delivery pendings' counter-means query).
+   * Defaults to the Firestore query reader over the committer db. */
+  queryReader?: QueryReader;
 }
 
 export interface ScanSummary {
@@ -328,7 +336,30 @@ export async function scanRipeness(
 
     try {
       const paths = collectRipeningReadPaths(claimed);
-      const snapshot = await buildSnapshot(deps.reader, paths, opts.now);
+      const queries = collectRipeningReadQueries(claimed);
+      // Only delivery pendings declare ripening queries today; with
+      // none declared the snapshot materializes exactly as before.
+      // With queries, the materializer binds every result doc into
+      // the snapshot (and its query records ride the commit, so the
+      // in-transaction recompute finds the same materialized set).
+      const snapshot =
+        queries.length === 0
+          ? await buildSnapshot(deps.reader, paths, opts.now)
+          : await materializeSnapshot(
+              deps.reader,
+              deps.queryReader ?? firestoreQueryReader(db),
+              { paths, queries },
+              opts.now
+            );
+      const snapshotPaths =
+        queries.length === 0
+          ? paths
+          : [
+              ...new Set([
+                ...paths,
+                ...snapshot.queries.flatMap((q) => q.resultPaths),
+              ]),
+            ];
       const prepared = opts.preparedPayloads?.get(pendingId);
       const plan =
         verdict.state === "void"
@@ -349,7 +380,8 @@ export async function scanRipeness(
           now: opts.now,
           plan,
           expectedHeads: snapshot.heads,
-          snapshotPaths: paths,
+          snapshotPaths,
+          queryRecords: snapshot.queries,
           pending: claimed,
           claimLeaseId: leaseId,
           prepared,
