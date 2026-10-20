@@ -11,7 +11,11 @@
  * (Season-0 allocation) landed with Phase 4 step 3: its descriptor
  * lives in ./allocation and is registered below. R-18/R-37 (Defensive)
  * landed with Phase 4 step 8: their descriptors live in ./defensive
- * and are spread below.
+ * and are spread below. R-32's product fund verbs and R-36 (Chains +
+ * growth) landed with Phase 4 step 10: the product handlers live in
+ * ./chains and ./growth; the R-32 entry below is the union merge (the
+ * Phase 2 fixture kinds stay; the chains read plan is gated to the
+ * product kinds so fixture manifests gain no funds-path read).
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -46,6 +50,8 @@ import { FINANCE_DESCRIPTOR_META, FINANCE_DESCRIPTORS } from "./finance";
 import { STRUCTURE_DESCRIPTORS, STRUCTURE_FINANCE_ADDITIONS } from "./structures";
 import { LAW_DESCRIPTORS } from "./laws";
 import { DEFENSIVE_DESCRIPTORS } from "./defensive";
+import { CHAINS_DESCRIPTORS, R32_PRODUCT_HANDLERS } from "./chains";
+import { GROWTH_DESCRIPTORS } from "./growth";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1053,13 +1059,21 @@ const STRUCTURE_REGISTERED: Record<string, RuleDescriptor> = {
 export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "R-32": {
     id: "R-32",
-    actionKinds: ["fixture_fund", "fixture_schedule"],
+    actionKinds: ["fixture_fund", "fixture_schedule", ...CHAINS_DESCRIPTORS["R-32"].actionKinds],
     visibility: "public",
     requiresBaseline: false,
     defaultBaselineSections: [],
     mayCreatePendings: true,
-    handlers: { fixture_fund: fundHandler, fixture_schedule: scheduleHandler },
-    summary: "Creation of a pending consequence (determinate or generative) inside an origin resolution.",
+    handlers: { fixture_fund: fundHandler, fixture_schedule: scheduleHandler, ...R32_PRODUCT_HANDLERS },
+    // The chains read plan declares the fund record for the product
+    // verbs only — gated here so a fixture fund/schedule manifest
+    // never gains a spurious funds-path read (prep §5 A-1).
+    readPlan: (seeds) =>
+      seeds.action.actionType === "establish_fund" || seeds.action.actionType === "dissolve_fund"
+        ? CHAINS_DESCRIPTORS["R-32"].readPlan!(seeds)
+        : {},
+    summary:
+      "Pending consequences under Action-Gated Ripening: the Phase 2 fixture verbs (fixture_fund / fixture_schedule — creation of a determinate or generative pending inside an origin resolution) and the product fund verbs (establish_fund commits treasury Rubars into a named fund with published terms and schedules exactly one generation-1 pending, its delay derived by the landed formula and disclosed at creation; dissolve_fund returns unspent Rubars and ends the fund, its live pendings voiding at their next ripeness evaluation).",
   },
   "R-33": {
     id: "R-33",
@@ -1086,6 +1100,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   ...STRUCTURE_REGISTERED,
   ...LAW_DESCRIPTORS,
   ...DEFENSIVE_DESCRIPTORS,
+  ...GROWTH_DESCRIPTORS,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
