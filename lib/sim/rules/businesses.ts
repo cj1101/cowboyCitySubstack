@@ -68,8 +68,8 @@ import {
   actorMemberId,
   cityPath,
   composeLazyOpen,
+  householdsScope,
   memberAccountPath,
-  type LedgerRef,
 } from "../../finance/accounts";
 import {
   applyTransferLines,
@@ -1076,6 +1076,456 @@ function foundCorporationReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
 }
 
 // ---------------------------------------------------------------------------
+// R-07 — corporation action (systems-spec v2 R-07, both branches).
+// Verbs: Expand, Contract, Relocate, Dissolve — one descriptor, one
+// action kind per verb.
+//
+// Unlisted (Vera's text verbatim): Expand valuation ×1.25 + home GDP
+// +0.2% + the home treasury pays the recorded expansion budget;
+// Contract ×0.8, GDP −0.2%; Relocate = home Contract + destination
+// Expand at half rate + valuation ×1.1 after the move, destination
+// owner confirming; Dissolve valuation -> 0, GDP −0.3%, spirit −1,
+// with spirit −1 also in each third city the action record names.
+//
+// Listed (P4-K18): NO multiplier ever touches valuation — a ripening
+// writes coded inputs only (cash, footprint, links) and declares the
+// M-06 invocation for the same event; M-06 is the only valuation
+// writer and lands with step 7. Expand pays the budget INTO company
+// cash from the founder's personal account (P4-K21(ii): no treasury
+// source in Phase 4). Contract must name input changes or reject as
+// contentless. The two legs whose lawful execution needs step 7's
+// records reject fail-closed (flag F3): a listed Contract's cash leg
+// (P4-K22 routes it through M-08/M-09 — never a bare withdrawal) and a
+// listed Dissolve (M-10's waterfall pays shareholders of record; no
+// holdings records stand in the world yet).
+// ---------------------------------------------------------------------------
+
+type CorpVerb = "expand" | "contract" | "relocate" | "dissolve";
+
+/** Fold field updates into the corporation record's planned write and
+ * return the field changes for the Log. Diffs are computed against the
+ * PLANNED doc (never the raw snapshot — the F-02 discipline), and only
+ * fields whose value actually changes produce a change line or a
+ * changed-field registration. */
+function mutateCorporation(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  corpPath: string,
+  corporationId: string,
+  updates: Record<string, unknown>,
+  formula: string
+): LogEntryDraft["changes"] {
+  const current = plannedDoc(plan, snapshot, corpPath);
+  if (!current) return [];
+  const changes: LogEntryDraft["changes"] = [];
+  const changedFields: string[] = [];
+  const next = { ...current };
+  for (const [field, value] of Object.entries(updates)) {
+    const before = current[field];
+    if (JSON.stringify(before ?? null) !== JSON.stringify(value ?? null)) {
+      next[field] = value;
+      changedFields.push(field);
+      changes.push(fieldChange(`corporations/${corporationId}.${field}`, before ?? null, value ?? null, formula));
+    }
+  }
+  if (changedFields.length > 0) {
+    planWrite(plan, snapshot, corpPath, next, "state", changedFields);
+  }
+  return changes;
+}
+
+function corporationActionHandler(verb: CorpVerb) {
+  return (ctx: HandlerContext): ResolutionPlan => {
+    const descriptorId = "R-07";
+    const npc = rejectNpc(ctx, descriptorId);
+    if (npc) return npc;
+    const ownerId = actorMemberId(ctx.action.actor);
+    if (!ownerId) {
+      return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "R-07: the actor carries no member identity.");
+    }
+    const corporationId = stringField(ctx.action, "corporationId");
+    const homeCityId = stringField(ctx.action, "homeCityId");
+    if (!corporationId || !homeCityId) {
+      return rejectedPlan(descriptorId, "malformed-action", [descriptorId], "R-07: a corporation action requires corporationId and homeCityId (the record's home city).");
+    }
+    const corpPath = corporationPath(homeCityId, corporationId);
+    const corp = readCorporation(ctx, homeCityId, corporationId);
+    if (!corp) {
+      return rejectedPlan(descriptorId, "corporation-not-found", [descriptorId], `R-07: no corporation record at ${corpPath}.`);
+    }
+    if (corp.ownerMemberId !== ownerId) {
+      return rejectedPlan(descriptorId, "not-company-owner", [descriptorId], `R-07: ${ownerId} is not the ownerMemberId of ${corporationId} — a corporation's acts are its owner's.`);
+    }
+    if (corp.status === "dissolved") {
+      return rejectedPlan(descriptorId, "company-dissolved", [descriptorId], `R-07: ${corporationId} is dissolved; no corporation action resolves on a dissolved record.`);
+    }
+    const listed = corp.listed === true;
+    const plan = emptyPlan(descriptorId);
+    const notes: string[] = [];
+    const changes: LogEntryDraft["changes"] = [];
+    const citiesTouched = new Set<string>([homeCityId]);
+    let classification: Record<string, unknown> = {};
+    let summary = "";
+    let major = false;
+    // Relocate only: the destination city's GDP change rides the
+    // destination's own entry, not the home entry's changes.
+    let destGdpChange: LogEntryDraft["changes"][number] | null = null;
+
+    if (verb === "expand") {
+      const budget = positiveAmount(ctx.action, "expansionBudgetRubars");
+      if (budget === null) {
+        return rejectedPlan(descriptorId, "malformed-action", [descriptorId], "R-07 Expand: the action must record expansionBudgetRubars (a positive integer) — the budget is part of the act's stated content in both branches.");
+      }
+      if (!listed) {
+        // Unlisted: the home treasury pays the budget, budget class.
+        // The funded-gate mirrors landed R-05 exactly (flag F2): the
+        // paid portion moves to the Exterior (spent on the expansion —
+        // paying it into company cash would double-count against the
+        // book step), and the valuation/GDP effects fire only when the
+        // budget is funded in full.
+        //
+        // Authority: the budget is the home city's money, and a
+        // corporation's owner need not govern its home city (businesses
+        // are separately owned and operate across cities). Spending a
+        // treasury is its governor's act — an owner who does not
+        // govern the home city has no lawful payer for the unlisted
+        // budget and the action rejects, naming the seam (flag F9).
+        const authority = checkCityAuthority(ctx.snapshot, homeCityId, ctx.action.actor);
+        if (!authority.ok) {
+          return rejectedPlan(descriptorId, "not-city-governor", [descriptorId], `R-07 Expand (unlisted): the expansion budget is paid by ${homeCityId}'s treasury, and the actor does not govern that city: ${authority.reason}. A foreign-owned corporation's unlisted expansion has no lawful treasury payer in v1; the listed branch (founder-funded) is its expansion path.`);
+        }
+        const city = plannedDoc(plan, ctx.snapshot, cityPath(homeCityId));
+        const treasury = num(city, "stats.treasuryRubars");
+        if (treasury === null) {
+          return rejectedPlan(descriptorId, "no-treasury-figure", [descriptorId], `R-07 Expand: ${homeCityId} carries no treasury figure — the expansion budget cannot be paid.`);
+        }
+        const pay = Math.min(budget, treasury);
+        const shortfall = budget - pay;
+        const funded = shortfall === 0;
+        if (pay > 0) {
+          const line: TransferLine = {
+            from: { kind: "treasury", cityId: homeCityId },
+            to: { kind: "exterior", scope: householdsScope(homeCityId) },
+            amountRubars: pay,
+            ruleId: descriptorId,
+            memo: `expansion budget for ${corporationId}`,
+          };
+          const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "budget" });
+          if (!applied.ok) {
+            return rejectedPlan(descriptorId, "insufficient-funds", [descriptorId], `R-07 Expand: the budget line refused: ${applied.message}`);
+          }
+          pushMovementEntries(plan, ctx, descriptorId, applied.changes, (entryCityId) =>
+            entryCityId === homeCityId
+              ? `R-07 Expand: ${homeCityId}'s treasury paid ${pay} R of ${corporationId}'s recorded expansion budget (${budget} R)${funded ? "" : ` — SHORTFALL ${shortfall} R logged (budget class, §2.4)`}.`
+              : `R-07 Expand: ${pay} R of expansion spending entered ${homeCityId}'s resident economy (the Exterior, households scope) — the budget is spent on the expansion, not held as company cash; the unlisted branch's substance is the book step.`
+          );
+        }
+        if (funded) {
+          changes.push(
+            ...mutateCorporation(plan, ctx.snapshot, corpPath, corporationId,
+              { valuationRubars: Math.round((num(corp, "valuationRubars") ?? 0) * 1.25), status: "active" },
+              "R-07 Expand (unlisted): valuation × 1.25, rounded")
+          );
+          const gdp = outcomeNote(applyGdpPercent(plan, ctx.snapshot, homeCityId, 0.2, "R-07 Expand: home gdp +0.2%"), notes);
+          if (gdp) changes.push(gdp);
+        } else {
+          notes.push(`expansion not effected — the budget funded ${pay} R of ${budget} R (shortfall ${shortfall} R); under the budget-class funded-gate the valuation step and GDP effect do not fire on a partially funded expansion`);
+        }
+        classification = { corporationAction: { verb, branch: "unlisted", expansionBudgetRubars: budget, paidRubars: pay, shortfallRubars: shortfall, funded } };
+        summary = funded
+          ? `Expanded ${corporationId}: valuation ×1.25 to ${num(plannedDoc(plan, ctx.snapshot, corpPath), "valuationRubars")} R, home GDP +0.2%, treasury paid the ${budget} R expansion budget in full.`
+          : `Expand ${corporationId} resolved partially funded: treasury paid ${pay} R of the ${budget} R budget (shortfall ${shortfall} R) and the expansion did not take effect.`;
+      } else {
+        // Listed: the budget is paid INTO company cash from the
+        // founder's personal account, transfer class, the funding
+        // source recorded distinctly. Footprint changes land as
+        // records. Valuation is never touched (P4-K18).
+        const fundingSource = stringField(ctx.action, "fundingSource") ?? "personal";
+        if (fundingSource === "treasury") {
+          return rejectedPlan(descriptorId, "treasury-source-suspended", [descriptorId, "P4-K21"], "R-07 Expand (listed): a treasury-sourced capital injection is suspended in Phase 4 (P4-K21(ii)) — the founder's personal account is the Phase 4 source.");
+        }
+        if (fundingSource !== "personal") {
+          return rejectedPlan(descriptorId, "malformed-action", [descriptorId], `R-07 Expand (listed): fundingSource "${fundingSource}" is not lawful (personal is the Phase 4 source).`);
+        }
+        const addMarketCityIds = strList(sa(ctx.action).addMarketCityIds);
+        for (const marketCityId of addMarketCityIds) {
+          if (!snapshotDoc(ctx.snapshot, cityPath(marketCityId))) {
+            return rejectedPlan(descriptorId, "city-not-found", [descriptorId], `R-07 Expand (listed): the named market city ${marketCityId} has no city record.`);
+          }
+          citiesTouched.add(marketCityId);
+        }
+        const addLinkedStructureIds = strList(sa(ctx.action).addLinkedStructureIds);
+        if (addLinkedStructureIds.length > 0) {
+          const standing = new Set(
+            structureDocsFromSnapshot(ctx.snapshot, homeCityId)
+              .map((d) => (typeof d?.structureId === "string" ? d.structureId : null))
+              .filter((x): x is string => x !== null)
+          );
+          for (const structureId of addLinkedStructureIds) {
+            if (!standing.has(structureId)) {
+              return rejectedPlan(descriptorId, "structure-not-found", [descriptorId], `R-07 Expand (listed): structure ${structureId} does not stand in ${homeCityId} — a footprint link must name a real record.`);
+            }
+          }
+        }
+        composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: ownerId, viaActionKind: "expand_corporation" });
+        const line: TransferLine = {
+          from: { kind: "personal", memberId: ownerId },
+          to: companyRef(homeCityId, corporationId),
+          amountRubars: budget,
+          ruleId: descriptorId,
+          memo: `expansion capital injection into ${corporationId}`,
+        };
+        const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+        if (!applied.ok) {
+          return rejectedPlan(
+            descriptorId,
+            applied.code === "INSUFFICIENT_FUNDS" ? "insufficient-funds" : applied.code.toLowerCase().replace(/_/g, "-"),
+            [descriptorId],
+            `R-07 Expand (listed): the capital injection of ${budget} R refused in full (transfer class): ${applied.message}`
+          );
+        }
+        pushMovementEntries(plan, ctx, descriptorId, applied.changes, (entryCityId) =>
+          entryCityId === null
+            ? `R-07 Expand (listed): ${ownerId}'s personal account injected ${budget} R into ${corporationId} (funding source: founder's personal account, recorded distinctly).`
+            : `R-07 Expand (listed): ${corporationId}'s company cash received ${budget} R of expansion capital. No multiplier touches valuation in the listed branch — the injection is a coded M-06 input.`
+        );
+        const marketAfter = [...new Set([...strList(corp.marketCityIds), ...addMarketCityIds])].filter((c) => c !== homeCityId);
+        const linksAfter = [...new Set([...strList(corp.linkedStructureIds), ...addLinkedStructureIds])];
+        changes.push(
+          ...mutateCorporation(plan, ctx.snapshot, corpPath, corporationId,
+            { marketCityIds: marketAfter, linkedStructureIds: linksAfter, status: "active" },
+            "R-07 Expand (listed): footprint input changes — market cities and structure links land as records for M-06")
+        );
+        const gdp = outcomeNote(applyGdpPercent(plan, ctx.snapshot, homeCityId, 0.2, "R-07 Expand: home gdp +0.2%"), notes);
+        if (gdp) changes.push(gdp);
+        classification = {
+          corporationAction: { verb, branch: "listed", expansionBudgetRubars: budget, fundingSource, addMarketCityIds, addLinkedStructureIds },
+          invokesRules: ["M-06"],
+        };
+        summary = `Expanded ${corporationId} (listed): ${budget} R paid into company cash from the founder's personal account; footprint inputs landed (market cities ${marketAfter.join(", ") || "unchanged"}; structure links ${linksAfter.length}); home GDP +0.2%. Valuation untouched — M-06 repricing is invoked inside this event (Market module, step 7) and derives value from these coded inputs alone.`;
+      }
+    }
+
+    if (verb === "contract") {
+      const exitMarketCityIds = strList(sa(ctx.action).exitMarketCityIds);
+      const unlinkStructureIds = [
+        ...strList(sa(ctx.action).unlinkStructureIds),
+        ...strList(sa(ctx.action).mothballStructureIds),
+      ];
+      const withdrawal = positiveAmount(ctx.action, "cashWithdrawalRubars");
+      const hasInputs = exitMarketCityIds.length > 0 || unlinkStructureIds.length > 0 || withdrawal !== null;
+      if (listed && !hasInputs) {
+        return rejectedPlan(descriptorId, "contentless-contract", [descriptorId], "R-07 Contract (listed): the action names no input change — no market-city exit, no structure unlink/mothball, no recorded cash withdrawal. A listed Contract's mechanical content IS its input changes; a contract naming none is contentless and is rejected and logged as such.");
+      }
+      if (listed && withdrawal !== null) {
+        return rejectedPlan(descriptorId, "cash-leg-requires-market-module", [descriptorId, "M-08", "M-09"], `R-07 Contract (listed): the named cash withdrawal of ${withdrawal} R is a cash leg, and a listed Contract's cash leg routes through M-08 (pro-rata distribution to shareholders of record) or M-09 (buyback) under P4-K22 — never a bare company -> owner line. Those rules land with the Market module (step 7); until they do, the action rejects whole rather than severing one leg of a confirmed act. Re-submit without the cash leg to land the input changes now.`);
+      }
+      for (const exitCityId of exitMarketCityIds) {
+        if (!strList(corp.marketCityIds).includes(exitCityId)) {
+          return rejectedPlan(descriptorId, "not-a-market-city", [descriptorId], `R-07 Contract: ${exitCityId} is not among ${corporationId}'s market cities — an exit must name a market the company actually operates in.`);
+        }
+        citiesTouched.add(exitCityId);
+      }
+      for (const structureId of unlinkStructureIds) {
+        if (!strList(corp.linkedStructureIds).includes(structureId)) {
+          return rejectedPlan(descriptorId, "structure-not-linked", [descriptorId], `R-07 Contract: structure ${structureId} is not linked to ${corporationId} — an unlink must name a linked structure.`);
+        }
+      }
+      if (!listed && withdrawal !== null) {
+        notes.push(`a cash withdrawal of ${withdrawal} R was named on an unlisted Contract — it has no mechanical content in Vera's table (the unlisted verb's content is its multiplier and GDP effect) and no cash moved`);
+      }
+      const marketAfter = strList(corp.marketCityIds).filter((c) => !exitMarketCityIds.includes(c));
+      const linksAfter = strList(corp.linkedStructureIds).filter((s) => !unlinkStructureIds.includes(s));
+      const updates: Record<string, unknown> = { marketCityIds: marketAfter, linkedStructureIds: linksAfter, status: "contracted" };
+      if (!listed) updates.valuationRubars = Math.round((num(corp, "valuationRubars") ?? 0) * 0.8);
+      changes.push(
+        ...mutateCorporation(plan, ctx.snapshot, corpPath, corporationId, updates,
+          listed
+            ? "R-07 Contract (listed): input changes land as records; valuation is never written in the listed branch"
+            : "R-07 Contract (unlisted): valuation × 0.8, rounded")
+      );
+      const gdp = outcomeNote(applyGdpPercent(plan, ctx.snapshot, homeCityId, -0.2, "R-07 Contract: home gdp −0.2%"), notes);
+      if (gdp) changes.push(gdp);
+      classification = {
+        corporationAction: { verb, branch: listed ? "listed" : "unlisted", exitMarketCityIds, unlinkStructureIds, cashWithdrawalRubars: withdrawal },
+        ...(listed ? { invokesRules: ["M-06"] } : {}),
+      };
+      summary = listed
+        ? `Contracted ${corporationId} (listed) on named input changes: exited markets [${exitMarketCityIds.join(", ") || "none"}], unlinked structures [${unlinkStructureIds.join(", ") || "none"}]; home GDP −0.2%. Valuation untouched — M-06 repricing is invoked inside this event (Market module, step 7).`
+        : `Contracted ${corporationId}: valuation ×0.8 to ${num(plannedDoc(plan, ctx.snapshot, corpPath), "valuationRubars")} R, home GDP −0.2%${exitMarketCityIds.length + unlinkStructureIds.length > 0 ? "; the named footprint changes landed as records" : ""}.`;
+    }
+
+    if (verb === "relocate") {
+      const destinationCityId = stringField(ctx.action, "destinationCityId");
+      const confirmationRef = stringField(ctx.action, "destinationConfirmationRef");
+      if (!destinationCityId) {
+        return rejectedPlan(descriptorId, "malformed-action", [descriptorId], "R-07 Relocate: the action requires destinationCityId.");
+      }
+      if (destinationCityId === homeCityId) {
+        return rejectedPlan(descriptorId, "already-home", [descriptorId], `R-07 Relocate: ${corporationId} is already at home in ${homeCityId}.`);
+      }
+      if (!snapshotDoc(ctx.snapshot, cityPath(destinationCityId))) {
+        return rejectedPlan(descriptorId, "city-not-found", [descriptorId], `R-07 Relocate: no city record for the destination ${destinationCityId}.`);
+      }
+      if (!confirmationRef) {
+        return rejectedPlan(descriptorId, "destination-unconfirmed", [descriptorId], "R-07 Relocate: the destination city's owner must confirm (cross-city draft rule) — the action record carries no destinationConfirmationRef, so the move does not resolve.");
+      }
+      const newCorpPath = corporationPath(destinationCityId, corporationId);
+      if (snapshotDoc(ctx.snapshot, newCorpPath)) {
+        return rejectedPlan(descriptorId, "corporation-already-exists", [descriptorId], `R-07 Relocate: a corporation record already stands at ${newCorpPath}.`);
+      }
+      citiesTouched.add(destinationCityId);
+      // City effects: home takes Contract's GDP effect; the
+      // destination takes Expand's at half rate (+0.1%).
+      const homeGdp = outcomeNote(applyGdpPercent(plan, ctx.snapshot, homeCityId, -0.2, "R-07 Relocate: home (departing) gdp −0.2% — the Contract effect"), notes);
+      if (homeGdp) changes.push(homeGdp);
+      destGdpChange = outcomeNote(applyGdpPercent(plan, ctx.snapshot, destinationCityId, 0.1, "R-07 Relocate: destination gdp +0.1% — the Expand effect at half rate"), notes);
+      // The record move: the corporation doc leaves the old home's
+      // subcollection and stands in the destination's. Structures do
+      // not move — links to old-home structures clear (logged); cash,
+      // payables and (listed) share figures travel with the record.
+      const keepOldHomeAsMarket = sa(ctx.action).keepOldHomeAsMarket === true;
+      const marketAfter = strList(corp.marketCityIds).filter((c) => c !== destinationCityId);
+      if (keepOldHomeAsMarket && !marketAfter.includes(homeCityId)) marketAfter.push(homeCityId);
+      const movedDoc: Record<string, unknown> = {
+        ...corp,
+        homeCityId: destinationCityId,
+        status: "relocated",
+        marketCityIds: marketAfter,
+        linkedStructureIds: [],
+        valuationRubars: listed ? corp.valuationRubars : Math.round((num(corp, "valuationRubars") ?? 0) * 1.1),
+        lastResolutionId: ctx.resolutionId,
+      };
+      planWrite(plan, ctx.snapshot, corpPath, null, "state", ["homeCityId", "status"]);
+      planWrite(plan, ctx.snapshot, newCorpPath, movedDoc, "state", ["homeCityId", "status", "marketCityIds", "linkedStructureIds", ...(listed ? [] : ["valuationRubars"])]);
+      classification = {
+        corporationAction: { verb, branch: listed ? "listed" : "unlisted", fromCityId: homeCityId, toCityId: destinationCityId, confirmationRef, keepOldHomeAsMarket },
+        ...(listed ? { invokesRules: ["M-06"] } : {}),
+      };
+      summary = `Relocated ${corporationId} from ${homeCityId} to ${destinationCityId} (destination owner confirmation ${confirmationRef}): home GDP −0.2%, destination GDP +0.1% (Expand at half rate)${listed ? "; valuation untouched in the listed branch — M-06 repricing is invoked inside this event (step 7)" : `; valuation ×1.1 after the move to ${movedDoc.valuationRubars} R`}. Structure links in ${homeCityId} cleared — buildings do not move; market cities now [${marketAfter.join(", ") || "none"}].`;
+      major = true;
+    }
+
+    if (verb === "dissolve") {
+      if (listed) {
+        return rejectedPlan(descriptorId, "liquidation-requires-market-module", [descriptorId, "M-10"], "R-07 Dissolve (listed): a listed dissolution resolves as M-10 liquidation — the waterfall pays taxes/fees payable and adjudicated amounts ahead of shareholders of record, pro-rata, uncapped. The Market module (step 7) owns that waterfall and the holdings records it pays against; neither stands in the world yet. The dissolution rejects whole rather than half-liquidating (never the unlisted ×0 book path on a listed company).");
+      }
+      const affectedCityIds = strList(sa(ctx.action).affectedCityIds).filter((c) => c !== homeCityId);
+      changes.push(
+        ...mutateCorporation(plan, ctx.snapshot, corpPath, corporationId,
+          { valuationRubars: 0, status: "dissolved" },
+          "R-07 Dissolve (unlisted): valuation -> 0")
+      );
+      const gdp = outcomeNote(applyGdpPercent(plan, ctx.snapshot, homeCityId, -0.3, "R-07 Dissolve: home gdp −0.3%"), notes);
+      if (gdp) changes.push(gdp);
+      const spirit = outcomeNote(applyIndexDelta(plan, ctx.snapshot, homeCityId, "spirit", -1, "R-07 Dissolve: home spirit −1"), notes);
+      if (spirit) changes.push(spirit);
+      classification = { corporationAction: { verb, branch: "unlisted", affectedCityIds } };
+      summary = `Dissolved ${corporationId}: valuation -> 0, home GDP −0.3%, home spirit −1${affectedCityIds.length > 0 ? `; spirit −1 also in each named third city [${affectedCityIds.join(", ")}] where the corporation held structures/staff` : ""}.`;
+      major = true;
+      // Third-city spirit effects ride their own spillover entries.
+      for (const thirdCityId of affectedCityIds) {
+        citiesTouched.add(thirdCityId);
+        const thirdNotes: string[] = [];
+        const thirdChanges: LogEntryDraft["changes"] = [];
+        const thirdSpirit = outcomeNote(applyIndexDelta(plan, ctx.snapshot, thirdCityId, "spirit", -1, "R-07 Dissolve spillover: spirit −1 in a city where the dissolved corporation held structures/staff"), thirdNotes);
+        if (thirdSpirit) thirdChanges.push(thirdSpirit);
+        plan.entries.push(
+          ruleEffectDraft({
+            actor: ctx.action.actor,
+            cityId: thirdCityId,
+            cityIds: [thirdCityId],
+            ruleIds: [descriptorId],
+            changes: thirdChanges,
+            recordsUpdated: [cityPath(thirdCityId)],
+            summaryText: `R-07 Dissolve spillover: ${corporationId} (home ${homeCityId}) named ${thirdCityId} as a city where it held structures/staff — spirit −1 here on its dissolution.${thirdNotes.length > 0 ? ` ${thirdNotes.join("; ")}.` : ""}`,
+          })
+        );
+      }
+    }
+
+    if (verb === "relocate") {
+      const destinationCityId = stringField(ctx.action, "destinationCityId") as string;
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: homeCityId,
+          cityIds: [...citiesTouched],
+          ruleIds: [descriptorId],
+          changes,
+          recordsUpdated: [corpPath, cityPath(homeCityId)],
+          classification,
+          summaryText: summary + (notes.length > 0 ? ` ${notes.join("; ")}.` : ""),
+          major,
+        })
+      );
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: destinationCityId,
+          cityIds: [destinationCityId],
+          ruleIds: [descriptorId],
+          changes: destGdpChange ? [destGdpChange] : [],
+          recordsCreated: [corporationPath(destinationCityId, corporationId)],
+          recordsUpdated: [cityPath(destinationCityId)],
+          summaryText: `R-07 Relocate: ${corporationId} now stands in ${destinationCityId} (its record moved from ${homeCityId}); GDP +0.1% here — the Expand effect at half rate.${notes.length > 0 ? ` ${notes.join("; ")}.` : ""}`,
+        })
+      );
+    } else {
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: homeCityId,
+          cityIds: [...citiesTouched],
+          ruleIds: [descriptorId],
+          changes,
+          recordsUpdated: [corpPath, cityPath(homeCityId)],
+          classification,
+          summaryText: summary + (notes.length > 0 ? ` ${notes.join("; ")}.` : ""),
+          major,
+        })
+      );
+    }
+
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: `${verb}-corporation`,
+      scope: "company",
+      cityId: homeCityId,
+      cityIds: [...citiesTouched],
+      summaryText: summary,
+      major,
+    });
+  };
+}
+
+function corporationActionReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const paths: string[] = [];
+  const queries: CollectionQuerySpec[] = [];
+  const actorId = actorMemberId(seeds.action.actor);
+  if (actorId) paths.push(memberAccountPath(actorId));
+  const params = seeds.action.structuredAction ?? {};
+  const homeCityId = params.homeCityId;
+  const corporationId = params.corporationId;
+  if (typeof homeCityId === "string") {
+    paths.push(cityPath(homeCityId));
+    paths.push(`factions/${homeCityId}`);
+    queries.push(structuresQuery(homeCityId));
+    if (typeof corporationId === "string") paths.push(corporationPath(homeCityId, corporationId));
+  }
+  const destinationCityId = params.destinationCityId;
+  if (typeof destinationCityId === "string") {
+    paths.push(cityPath(destinationCityId));
+    if (typeof corporationId === "string") paths.push(corporationPath(destinationCityId, corporationId));
+  }
+  for (const extra of [params.addMarketCityIds, params.affectedCityIds]) {
+    for (const cityId of strList(extra)) paths.push(cityPath(cityId));
+  }
+  return { paths, queries };
+}
+
+// ---------------------------------------------------------------------------
 // Descriptors + finance additions (finance §2.4). The Build Lead
 // registers BUSINESS_DESCRIPTORS into RULE_DESCRIPTORS and folds
 // BUSINESS_FINANCE_ADDITIONS onto each descriptor's `finance` field —
@@ -1093,6 +1543,22 @@ export const BUSINESS_DESCRIPTORS: Record<string, RuleDescriptor> = {
     handlers: { found_corporation: foundCorporationHandler },
     readPlan: foundCorporationReadPlan,
     summary: "Found a corporation: home GDP +0.4% and an industry-synergy +0.2% where a completed structure matches; unlisted opening book round(2% of GDP) with the §2.4 null-GDP skip; a founding bundling listing skips the book (legacyBookRubars is provenance only) and prices the opening reference cap from paid-in capital x the prepared payload's judgment (M-01 composed at founding; issuance records are the Market module's).",
+  },
+  "R-07": {
+    id: "R-07",
+    actionKinds: ["expand_corporation", "contract_corporation", "relocate_corporation", "dissolve_corporation"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: {
+      expand_corporation: corporationActionHandler("expand"),
+      contract_corporation: corporationActionHandler("contract"),
+      relocate_corporation: corporationActionHandler("relocate"),
+      dissolve_corporation: corporationActionHandler("dissolve"),
+    },
+    readPlan: corporationActionReadPlan,
+    summary: "Corporation action (Expand / Contract / Relocate / Dissolve). Unlisted: Vera's multipliers and city effects verbatim, the Expand budget treasury-paid under the budget-class funded-gate. Listed: no multiplier ever touches valuation — coded inputs only (Expand pays into company cash from the founder's personal account; a contentless Contract rejects; a cash leg routes through M-08/M-09 and a Dissolve is M-10, both fail-closed until the Market module lands), M-06 repricing invoked in-event.",
   },
   "F-06": {
     id: "F-06",
@@ -1119,6 +1585,7 @@ export const BUSINESS_DESCRIPTORS: Record<string, RuleDescriptor> = {
 
 export const BUSINESS_FINANCE_ADDITIONS: Record<string, FinanceDescriptorAdditions> = {
   "R-06": { shortfallClass: "transfer", ledgersTouched: ["personal", "company"], invokesRules: ["M-01", "M-06"] },
+  "R-07": { shortfallClass: "budget", ledgersTouched: ["personal", "company", "treasury", "exterior"], invokesRules: ["M-06"] },
   "F-06": { shortfallClass: "none", ledgersTouched: ["company", "treasury"], invokesRules: [] },
   "F-07": { shortfallClass: "transfer", ledgersTouched: ["company", "treasury"], invokesRules: [] },
 };
