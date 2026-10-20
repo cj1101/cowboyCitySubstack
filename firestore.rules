@@ -1193,6 +1193,17 @@ service cloud.firestore {
         allow create, update: if isFabricCommitter();
         allow delete: if isFabricCommitter();
       }
+
+      // Phase 4 Catalogue I assembly: F-09 writes versioned budget
+      // authorization docs here; the subcollection had no match block
+      // (every sibling — structures/households/figures/corporations/
+      // laws — has one), so budget writes were denied by default.
+      // Posture mirrors laws exactly: viewer read, committer writes.
+      match /budgets/{budgetId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if isFabricCommitter();
+      }
     }
 
     match /sim_character_extensions/{characterId} {
@@ -1366,49 +1377,6 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isFabricCommitter();
       }
-    }
-
-    // --- Sim layer: finance (Phase 4, brief step 4) ---------------------
-    // Member accounts and bank deposits are written ONLY by the
-    // committer inside Resolution Events (F-01 lazy-open included) —
-    // no client write path exists for any identity. Reads follow
-    // finance §1.2 / §2.7: an account is its owner's (plus admin, and
-    // the fabric identity, which materializes read plans and re-reads
-    // undo write sets under it — the P2-K16 pattern); a deposit is
-    // readable by its depositor, by the bank's owner (the corporation
-    // record's ownerMemberId is the one ownership fact a rule may
-    // read), and by the fabric identity; company- and treasury-sourced
-    // deposits are public records (§2.7). sim_bank_loans is a reserved
-    // block: the loan record shape and its holder-read branches land
-    // with Phase 5's loan handlers — until then only admin/fabric
-    // reads and committer writes exist (fail-closed by construction).
-
-    match /sim_member_accounts/{memberId} {
-      allow read: if isAdmin() || isFabricService()
-        || (isFullMember() && request.auth.uid == memberId);
-      allow create, update, delete: if isFabricCommitter();
-    }
-
-    match /sim_bank_deposits/{depositId} {
-      allow read: if isAdmin() || isFabricService()
-        || (isFullMember()
-            && resource.data.depositor is map
-            && resource.data.depositor.get('kind', '') == 'personal'
-            && resource.data.depositor.get('memberId', '') == request.auth.uid)
-        || (isViewer()
-            && resource.data.depositor is map
-            && resource.data.depositor.get('kind', '') in ['company', 'treasury'])
-        || (isFullMember()
-            && resource.data.get('bankCityId', '') is string
-            && resource.data.get('bankCorporationId', '') is string
-            && exists(/databases/$(database)/documents/sim_cities/$(resource.data.bankCityId)/corporations/$(resource.data.bankCorporationId))
-            && get(/databases/$(database)/documents/sim_cities/$(resource.data.bankCityId)/corporations/$(resource.data.bankCorporationId)).data.get('ownerMemberId', '') == request.auth.uid);
-      allow create, update, delete: if isFabricCommitter();
-    }
-
-    match /sim_bank_loans/{loanId} {
-      allow read: if isAdmin() || isFabricService();
-      allow create, update, delete: if isFabricCommitter();
     }
 
     // --- Sim layer: trust (publications + intel) --------------------------
