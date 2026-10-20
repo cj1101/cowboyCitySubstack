@@ -261,6 +261,24 @@ export function buildFundPayloadSpec(args: FundPendingArgs): Record<string, unkn
   return spec;
 }
 
+/** Drop record claims the folded plan does not actually perform
+ * (the Catalogue I discipline — validatePlan reconciles claims
+ * against writes). */
+function pruneRecordClaims(plan: ResolutionPlan): void {
+  const ops = new Map(plan.writes.map((w) => [w.path, w.op]));
+  for (const entry of plan.entries) {
+    const created = new Set<string>();
+    const updated = new Set<string>();
+    for (const path of [...entry.recordsCreated, ...entry.recordsUpdated]) {
+      const op = ops.get(path);
+      if (op === "create") created.add(path);
+      else if (op !== undefined) updated.add(path);
+    }
+    entry.recordsCreated = [...created];
+    entry.recordsUpdated = [...updated];
+  }
+}
+
 function fundReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const params = (seeds.action.structuredAction ?? {}) as Record<string, unknown>;
   const cityId =
@@ -584,6 +602,7 @@ function establishFundHandler(ctx: HandlerContext): ResolutionPlan {
       major: true,
     })
   );
+  pruneRecordClaims(plan);
   actorCitations(plan, ctx, ctx.resolutionId);
   return plan;
 }
@@ -697,6 +716,7 @@ function dissolveFundHandler(ctx: HandlerContext): ResolutionPlan {
       summaryText: `Dissolved the ${fundName} in ${cityId}${remaining > 0 ? `; ${remaining} unspent R returned to the treasury` : ""}.`,
     })
   );
+  pruneRecordClaims(plan);
   actorCitations(plan, ctx, ctx.resolutionId);
   return plan;
 }
