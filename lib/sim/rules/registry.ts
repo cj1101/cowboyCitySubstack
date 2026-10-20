@@ -40,6 +40,7 @@ import {
 import { buildPendingDraft, type PendingTemplate } from "./pendingRules";
 import { fieldChange, planWrite, plannedDoc, rejectedPlan, ruleEffectDraft, summaryDraft } from "./planHelpers";
 import { allocationDescriptor } from "./allocation";
+import { FINANCE_DESCRIPTOR_META, FINANCE_DESCRIPTORS } from "./finance";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -76,6 +77,19 @@ export interface DescriptorReadPlan {
   queries?: CollectionQuerySpec[];
 }
 
+/** Finance §2.4 descriptor additions (Phase 4 Finance assembly): the
+ * shortfall discipline a money-moving descriptor's lines compose
+ * under, the ledgers it touches, and the rules it invokes. Carried on
+ * the descriptor as data — FINANCE_DESCRIPTOR_META and the catalogue
+ * families' addition maps fold in at registration. No validation
+ * depends on these fields today; they are the published mechanics
+ * record (and the seam a later gate can assert against). */
+export interface FinanceDescriptorAdditions {
+  shortfallClass: "transfer" | "budget" | "custodial" | "none";
+  ledgersTouched: string[];
+  invokesRules: string[];
+}
+
 export interface RuleDescriptor {
   id: string;
   actionKinds: string[];
@@ -84,6 +98,8 @@ export interface RuleDescriptor {
   defaultBaselineSections: string[];
   mayCreatePendings: boolean;
   handlers: Record<string, HandlerFn>;
+  /** Finance §2.4 additions (see FinanceDescriptorAdditions). */
+  finance?: FinanceDescriptorAdditions;
   /** F-01 read-plan hook: declares the collection/graph reads this
    * descriptor's handlers need, beyond the base doc-path derivation.
    * Absent = doc-path reads only (the Phase 2 contract). */
@@ -994,6 +1010,22 @@ function judgmentHandler(ctx: HandlerContext): ResolutionPlan {
 // Registry + indexes
 // ---------------------------------------------------------------------------
 
+/** Finance descriptors with their §2.4 META folded onto the registered
+ * descriptor (Phase 4 Finance assembly). finance.ts value-imports
+ * checkCityAuthority from this module; the registry is the evaluation
+ * entry in every consuming graph (dispatcher, resolver, verifier,
+ * suites), and finance.ts's top level only defines descriptors whose
+ * handlers close over the import — nothing is called at module-eval
+ * time, so the fold below reads a fully-evaluated FINANCE_DESCRIPTORS. */
+const FINANCE_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntries(
+  Object.entries(FINANCE_DESCRIPTORS).map(([id, descriptor]) => [
+    id,
+    FINANCE_DESCRIPTOR_META[id]
+      ? { ...descriptor, finance: FINANCE_DESCRIPTOR_META[id] }
+      : descriptor,
+  ])
+);
+
 export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "R-32": {
     id: "R-32",
@@ -1026,6 +1058,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     summary: "Trickle-down propagation evaluation (information-only in Phase 2).",
   },
   "R-35": allocationDescriptor,
+  ...FINANCE_REGISTERED,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
