@@ -1603,6 +1603,39 @@ async function main() {
   }
   console.log("ok sim allocation fence narrowing (P4 Module 0, P4-K14)");
 
+  // ---- P4 Allocation assembly: fabric read of the allocation docs.
+  // The R-35 read plan (the allocation doc + versions/v1) is
+  // materialized by the dispatcher under the committer identity, and
+  // undo-restore transactions re-read the commit's write set (§8.5) —
+  // both need the fabric read branch added at assembly (the P2-K16
+  // pattern, as on sim_intel_records). Draft privacy for everyone
+  // else is unchanged; this section proves both halves. It runs on
+  // the Module 0 section's leavings: cityA's allocation doc (draft
+  // state) and the committer-written versions/v1 (commitSeq 7).
+  {
+    const allocRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_stat_allocations", "cityA");
+    const versionRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_stat_allocations", "cityA", "versions", "v1");
+    // The fabric identities read both docs (the branch is the service
+    // identity, either role — the production service user carries both).
+    await assertSucceeds(getDoc(allocRef(fabricCommitter)));
+    await assertSucceeds(getDoc(versionRef(fabricCommitter)));
+    await assertSucceeds(getDoc(allocRef(fabricWorker)));
+    // The owner still reads their own allocation doc.
+    await assertSucceeds(getDoc(allocRef(ownerA)));
+    // Draft privacy unchanged: a non-owner member, another city's
+    // owner, a guest, and anon cannot read the draft-state doc.
+    await assertFails(getDoc(allocRef(memberC)));
+    await assertFails(getDoc(allocRef(ownerB)));
+    await assertFails(getDoc(allocRef(guestG)));
+    await assertFails(getDoc(allocRef(anon)));
+    // The committed version stays viewer-readable exactly as landed
+    // (v1 carries a commitSeq) — the fabric branch widened nothing.
+    await assertSucceeds(getDoc(versionRef(memberC)));
+  }
+  console.log("ok sim allocation fabric read (P4 assembly, P2-K16 pattern)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)
