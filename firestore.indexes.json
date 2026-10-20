@@ -278,6 +278,38 @@
       ]
     },
     {
+      "collectionGroup": "sim_bank_deposits",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "bankCorporationId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_deposits",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "depositor.memberId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_deposits",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "depositor.cityId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_deposits",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "depositor.corporationId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "bug_reports",
       "queryScope": "COLLECTION",
       "fields": [

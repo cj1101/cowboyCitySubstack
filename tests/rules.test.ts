@@ -1636,6 +1636,118 @@ async function main() {
   }
   console.log("ok sim allocation fabric read (P4 assembly, P2-K16 pattern)");
 
+  // ---- P4 Finance assembly: member accounts + bank deposits posture.
+  // The finance collections are committer-written only (every client
+  // write denied); reads are finance §1.2 / §2.7: an account is its
+  // owner's + admin + fabric; a personal deposit is its depositor's +
+  // the bank owner's (via the corporation record's ownerMemberId) +
+  // fabric; company/treasury deposits are public to viewers. The
+  // reserved sim_bank_loans block is fabric/admin-only until Phase 5.
+  {
+    const committerFs = fabricCommitter.firestore();
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_cities", "cityA", "corporations", "bank1"), {
+        corporationId: "bank1",
+        ownerMemberId: "ownerA",
+        companyCashRubars: 500000,
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_member_accounts", "memberC"), {
+        memberId: "memberC",
+        cashRubars: 250000,
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_bank_deposits", "depPersonal"), {
+        depositId: "depPersonal",
+        bankCorporationId: "bank1",
+        bankCityId: "cityA",
+        depositor: { kind: "personal", memberId: "memberC" },
+        principalRubars: 1000,
+        status: "active",
+        origin: "cash",
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_bank_deposits", "depCompany"), {
+        depositId: "depCompany",
+        bankCorporationId: "bank1",
+        bankCityId: "cityA",
+        depositor: { kind: "company", corporationId: "corpX", cityId: "cityA" },
+        principalRubars: 2000,
+        status: "active",
+        origin: "cash",
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_bank_loans", "loanReserved"), {
+        loanId: "loanReserved",
+        bankCorporationId: "bank1",
+      })
+    );
+
+    const accountRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_member_accounts", "memberC");
+    // Fabric identities read the account (read-plan materialization +
+    // undo re-reads run under the service identity, either role).
+    await assertSucceeds(getDoc(accountRef(fabricCommitter)));
+    await assertSucceeds(getDoc(accountRef(fabricWorker)));
+    // The owner reads their own account; nobody else does.
+    await assertSucceeds(getDoc(accountRef(memberC)));
+    await assertFails(getDoc(accountRef(ownerA)));
+    await assertFails(getDoc(accountRef(ownerB)));
+    await assertFails(getDoc(accountRef(guestG)));
+    await assertFails(getDoc(accountRef(anon)));
+    // Client writes are denied for every identity, the owner included;
+    // the committer's write path is the only one (proven by the seeds).
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_member_accounts", "memberC"), {
+        memberId: "memberC",
+        cashRubars: 1,
+      })
+    );
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_member_accounts", "selfMade"), {
+        memberId: "selfMade",
+        cashRubars: 1,
+      })
+    );
+
+    const personalRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_bank_deposits", "depPersonal");
+    // Depositor + bank owner + fabric read a personal deposit.
+    await assertSucceeds(getDoc(personalRef(memberC)));
+    await assertSucceeds(getDoc(personalRef(ownerA)));
+    await assertSucceeds(getDoc(personalRef(fabricWorker)));
+    // Another city's owner, a guest, and anon cannot.
+    await assertFails(getDoc(personalRef(ownerB)));
+    await assertFails(getDoc(personalRef(guestG)));
+    await assertFails(getDoc(personalRef(anon)));
+    // Deposits are committer-written only, depositor included.
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_bank_deposits", "depPersonal"), {
+        depositId: "depPersonal",
+        principalRubars: 1,
+      })
+    );
+
+    const companyRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_bank_deposits", "depCompany");
+    // Company-sourced deposits are public records to any viewer (§2.7).
+    await assertSucceeds(getDoc(companyRef(guestG)));
+    await assertSucceeds(getDoc(companyRef(ownerB)));
+    await assertFails(getDoc(companyRef(anon)));
+
+    // The reserved loans block: no holder reads until Phase 5's shape.
+    const loanRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_bank_loans", "loanReserved");
+    await assertSucceeds(getDoc(loanRef(fabricCommitter)));
+    await assertFails(getDoc(loanRef(ownerA)));
+    await assertFails(getDoc(loanRef(memberC)));
+  }
+  console.log("ok sim finance collections posture (P4 Finance assembly)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)
