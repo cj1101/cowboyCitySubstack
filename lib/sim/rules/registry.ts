@@ -41,6 +41,8 @@ import { buildPendingDraft, type PendingTemplate } from "./pendingRules";
 import { fieldChange, planWrite, plannedDoc, rejectedPlan, ruleEffectDraft, summaryDraft } from "./planHelpers";
 import { allocationDescriptor } from "./allocation";
 import { FINANCE_DESCRIPTOR_META, FINANCE_DESCRIPTORS } from "./finance";
+import { STRUCTURE_DESCRIPTORS, STRUCTURE_FINANCE_ADDITIONS } from "./structures";
+import { LAW_DESCRIPTORS } from "./laws";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1026,6 +1028,25 @@ const FINANCE_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntries(
   ])
 );
 
+
+/** Catalogue I descriptors with finance's §2.4 additions folded in
+ * (Phase 4 Catalogue I assembly): structures' R-05 addition attaches
+ * from STRUCTURE_FINANCE_ADDITIONS (its arrays are const-asserted in
+ * the family file, so they are copied into the registered shape);
+ * the law descriptors carry their additions inline already
+ * (LAW_FINANCE_ADDITIONS, including F-08's, which rides R-08). */
+const STRUCTURE_REGISTERED: Record<string, RuleDescriptor> = {
+  ...STRUCTURE_DESCRIPTORS,
+  "R-05": {
+    ...STRUCTURE_DESCRIPTORS["R-05"],
+    finance: {
+      shortfallClass: STRUCTURE_FINANCE_ADDITIONS["R-05"].shortfallClass,
+      ledgersTouched: [...STRUCTURE_FINANCE_ADDITIONS["R-05"].ledgersTouched],
+      invokesRules: [...STRUCTURE_FINANCE_ADDITIONS["R-05"].invokesRules],
+    },
+  },
+};
+
 export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "R-32": {
     id: "R-32",
@@ -1059,6 +1080,8 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   },
   "R-35": allocationDescriptor,
   ...FINANCE_REGISTERED,
+  ...STRUCTURE_REGISTERED,
+  ...LAW_DESCRIPTORS,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
