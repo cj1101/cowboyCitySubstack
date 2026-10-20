@@ -1422,6 +1422,20 @@ service cloud.firestore {
       allow create, update, delete: if isFabricCommitter();
     }
 
+    // --- Sim layer: legal cases (Phase 4, brief step 8) ------------------
+    // Cases are opened ONLY by the committer inside Resolution Events
+    // (R-18's fixed-class resolution opens the first ones) — no client
+    // write path exists for any identity. Reads are viewer-wide: brief
+    // §4.5 publishes the charges realm-wide and the case entries are
+    // public Log entries. Case updates (status transitions, verdict
+    // fields) arrive with Phase 7's tribunal build and stay
+    // committer-only the same way.
+
+    match /sim_cases/{caseId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
     // --- Sim layer: trust (publications + intel) --------------------------
 
     match /sim_publications/{publicationId} {
