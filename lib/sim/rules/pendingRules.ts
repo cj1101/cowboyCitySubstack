@@ -78,6 +78,34 @@ export const PENDING_KINDS: Record<string, PendingKindConfig> = {
     ruleIdsOnRipen: ["R-33"],
     referenceFund: null,
   },
+  // Data acquisition delivery kinds (Phase 4 step 9 assembly; design
+  // C-8 verbatim). A commission (R-25/R-27/R-28) debits and freezes
+  // its grading into one of these pendings; ripening dispatches to
+  // the acquisition family's delivery builder (resolver.ts), never to
+  // the stat path — the payloadSpec carries a `delivery` block, and
+  // the builder re-validates the prepared findings against the
+  // delivery snapshot before anything is written.
+  "survey-delivery": {
+    kind: "survey-delivery",
+    baseHours: 48,
+    modes: ["generative"],
+    ruleIdsOnRipen: ["R-25"],
+    referenceFund: null,
+  },
+  "collection-delivery": {
+    kind: "collection-delivery",
+    baseHours: 48,
+    modes: ["generative"],
+    ruleIdsOnRipen: ["R-27"],
+    referenceFund: null,
+  },
+  "insider-delivery": {
+    kind: "insider-delivery",
+    baseHours: 1,
+    modes: ["generative"],
+    ruleIdsOnRipen: ["R-28"],
+    referenceFund: null,
+  },
 };
 
 export function pendingKindConfig(kind: string): PendingKindConfig {
