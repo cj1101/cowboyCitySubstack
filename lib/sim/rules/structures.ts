@@ -22,7 +22,7 @@
  * shortfall is logged.
  *
  * Function is DERIVED, never stored (brief §4.1, design §5): no write
- * in this file puts a functioning/inFunction flag on any record.
+ * in this file puts a stored function-availability flag on any record.
  * `isStructureFunctioning` below is the one predicate every consumer
  * reads. Natural geography is fixed ground truth (CJ §6.7.4): a
  * structure record carrying `profile.geography: "natural"` is refused
@@ -46,7 +46,6 @@ import {
   type LogEntryDraft,
   type ResolutionPlan,
   type SimAction,
-  type SimActor,
   type SimCitations,
   type SimSnapshot,
 } from "../state";
