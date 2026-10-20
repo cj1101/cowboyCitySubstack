@@ -270,6 +270,14 @@
       ]
     },
     {
+      "collectionGroup": "versions",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "cityId", "order": "ASCENDING" },
+        { "fieldPath": "commitSeq", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "bug_reports",
       "queryScope": "COLLECTION",
       "fields": [
