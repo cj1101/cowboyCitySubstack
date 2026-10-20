@@ -1795,6 +1795,54 @@ async function main() {
   }
   console.log("ok sim cases posture (P4 Defensive assembly)");
 
+  // ---- P4 Chains assembly: funds/ + projects/ posture (prep §5 A-3).
+  // Fund terms are published at creation and capacity-project state is
+  // public sim state: viewer reads, committer-only writes — the
+  // sibling subcollection posture (structures/households/laws).
+  {
+    const committerFs = fabricCommitter.firestore();
+    const fundRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_cities", "cityA", "funds", "fund_seed1");
+    const projectRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_cities", "cityA", "projects", "proj_seed1");
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_cities", "cityA", "funds", "fund_seed1"), {
+        fundId: "fund_seed1",
+        status: "active",
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_cities", "cityA", "projects", "proj_seed1"), {
+        projectId: "proj_seed1",
+        status: "standing",
+      })
+    );
+    // Any viewer reads both records: owners, plain members, guests.
+    await assertSucceeds(getDoc(fundRef(ownerA)));
+    await assertSucceeds(getDoc(fundRef(memberC)));
+    await assertSucceeds(getDoc(projectRef(ownerA)));
+    await assertSucceeds(getDoc(projectRef(guestG)));
+    // Anon is not signed in, hence not a viewer.
+    await assertFails(getDoc(fundRef(anon)));
+    await assertFails(getDoc(projectRef(anon)));
+    // Client writes are denied for non-committer identities; the
+    // committer's write path (proven by the seeds above) is the only
+    // one.
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_cities", "cityA", "funds", "fund_forged"), {
+        fundId: "fund_forged",
+        status: "active",
+      })
+    );
+    await assertFails(
+      setDoc(doc(guestG.firestore(), "sim_cities", "cityA", "projects", "proj_forged"), {
+        projectId: "proj_forged",
+        status: "standing",
+      })
+    );
+  }
+  console.log("ok sim funds/projects posture (P4 Chains assembly)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)
