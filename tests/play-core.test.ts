@@ -159,6 +159,13 @@ async function main() {
     assert.equal(corp.legacyBookRubars, 125_000);
     assert.equal(corp.listed, false);
     assert.equal(corp.status, "active");
+    // Catalogue II assembly (prep §5 item 2): the market-founding
+    // fields ride the builder with unlisted founding defaults —
+    // R-06's listed branch supplies real values; step 7 reads them.
+    assert.equal(corp.paidInCapitalRubars, 0);
+    assert.equal(corp.sharesOutstanding, 0);
+    assert.equal(corp.openingReferencePriceRubars, null);
+    assert.equal(corp.lastJudgment, null);
     assert.equal(
       corporationPath("cityA", "corp1"),
       "sim_cities/cityA/corporations/corp1"
