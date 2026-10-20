@@ -16,6 +16,11 @@
  * ./chains and ./growth; the R-32 entry below is the union merge (the
  * Phase 2 fixture kinds stay; the chains read plan is gated to the
  * product kinds so fixture manifests gain no funds-path read).
+ * R-06/R-07/F-06/F-07 (Catalogue II — businesses & tax) landed with
+ * Phase 4 step 6: their descriptors live in ./businesses, registered
+ * below with their finance §2.4 additions folded on (F-06 carries no
+ * action kinds — it is a resolver step composed in-event by citing
+ * rules).
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -52,6 +57,7 @@ import { LAW_DESCRIPTORS } from "./laws";
 import { DEFENSIVE_DESCRIPTORS } from "./defensive";
 import { CHAINS_DESCRIPTORS, R32_PRODUCT_HANDLERS } from "./chains";
 import { GROWTH_DESCRIPTORS } from "./growth";
+import { BUSINESS_DESCRIPTORS, BUSINESS_FINANCE_ADDITIONS } from "./businesses";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1056,6 +1062,19 @@ const STRUCTURE_REGISTERED: Record<string, RuleDescriptor> = {
   },
 };
 
+/** Catalogue II descriptors with their finance §2.4 additions folded
+ * onto each descriptor's `finance` field (Phase 4 Catalogue II
+ * assembly — the FINANCE_REGISTERED pattern, over
+ * BUSINESS_FINANCE_ADDITIONS). */
+const BUSINESS_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntries(
+  Object.entries(BUSINESS_DESCRIPTORS).map(([id, descriptor]) => [
+    id,
+    BUSINESS_FINANCE_ADDITIONS[id]
+      ? { ...descriptor, finance: BUSINESS_FINANCE_ADDITIONS[id] }
+      : descriptor,
+  ])
+);
+
 export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "R-32": {
     id: "R-32",
@@ -1101,6 +1120,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   ...LAW_DESCRIPTORS,
   ...DEFENSIVE_DESCRIPTORS,
   ...GROWTH_DESCRIPTORS,
+  ...BUSINESS_REGISTERED,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
