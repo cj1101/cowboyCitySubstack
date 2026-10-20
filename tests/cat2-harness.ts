@@ -447,7 +447,7 @@ check("R-06 second city: confirmed naming takes +0.2% there and joins marketCity
   assert.ok(entryTexts(plan2).includes("cross-city draft rule"), "the non-effect is explained in the Log");
 });
 
-check("R-06: a duplicate founding rejects; a founding by a non-member rejects", () => {
+check("R-06: a duplicate founding rejects and never overwrites the standing record", () => {
   const world = seedWorld();
   runAction(world, act("found_corporation", "ownerA", {
     cityId: "cityA", corporationId: "corpDup", name: "Dup Co", industry: "trade",

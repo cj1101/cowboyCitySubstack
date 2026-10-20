@@ -76,9 +76,14 @@ via Catalogue I's `deriveTaxScheduleFromLaws`. The composer:
    for the caller's Log (honest zero, finance §2.3 F-06). Assessed 0 at
    a 0 rate is likewise returned as a stated figure, never a skip.
 3. `assessed = Math.round(base × bps / 10000)` — flag F4.
-4. `collected = min(assessed, companyCash)` composed as ONE transfer
-   line company → treasury(operating city), transfer class (sufficient
-   by construction; company cash never goes below zero).
+4. `collected = min(assessed, spendable surface)` composed as ONE
+   transfer line company → treasury(operating city), transfer class
+   (sufficient by construction). The surface is the transfer
+   primitive's own `spendableSurface`: raw cash for an ordinary
+   company, UNENCUMBERED cash for a chartered bank — an assessment
+   therefore never reaches depositor-encumbered funds, and the
+   remainder beyond the surface becomes the payable like any other
+   uncollectible remainder. Company cash never goes below zero.
 5. The remainder folds into `taxPayables[operatingCityId]` on the
    corporation record via `planMutate` against the planned doc (so it
    composes with the cash write from the same event); a key reaching
@@ -195,11 +200,98 @@ assembly the checker needs is in §5 (the verify.ts gate set keys off
 set only when the Lead extends it — the same extension Catalogue I
 already requested for F-09/F-10/F-11).
 
+One composition convention the harness forced into the open (it is
+the F-01 genesis pattern, generalized): a record CREATED by an event
+is born holding its creation-state balances, and the Log change for a
+created doc's balance field chains from `null` (validatePlan's chain
+for a created doc starts at the snapshot's null), not from the
+builder's 0. R-06's listed founding therefore writes the corporation
+record with `companyCashRubars` at its builder 0, folds the capital
+through the transfer primitive for validation, and states the company
+leg on the founding entry as a creation change (`null →
+paidInCapitalRubars`). Any future handler funding a just-created
+company must do the same; the harness's check 10 proves the composed
+event (genesis mint + capital) conservation-clean.
+
 ## 5. Lead assembly needs
 
-*(Completed at the end of the build — registration, additions merge,
-record deltas, rules/index needs, verifier gate-set extension, the
-F-10 wiring requirement, and step-7 composition requirements.)*
+1. **Registry registration (one edit, the Finance/Catalogue I
+   pattern).** In `lib/sim/rules/registry.ts`: import
+   `BUSINESS_DESCRIPTORS` and `BUSINESS_FINANCE_ADDITIONS` from
+   `./businesses`; add `...BUSINESS_DESCRIPTORS` to the
+   `RULE_DESCRIPTORS` assign; fold each additions entry onto its
+   descriptor's `finance` field (the existing `foldFinance` pass over
+   `Object.entries(BUSINESS_FINANCE_ADDITIONS)`). Descriptor IDs
+   R-06/R-07/F-06/F-07 collide with nothing standing (37 → 41).
+2. **Corporation-record deltas into Module 0's builder/type.** The
+   R-06 handler spreads four fields onto `buildCorporationDoc`'s
+   output; fold them into `lib/sim/corporations.ts` (the
+   `CorporationRecord` interface + builder defaults) so the type
+   carries them for step 7: `paidInCapitalRubars: number` (0 when
+   unlisted), `sharesOutstanding: number` (0 when unlisted),
+   `openingReferencePriceRubars: number | null`,
+   `lastJudgment: { quality, scale, importance, inputHash } | null`.
+   No other record shape changes; `taxPayables` is Module 0's map,
+   used as designed. Also note for step 7: F-03 events do not maintain
+   `paidInCapitalRubars` (the landed F-03 moves cash only) — M-02's
+   capital-injection composition should maintain it, or the field
+   stays a founding-time figure by declared posture.
+3. **Verifier conservation gate-set extension (`lib/sim/verify.ts`).**
+   The per-event conservation scope keys off `FINANCE_DESCRIPTORS`
+   rule ids (plus `sim_member_accounts/` / `sim_bank_deposits/`
+   writes). Extend `financeRuleIds` with the business descriptor ids
+   (R-06, R-07, F-06, F-07) — or generalize the set to every descriptor
+   carrying finance additions — in the SAME edit that lands Catalogue
+   I's already-requested F-09/F-10/F-11 extension. No checker change
+   is needed: `checkConservationEvent` evaluates these events as-is
+   (the harness proves it — §7), and no new mint/burn rule joins
+   §3.3's closed lists. Do NOT wire a holdings supply into
+   `checkStandingRecords` yet (flag F1): the share-conservation
+   assertion must stay inert until step 7 creates holding records.
+4. **F-10 → F-06 invocation wiring (flag F5).** In `laws.ts`'s F-10
+   handler, after the payment lines compose, call
+   `composeTaxAssessment({ plan, snapshot, actor, citingRuleId:
+   "F-10", fact })` with the fact F-10 already records, and surface
+   the outcome in F-10's summary/classification. Read-plan side:
+   F-10's read plan must declare the laws of the fact's OPERATING city
+   — import `businessLawsQuery` from `./businesses` and add it for
+   the paying city and for any city a `serviceRef` can name (or rely
+   on doc-map materialization where a laws query for that city
+   already ran; the composer's contract is in its header comment).
+   Until this edit lands, F-10 facts remain recorded-but-unassessed,
+   exactly as Catalogue I left them — nothing is silently skipped.
+5. **Rules / indexes: none.** This module creates no new collection
+   and no new query shape: corporation docs live under the existing
+   `sim_cities/{cityId}/corporations/` match block (Module 0), law and
+   structure reads reuse Catalogue I's collection shapes, and no
+   composite index is introduced. `firestore.rules` and
+   `firestore.indexes.json` need no delta from Catalogue II. (The
+   `test:sim` script's harness list should gain
+   `tests/cat2-harness.ts` — a package.json convenience edit for the
+   Lead, not a gate.)
+6. **Step-7 (Market) composition requirements this module creates.**
+   - M-01/M-02 must create (or backfill) the founder holding record
+     for any company listed at founding under R-06, before the
+     checker's share assertion is wired with a holdings supply (F1).
+   - M-06 repricing is invoked in-event by R-07's listed branch via
+     the declared `invokesRules: ["M-06"]` classification (the same
+     declared-invocation posture as F-10 → F-06); when the market
+     module lands, its handlers — or the resolver's invocation
+     mechanism, if the Lead builds one — execute the repricing
+     against the coded inputs this module writes. `lastJudgment` on
+     the corporation record carries the prior scores M-06's
+     carried-scores path reads.
+   - M-08/M-09 un-block the listed Contract cash leg: R-07 rejects it
+     with `cash-leg-requires-market-module` (citing M-08/M-09) until
+     the market handlers exist to route it; M-10 likewise un-blocks
+     listed Dissolve (`liquidation-requires-market-module`). No
+     R-07 change is needed beyond removing nothing — the rejections
+     name the seam, and step 7's assembly decides whether the acts
+     re-route through the market descriptors or compose in-event.
+   - The earnings-window anchor (`earningsWindowStartSeq`) is a
+     market record field for M-06 §4.3 to stamp at listing; this
+     module deliberately does not invent it. `taxesPaidRubars` is
+     Log-derived by M-06 and needs no record field.
 
 ## 6. Flags surfaced, not improvised
 
@@ -272,7 +364,69 @@ F-10 wiring requirement, and step-7 composition requirements.)*
   `active`, Relocate → `relocated`, Dissolve → `dissolved`. If Dana
   intended `relocated` as a transient marker only, the change is
   confined to one mapping in `businesses.ts`.
+- **F9 — Unlisted Expand's treasury payer requires governance.**
+  Vera's text says "treasury pays" without naming whose authority
+  spends it; CJ's cross-city ownership ruling means the corporation's
+  owner need not govern its home city, and letting any owner spend
+  any home city's treasury would be an open exploit. The module
+  therefore gates the unlisted Expand on `checkCityAuthority` over
+  the home city (`not-city-governor`): the governor-founder path is
+  Vera's; a foreign-owned unlisted corporation's expansion budget has
+  no lawful payer in v1 (its listed path is founder-funded). Founding
+  itself is NOT gated — a founding spends nothing of the city's and
+  its GDP effects benefit the host. Needs Theo/Vera ratification; if
+  the intended payer is instead the founder's own-city treasury or
+  the founder personally, the change is confined to the Expand
+  branch's funding block.
 
 ## 7. What landed / harness evidence
 
-*(Completed at the end of the build.)*
+**Landed** (branch `p4/catalogue-business`, commits in order):
+`lib/sim/rules/businesses.ts` (R-06, R-07, F-06 descriptor + exported
+`composeTaxAssessment` + exported `businessLawsQuery`, F-07;
+`BUSINESS_DESCRIPTORS` + `BUSINESS_FINANCE_ADDITIONS` for Lead
+assembly), `tests/cat2-harness.ts`, the README delta (status
+narrative, Scripts row, 2026-10-20 Changelog line), and this report.
+No other file is touched.
+
+**Harness** — `npx tsx tests/cat2-harness.ts`: **34/34 checks pass.**
+Every resolved plan runs through the real `validatePlan` (including
+F-02 changes↔writes reconciliation) AND the real finance conservation
+checker over the event's entries + writeSet. Coverage: R-06 unlisted
+(GDP order-of-rows, book from the post-+0.4% figure, synergy stated
+separately, damaged-structure non-match, null-GDP skip with
+`legacyBookRubars: null`); confirmed vs unconfirmed second-city
+naming; duplicate founding; R-06 listed (legacyBook as provenance,
+cap-first opening price 140,000 on 100,000 paid-in at scores
+80/60/40, cash actually moved, `judgment-required` with no payload —
+including when the action itself names scores — and the P4-K21(ii)
+treasury-source rejection; a fresh founder's genesis + capital event
+conservation-clean); R-07 unlisted (×1.25 funded, the funded-gate
+shortfall resolving without the step, the corpCrossB
+`not-city-governor` treasury gate, ×0.8 Contract, Relocate's record
+move with ×1.1 and half-rate destination GDP, unconfirmed-relocate
+rejection, Dissolve with third-city spirit); R-07 listed (Expand
+paying into company cash with valuation provably untouched and
+`invokesRules: ["M-06"]` declared, contentless Contract rejection,
+input-change Contract, the P4-K22 cash-leg rejection leaving every
+other leg un-landed, M-10 dissolution rejection, listed Relocate
+with no ×1.1); F-06 driven as a citing rule composes it (cross-city
+operating-credit with partial collection + payable, payable
+accumulation at an empty till, schedule-unset skip, honest 0-rate
+assessment, the contract-payment and payroll components, and the
+unreadable-schedule refusal); F-07 (partial → full payment with key
+removal and the blocks-lifted statement, overpay / no-payable /
+non-owner / short-cash rejections with the payable standing, the
+corpCrossB three-facts separation), and the end-to-end
+assessment → payable → arrears story.
+
+**Other local evidence** (2026-10-20, this clone): `tsc --noEmit`
+exit 0 repo-wide; ESLint clean (0 errors, 0 warnings) on both new
+files; `next build` succeeded; `tests/cat1-harness.ts` re-run green
+(no cross-family regression). The Firestore emulator cannot run in
+this sandbox; emulator-venue suites (`test:sim`, `test:rules`) are
+CI's to run, as with prior modules. The harness caught and fixed
+three real defects before landing (the listed-founding creation
+chain, the dotted `taxPayables` changed-field registration, and the
+literal-null chain spelling for absent payable keys) — §4 records
+the convention so the next family does not rediscover it.
