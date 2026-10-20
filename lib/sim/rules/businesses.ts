@@ -93,6 +93,7 @@ import {
 } from "../state";
 import { clampNumber } from "./arithmetic";
 import { deriveTaxScheduleFromLaws, type TaxSchedule } from "./laws";
+import { isStructureFunctioning } from "./structures";
 import {
   fieldChange,
   planMutate,
@@ -738,6 +739,342 @@ function payTaxArrearsReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   return { paths };
 }
 
+/** Reconcile entries' record claims against the plan's actual write
+ * ops (the Catalogue I convention): a claim for a path the plan does
+ * not write is pruned, so the Log never claims a record the event did
+ * not touch. */
+function pruneRecordClaims(plan: ResolutionPlan): void {
+  const ops = new Map(plan.writes.map((w) => [w.path, w.op]));
+  for (const entry of plan.entries) {
+    const created = new Set<string>();
+    const updated = new Set<string>();
+    for (const path of [...entry.recordsCreated, ...entry.recordsUpdated]) {
+      const op = ops.get(path);
+      if (op === "create") created.add(path);
+      else if (op !== undefined) updated.add(path);
+    }
+    entry.recordsCreated = [...created];
+    entry.recordsUpdated = [...updated];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// R-06 — found a corporation (systems-spec v2 R-06, both branches).
+//
+// Unlisted (Vera's text verbatim): home GDP +0.4%; the corporation is
+// created with valuationRubars = round(2% of city GDP) as its opening
+// book value; an industry match with a completed structure in the city
+// adds a separate +0.2% GDP synergy, stated separately. Percentage
+// rows apply in listed order against the current figure (§2.4), so the
+// book reads the GDP after the +0.4% row and before the synergy row.
+// A null GDP skips every GDP-derived figure and the Log says so —
+// the book is then uncomputable: legacyBookRubars null, valuation 0.
+//
+// Listed (the founding bundles M-01): the book assignment is SKIPPED,
+// not computed and replaced; legacyBookRubars records the unlisted
+// formula's result (or null) as provenance and is never an input to
+// any valuation. Paid-in capital moves from the founder's personal
+// account (Phase 4: personal only — P4-K21(ii)); the opening reference
+// cap is round(paidIn × judgmentMultiplier) with cap-first rounding,
+// the multiplier derived ONLY from the prepared payload's judgment
+// scores (§4.4). Share issuance records are step 7's (flag F1).
+//
+// Either branch: a named second city (market/HQ2) with a confirmation
+// reference in the action record takes GDP +0.2% and joins
+// marketCityIds; named without one it takes no effect (flag F7).
+// ---------------------------------------------------------------------------
+
+interface JudgmentScores {
+  quality: number;
+  scale: number;
+  importance: number;
+}
+
+/** The prepared payload's market judgment for a listing founding:
+ * `ctx.prepared.classification.judgment = { quality, scale,
+ * importance }`, integers in [0, 100] (§4.5). Read from nowhere else —
+ * a judgment in the action itself is a fairness breach, not an input. */
+function judgmentFromPrepared(ctx: HandlerContext): JudgmentScores | null {
+  const classification = ctx.prepared?.classification as Record<string, unknown> | undefined;
+  const judgment = classification?.judgment as Record<string, unknown> | undefined;
+  if (!judgment) return null;
+  const { quality, scale, importance } = judgment;
+  const valid = (v: unknown): v is number =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 100;
+  if (!valid(quality) || !valid(scale) || !valid(importance)) return null;
+  return { quality, scale, importance };
+}
+
+function foundCorporationHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "R-06";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const founderId = actorMemberId(ctx.action.actor);
+  if (!founderId) {
+    return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "R-06: the actor carries no member identity — a corporation is founded by a member.");
+  }
+  const cityId = stringField(ctx.action, "cityId");
+  const name = stringField(ctx.action, "name");
+  const industry = stringField(ctx.action, "industry");
+  if (!cityId || !name || !industry) {
+    return rejectedPlan(descriptorId, "malformed-founding", [descriptorId], "R-06: found_corporation requires cityId (the home city), name and industry.");
+  }
+  const corporationId = stringField(ctx.action, "corporationId") ?? `corp_${ctx.action.actionId}`;
+  const homeCity = snapshotDoc(ctx.snapshot, cityPath(cityId));
+  if (!homeCity) {
+    return rejectedPlan(descriptorId, "city-not-found", [descriptorId], `R-06: no city record for ${cityId}.`);
+  }
+  const corpPath = corporationPath(cityId, corporationId);
+  if (snapshotDoc(ctx.snapshot, corpPath)) {
+    return rejectedPlan(descriptorId, "corporation-already-exists", [descriptorId], `R-06: a corporation record already stands at ${corpPath} — a founding never overwrites a standing record.`);
+  }
+  const secondCityId = stringField(ctx.action, "secondCityId");
+  const secondConfirmationRef = stringField(ctx.action, "secondCityConfirmationRef");
+  if (secondCityId && !snapshotDoc(ctx.snapshot, cityPath(secondCityId))) {
+    return rejectedPlan(descriptorId, "city-not-found", [descriptorId], `R-06: the named second city ${secondCityId} has no city record.`);
+  }
+  const listAtFounding = sa(ctx.action).listAtFounding === true;
+
+  // Listed-branch inputs are validated before any effect composes, so
+  // a defective listing founding rejects whole (no half-founded shell).
+  let paidInCapital = 0;
+  let sharesIssued = 0;
+  let judgment: JudgmentScores | null = null;
+  if (listAtFounding) {
+    const fundingSource = stringField(ctx.action, "fundingSource") ?? "personal";
+    if (fundingSource === "treasury") {
+      return rejectedPlan(descriptorId, "treasury-source-suspended", [descriptorId, "P4-K21"], "R-06: paid-in capital sourced from a city treasury is suspended in Phase 4 (P4-K21(ii)) — founding capital is the founder's personal funds in this slice.");
+    }
+    if (fundingSource !== "personal") {
+      return rejectedPlan(descriptorId, "malformed-founding", [descriptorId], `R-06: fundingSource "${fundingSource}" is not a lawful paid-in capital source (personal is the Phase 4 source).`);
+    }
+    const paid = positiveAmount(ctx.action, "paidInCapitalRubars");
+    const shares = positiveAmount(ctx.action, "sharesIssued");
+    if (paid === null || shares === null) {
+      return rejectedPlan(descriptorId, "malformed-founding", [descriptorId], "R-06: a founding that lists (listAtFounding) must state paidInCapitalRubars and sharesIssued as positive integers — the opening valuation derives from them (M-01).");
+    }
+    paidInCapital = paid;
+    sharesIssued = shares;
+    judgment = judgmentFromPrepared(ctx);
+    if (!judgment) {
+      return rejectedPlan(descriptorId, "judgment-required", [descriptorId], "R-06: a listing founding prices from the market's judgment (quality / scale / importance scores), which arrives only in the worker-prepared payload bound at preview. The action carries no lawful judgment — the founder never supplies the judgment of their own company — so the founding cannot resolve.");
+    }
+  }
+
+  const plan = emptyPlan(descriptorId);
+  const notes: string[] = [];
+  const homeChanges: LogEntryDraft["changes"] = [];
+
+  // Step 0 for the money leg (§1.4): the founder's account lazy-opens
+  // before the capital line, the grant ordered first. (The capital
+  // line itself composes AFTER the corporation write below, so the
+  // transfer primitive folds the cash into the created record.)
+  if (listAtFounding) {
+    composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: founderId, viaActionKind: "found_corporation" });
+  }
+
+  // City effects, in Vera's listed order (§2.4 sequential reading).
+  const gdp = outcomeNote(applyGdpPercent(plan, ctx.snapshot, cityId, 0.4, "R-06 founding: gdp +0.4%"), notes);
+  if (gdp) homeChanges.push(gdp);
+  const gdpNow = num(plannedDoc(plan, ctx.snapshot, cityPath(cityId)), "stats.gdpRubars");
+  const legacyBook = gdpNow === null ? null : Math.round(gdpNow * 0.02);
+  if (gdpNow === null) notes.push("skipped: gdp unset — the opening book value is uncomputable and is not invented");
+
+  // Industry synergy: a completed, functioning structure in the home
+  // city whose kind is the corporation's industry, or whose profile
+  // supports name it (prep report flag F6 — the deterministic match).
+  const synergyStructure = structureDocsFromSnapshot(ctx.snapshot, cityId).find((doc) => {
+    if (!doc || !isStructureFunctioning(doc)) return false;
+    if (doc.kind === industry) return true;
+    const profile = (doc.profile ?? {}) as Record<string, unknown>;
+    return strList(profile.supports).includes(industry);
+  });
+  let synergyStructureId: string | null = null;
+  if (synergyStructure) {
+    synergyStructureId = typeof synergyStructure.structureId === "string" ? synergyStructure.structureId : null;
+    const synergy = outcomeNote(
+      applyGdpPercent(plan, ctx.snapshot, cityId, 0.2, `R-06 industry synergy (${industry} matches completed structure ${synergyStructureId ?? "?"}): gdp +0.2%`),
+      notes
+    );
+    if (synergy) homeChanges.push(synergy);
+  }
+
+  // Valuation + branch records.
+  let valuation = 0;
+  let openingReferencePrice: number | null = null;
+  let judgmentMultiplier: number | null = null;
+  if (listAtFounding && judgment) {
+    // Cap-first rounding (§4.2/A-3): multiplier =
+    // 0.50 + 1.50 × (mean/100) = 0.5 + (q+s+i)/200, applied to the
+    // paid-in capital as one rational so the cap rounds once.
+    judgmentMultiplier = 0.5 + (judgment.quality + judgment.scale + judgment.importance) / 200;
+    valuation = Math.round((paidInCapital * (100 + judgment.quality + judgment.scale + judgment.importance)) / 200);
+    openingReferencePrice = Math.max(1, Math.round(valuation / sharesIssued));
+  } else {
+    valuation = legacyBook ?? 0;
+  }
+
+  const marketCityIds: string[] = [];
+  const secondConfirmed = Boolean(secondCityId && secondConfirmationRef);
+  if (secondCityId && secondConfirmed) marketCityIds.push(secondCityId);
+  if (secondCityId && !secondConfirmed) {
+    notes.push(`second city ${secondCityId} named without a confirmation reference — no effect there and no market listing on its page (cross-city draft rule: the other owner's confirmation is the act that makes it real)`);
+  }
+
+  // The founding entry's prospective seq (the lazy-open convention:
+  // counterHead.lastSeq + 1 + the entry's index in plan order — the
+  // entries standing now, plus the capital movement's two entry groups
+  // on the listed branch, precede it). Preview and commit allocate
+  // identical seqs, so the record's sourceSeq is exact at plan time.
+  const foundingEntryIndex = plan.entries.length + (listAtFounding ? 2 : 0);
+  const corpDoc: Record<string, unknown> = {
+    ...buildCorporationDoc({
+      corporationId,
+      name,
+      industry,
+      valuationRubars: valuation,
+      legacyBookRubars: legacyBook,
+      founderFigureId: stringField(ctx.action, "founderFigureId"),
+      ownerMemberId: founderId,
+      homeCityId: cityId,
+      marketCityIds,
+      sourceActionId: ctx.action.actionId,
+      sourceSeq: ctx.snapshot.counterHead.lastSeq + 1 + foundingEntryIndex,
+      lastResolutionId: ctx.resolutionId,
+      now: new Date(ctx.snapshot.now),
+    }),
+    listed: listAtFounding,
+    // Corporation-record deltas beyond Module 0's fields (prep report
+    // §5 — the Lead folds these into the builder/type at assembly).
+    paidInCapitalRubars: listAtFounding ? paidInCapital : 0,
+    sharesOutstanding: listAtFounding ? sharesIssued : 0,
+    openingReferencePriceRubars: openingReferencePrice,
+    lastJudgment:
+      listAtFounding && judgment
+        ? { quality: judgment.quality, scale: judgment.scale, importance: judgment.importance, inputHash: ctx.prepared?.inputHash ?? null }
+        : null,
+  };
+  planWrite(plan, ctx.snapshot, corpPath, corpDoc, "state", [
+    "name", "industry", "status", "valuationRubars", "listed", "legacyBookRubars",
+    "ownerMemberId", "homeCityId", "marketCityIds", "paidInCapitalRubars",
+    "sharesOutstanding", "openingReferencePriceRubars", "lastJudgment",
+  ]);
+
+  // The listed branch's capital leg, composed against the just-created
+  // record: founder personal -> company cash, transfer class.
+  if (listAtFounding) {
+    const line: TransferLine = {
+      from: { kind: "personal", memberId: founderId },
+      to: companyRef(cityId, corporationId),
+      amountRubars: paidInCapital,
+      ruleId: descriptorId,
+      memo: `paid-in capital at founding of ${corporationId}`,
+    };
+    const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+    if (!applied.ok) {
+      return rejectedPlan(
+        descriptorId,
+        applied.code === "INSUFFICIENT_FUNDS" ? "insufficient-funds" : applied.code.toLowerCase().replace(/_/g, "-"),
+        [descriptorId],
+        `R-06: the paid-in capital of ${paidInCapital} R refused in full (transfer class): ${applied.message} No corporation is founded on unfunded capital.`
+      );
+    }
+    pushMovementEntries(plan, ctx, descriptorId, applied.changes, (entryCityId) =>
+      entryCityId === null
+        ? `R-06: ${founderId}'s personal account committed ${paidInCapital} R of paid-in capital to ${corporationId} at its founding (the M-01 capital act, bundled into the founding).`
+        : `R-06: ${corporationId} received ${paidInCapital} R of paid-in capital from its founder at founding.`
+    );
+  }
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId,
+      cityIds: secondConfirmed && secondCityId ? [cityId, secondCityId] : [cityId],
+      ruleIds: [descriptorId],
+      changes: homeChanges,
+      recordsCreated: [corpPath],
+      recordsUpdated: [cityPath(cityId)],
+      classification: {
+        founding: {
+          corporationId,
+          industry,
+          branch: listAtFounding ? "listed" : "unlisted",
+          legacyBookRubars: legacyBook,
+          ...(listAtFounding
+            ? {
+                paidInCapitalRubars: paidInCapital,
+                sharesIssued,
+                judgment: { ...judgment },
+                judgmentMultiplier,
+                openingReferenceCapRubars: valuation,
+                openingReferencePriceRubars: openingReferencePrice,
+                preparedInputHash: ctx.prepared?.inputHash ?? null,
+              }
+            : {}),
+          synergyStructureId,
+          secondCity: secondCityId ? { cityId: secondCityId, confirmed: secondConfirmed, confirmationRef: secondConfirmationRef } : null,
+        },
+        invokesRules: listAtFounding ? ["M-01", "M-06"] : [],
+      },
+      summaryText:
+        `R-06: ${founderId} founded "${name}" (${corporationId}, ${industry}) in ${cityId} — ${listAtFounding ? "LISTED at founding" : "unlisted"}. Home GDP +0.4%${synergyStructureId ? `; industry synergy +0.2% (completed structure ${synergyStructureId}), stated separately` : ""}. ` +
+        (listAtFounding
+          ? `The unlisted book assignment is skipped, not computed and replaced: legacyBookRubars ${legacyBook === null ? "null (gdp unset)" : `${legacyBook} R`} stands as provenance only and is no input to valuation. Opening valuation from paid-in capital × judgment: ${paidInCapital} R × ${judgmentMultiplier} = ${valuation} R reference cap; opening reference price ${openingReferencePrice} R over ${sharesIssued} shares (M-01/M-02 issuance records and M-06 repricing are the Market module's; this founding composes the record effects R-06's text specifies).`
+          : `Opening book value ${legacyBook === null ? "uncomputable (gdp unset) — valuation 0, legacyBookRubars null" : `${legacyBook} R = round(2% of GDP)`}.`) +
+        (notes.length > 0 ? ` ${notes.join("; ")}.` : ""),
+      major: true,
+    })
+  );
+
+  if (secondCityId && secondConfirmed) {
+    const spillNotes: string[] = [];
+    const spillChanges: LogEntryDraft["changes"] = [];
+    const spill = outcomeNote(applyGdpPercent(plan, ctx.snapshot, secondCityId, 0.2, "R-06 second-city (market/HQ2) founding effect: gdp +0.2%"), spillNotes);
+    if (spill) spillChanges.push(spill);
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: secondCityId,
+        cityIds: [secondCityId],
+        ruleIds: [descriptorId],
+        changes: spillChanges,
+        recordsUpdated: [cityPath(secondCityId)],
+        classification: { foundingSpillover: { corporationId, homeCityId: cityId, confirmationRef: secondConfirmationRef } },
+        summaryText: `R-06 spillover: "${name}" (${corporationId}) named ${secondCityId} as its market/HQ2 city at founding, confirmed by that city's owner (confirmation ${secondConfirmationRef}) — GDP +0.2% here, and the corporation appears on both city pages.${spillNotes.length > 0 ? ` ${spillNotes.join("; ")}.` : ""}`,
+      })
+    );
+  }
+
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "found-corporation",
+    scope: "company",
+    cityId,
+    cityIds: secondConfirmed && secondCityId ? [cityId, secondCityId] : [cityId],
+    summaryText: `Founded "${name}" (${industry}) in ${cityId}${listAtFounding ? `, listed at founding at a ${valuation} R opening reference cap` : ` with an opening book value of ${legacyBook === null ? "0 (gdp unset)" : `${legacyBook} R`}`}${secondConfirmed && secondCityId ? `; ${secondCityId} named as market/HQ2 under its owner's confirmation` : ""}.`,
+    major: true,
+  });
+}
+
+function foundCorporationReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const paths: string[] = [];
+  const queries: CollectionQuerySpec[] = [];
+  const founderId = actorMemberId(seeds.action.actor);
+  if (founderId) paths.push(memberAccountPath(founderId));
+  const cityId = seeds.action.structuredAction?.cityId;
+  const corporationId = seeds.action.structuredAction?.corporationId;
+  if (typeof cityId === "string") {
+    paths.push(cityPath(cityId));
+    paths.push(corporationPath(cityId, typeof corporationId === "string" ? corporationId : `corp_${seeds.action.actionId}`));
+    queries.push(structuresQuery(cityId));
+  }
+  const secondCityId = seeds.action.structuredAction?.secondCityId;
+  if (typeof secondCityId === "string") paths.push(cityPath(secondCityId));
+  return { paths, queries };
+}
+
 // ---------------------------------------------------------------------------
 // Descriptors + finance additions (finance §2.4). The Build Lead
 // registers BUSINESS_DESCRIPTORS into RULE_DESCRIPTORS and folds
@@ -746,6 +1083,17 @@ function payTaxArrearsReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
 // ---------------------------------------------------------------------------
 
 export const BUSINESS_DESCRIPTORS: Record<string, RuleDescriptor> = {
+  "R-06": {
+    id: "R-06",
+    actionKinds: ["found_corporation"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { found_corporation: foundCorporationHandler },
+    readPlan: foundCorporationReadPlan,
+    summary: "Found a corporation: home GDP +0.4% and an industry-synergy +0.2% where a completed structure matches; unlisted opening book round(2% of GDP) with the §2.4 null-GDP skip; a founding bundling listing skips the book (legacyBookRubars is provenance only) and prices the opening reference cap from paid-in capital x the prepared payload's judgment (M-01 composed at founding; issuance records are the Market module's).",
+  },
   "F-06": {
     id: "F-06",
     actionKinds: [],
@@ -770,6 +1118,7 @@ export const BUSINESS_DESCRIPTORS: Record<string, RuleDescriptor> = {
 };
 
 export const BUSINESS_FINANCE_ADDITIONS: Record<string, FinanceDescriptorAdditions> = {
+  "R-06": { shortfallClass: "transfer", ledgersTouched: ["personal", "company"], invokesRules: ["M-01", "M-06"] },
   "F-06": { shortfallClass: "none", ledgersTouched: ["company", "treasury"], invokesRules: [] },
   "F-07": { shortfallClass: "transfer", ledgersTouched: ["company", "treasury"], invokesRules: [] },
 };
