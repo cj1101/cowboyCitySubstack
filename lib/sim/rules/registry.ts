@@ -5,9 +5,11 @@
  * descriptors (R-32 creation, R-33 ripening application, R-34 trickle-down
  * evaluation), and the fixture rules the gate's tests run through. R-33
  * and R-34 never classify an action — they run inside ripening — so they
- * have no action kinds. R-01…R-31, R-35…R-38 product handlers are NOT
+ * have no action kinds. R-01…R-31, R-36…R-38 product handlers are NOT
  * Phase 2 (decision P2-K12): they land with their Phase 4/5/7 action
- * surfaces, each one carrying its own rule table rows here.
+ * surfaces, each one carrying its own rule table rows here. R-35
+ * (Season-0 allocation) landed with Phase 4 step 3: its descriptor
+ * lives in ./allocation and is registered below.
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -37,6 +39,7 @@ import {
 } from "../baseline/registry";
 import { buildPendingDraft, type PendingTemplate } from "./pendingRules";
 import { fieldChange, planWrite, plannedDoc, rejectedPlan, ruleEffectDraft, summaryDraft } from "./planHelpers";
+import { allocationDescriptor } from "./allocation";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1022,6 +1025,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     handlers: {},
     summary: "Trickle-down propagation evaluation (information-only in Phase 2).",
   },
+  "R-35": allocationDescriptor,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],

@@ -1316,7 +1316,14 @@ service cloud.firestore {
     // --- Sim layer: stat allocation ---------------------------------------
 
     match /sim_stat_allocations/{cityId} {
-      allow read: if isAdmin() || simCityOwner(cityId);
+      // Fabric read (Phase 4 allocation assembly, the P2-K16 pattern):
+      // the dispatcher materializes the R-35 read-plan paths (this doc
+      // + versions/v1) under the committer identity, and undo-restore
+      // transactions re-read the commit's write set (§8.5) — neither
+      // can work unless the fabric identity may read here. The branch
+      // admits only the fabric identity; member/guest draft privacy is
+      // unchanged (owner + admin, as landed).
+      allow read: if isAdmin() || isFabricService() || simCityOwner(cityId);
       allow create: if isFabricCommitter()
         && request.resource.data.cityId == cityId
         && request.resource.data.status == 'not_started';
@@ -1344,7 +1351,11 @@ service cloud.firestore {
       allow delete: if isFabricCommitter();
 
       match /versions/{version} {
-        allow read: if isAdmin() || simCityOwner(cityId)
+        // Fabric read branch as on the parent doc (P2-K16 pattern):
+        // read-plan materialization + undo-restore re-reads. Committed
+        // versions stay viewer-readable via the commitSeq branch, as
+        // landed; nothing else widens.
+        allow read: if isAdmin() || isFabricService() || simCityOwner(cityId)
           || (isViewer() && resource.data.commitSeq != null);
         // Committer-only create (Phase 4, build-prep P4-K14): the first
         // version is a fabric write inside the allocation commit
