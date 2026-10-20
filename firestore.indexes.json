@@ -324,6 +324,22 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "sim_intel_records",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "collectorUid", "order": "ASCENDING" },
+        { "fieldPath": "collectedAtSeq", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_collection_means",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerCityId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
