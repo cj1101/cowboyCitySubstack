@@ -1193,6 +1193,17 @@ service cloud.firestore {
         allow create, update: if isFabricCommitter();
         allow delete: if isFabricCommitter();
       }
+
+      // Phase 4 Catalogue I assembly: F-09 writes versioned budget
+      // authorization docs here; the subcollection had no match block
+      // (every sibling — structures/households/figures/corporations/
+      // laws — has one), so budget writes were denied by default.
+      // Posture mirrors laws exactly: viewer read, committer writes.
+      match /budgets/{budgetId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if isFabricCommitter();
+      }
     }
 
     match /sim_character_extensions/{characterId} {
