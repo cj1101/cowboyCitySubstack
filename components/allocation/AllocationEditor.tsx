@@ -10,8 +10,8 @@ import {
   isCommittable,
   neutralAllocation,
   normalizeAllocation,
-  requestAllocationCommit,
   saveAllocationDraft,
+  submitAllocationCommitAction,
   validateAllocation,
   type AllocationStatus,
   type AllocationValues,
@@ -34,11 +34,16 @@ export interface AllocationEditorProps {
   initialDraftVersion?: number;
   /**
    * Injectable handlers — Phase 4 page wiring (or tests) can substitute
-   * these; by default the editor writes through lib/allocation/draftSave,
-   * i.e. the Phase 1 rules' owner draft fence and nothing else.
+   * these. By default Save writes through lib/allocation/draftSave (the
+   * rules' owner draft fence and nothing else), and Commit runs the
+   * default flow in handleSubmitCommit: save the final map as the head
+   * draft, then submit the `allocate_season0` action that references it.
+   * A page that injects onSaveDraft should inject onSubmitCommit too —
+   * the default commit flow needs the saved draft's version + hash from
+   * the real saver.
    */
   onSaveDraft?: (values: AllocationValues) => Promise<void>;
-  onRequestCommit?: (values: AllocationValues) => Promise<void>;
+  onSubmitCommit?: (values: AllocationValues) => Promise<void>;
 }
 
 /**
@@ -48,14 +53,18 @@ export interface AllocationEditorProps {
  * stays disabled until the allocation validates exactly.
  *
  * ==========================================================================
- * PHASE 4 INTEGRATION POINT — COMMIT
+ * COMMIT — AN ACTION, NOT A STATUS WRITE (P4-K14, brief §3.3)
  * ==========================================================================
- * "Request commit" sets status 'commit_requested' via the draft fence.
- * Phase 4's fabric resolves that request as a Resolution Event (writes
- * sim_cities stats, committed fields, the versions record, and the Log
- * entries). Until that intake exists, a requested commit is recorded and
- * pending — and once requested, the Phase 1 rules refuse further draft
- * edits, so this editor locks. Copy below says all of this plainly.
+ * The two-step confirmation below is presentation: the second step saves
+ * the final map as the head draft and SUBMITS the `allocate_season0`
+ * action (lib/allocation/commitAction.ts). The binding confirmation is
+ * the member's hash-bound confirmation on the action's preview (§2.3
+ * never-bind card) — nothing is committed by this editor. The fabric
+ * queues the confirmed action (setting 'commit_requested' itself),
+ * resolves it in a wake, and the commit lands as a logged Resolution
+ * Event. Once a commit is submitted this editor locks locally: saving a
+ * newer draft would stale the submitted action (§3.4), so the lock is
+ * the honest presentation of that discipline.
  * ==========================================================================
  */
 export function AllocationEditor({
@@ -66,7 +75,7 @@ export function AllocationEditor({
   initialStatus = "not_started",
   initialDraftVersion = 0,
   onSaveDraft,
-  onRequestCommit,
+  onSubmitCommit,
 }: AllocationEditorProps) {
   const [values, setValues] = useState<AllocationValues>(() =>
     normalizeAllocation(initialAllocations)
@@ -75,11 +84,15 @@ export function AllocationEditor({
   const [draftVersion, setDraftVersion] = useState(initialDraftVersion);
   const [busy, setBusy] = useState<"draft" | "commit" | null>(null);
   const [confirmingCommit, setConfirmingCommit] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const locked =
-    status === "committed" || status === "commit_requested" || status === "superseded";
+    submitted ||
+    status === "committed" ||
+    status === "commit_requested" ||
+    status === "superseded";
   const committable = isCommittable(values);
   const perStatIssues = useMemo(() => {
     const map = new Map<string, string>();
@@ -119,29 +132,40 @@ export function AllocationEditor({
     }
   }
 
-  async function handleRequestCommit() {
+  async function handleSubmitCommit() {
     setError("");
     setNotice("");
     setBusy("commit");
     try {
-      if (onRequestCommit) {
-        await onRequestCommit(values);
+      if (onSubmitCommit) {
+        await onSubmitCommit(values);
       } else {
-        await requestAllocationCommit({
+        // Save the final map as the head draft first: the commit action
+        // references the draft by version + hash (brief §3.3 step 1), so
+        // what the fabric previews is exactly the draft as saved.
+        const saved = await saveAllocationDraft({
           cityId,
           values,
           authorUid,
           previousDraftVersion: draftVersion,
         });
+        await submitAllocationCommitAction({
+          cityId,
+          values,
+          authorUid,
+          draftVersion: saved.draftVersion,
+        });
+        setDraftVersion(saved.draftVersion);
       }
-      setDraftVersion((v) => v + 1);
-      setStatus("commit_requested");
+      setSubmitted(true);
       setConfirmingCommit(false);
       setNotice(
-        "Commit requested. The fabric resolves allocation commits as a logged Resolution Event; until it does, this build is locked as requested."
+        "Commit action submitted. The fabric will preview this exact build; " +
+          "your confirmation on that preview is the binding act, and the commit " +
+          "then lands as a logged Resolution Event. This build is locked meanwhile."
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to request commit");
+      setError(err instanceof Error ? err.message : "Failed to submit commit");
     } finally {
       setBusy(null);
     }
@@ -168,8 +192,13 @@ export function AllocationEditor({
           </p>
         ) : status === "commit_requested" ? (
           <p className="text-sm text-amber-400" role="status">
-            A commit has been requested for this build and it is locked
-            while the request stands.
+            The fabric has queued this build&apos;s confirmed commit action
+            and it is locked while the commit stands in the queue.
+          </p>
+        ) : submitted ? (
+          <p className="text-sm text-amber-400" role="status">
+            A commit action for this build has been submitted and it is
+            locked while the submission stands.
           </p>
         ) : null}
       </header>
@@ -246,7 +275,10 @@ export function AllocationEditor({
             <strong>Commit is one-time and final.</strong> This founding
             build becomes your city&apos;s stats in a logged Resolution
             Event; there is no second commit and no respec. Growth from
-            here is earned in play. Commit exactly this build?
+            here is earned in play. Submitting creates the commit action —
+            the fabric previews this exact build first, and your
+            confirmation on that preview is the binding act. Submit
+            exactly this build?
           </p>
           <div className="flex flex-wrap gap-3">
             <button
@@ -254,9 +286,9 @@ export function AllocationEditor({
               className="btn"
               disabled={busy !== null || !committable}
               aria-busy={busy === "commit"}
-              onClick={handleRequestCommit}
+              onClick={handleSubmitCommit}
             >
-              {busy === "commit" ? "Requesting…" : "Yes — commit this build"}
+              {busy === "commit" ? "Submitting…" : "Yes — submit this build"}
             </button>
             <button
               type="button"

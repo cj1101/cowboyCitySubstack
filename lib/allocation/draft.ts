@@ -1,12 +1,13 @@
 /**
- * The `sim_stat_allocations/{cityId}` draft-save shape, as landed in Phase 1.
+ * The `sim_stat_allocations/{cityId}` draft-save shape, as landed in Phase 1
+ * and narrowed in Phase 4 Module 0 (build-prep P4-K14).
  *
- * The Phase 1 Firestore rules (firestore.rules, match
- * /sim_stat_allocations/{cityId}) give the city owner exactly one browser
- * write path: an update that —
+ * The Firestore rules (firestore.rules, match /sim_stat_allocations/{cityId})
+ * give the city owner exactly one browser write path: an update that —
  *
  * - starts from status 'not_started' or 'draft',
- * - lands on status 'draft' or 'commit_requested',
+ * - lands on status 'draft' — the ONLY owner-settable target since the
+ *   P4-K14 narrowing ('commit_requested' is the committer's alone),
  * - leaves baselineHash, baselineStats, pointBudget, commitActionId,
  *   committedSeq, and committedByUid byte-identical (field-equality checks),
  * - and touches ONLY the draft fields listed in DRAFT_WRITABLE_FIELDS.
@@ -17,19 +18,20 @@
  * and the field list is asserted against the fence in validation.test.ts.
  *
  * ==========================================================================
- * PHASE 4 INTEGRATION POINT — COMMIT
+ * COMMIT — AN ACTION, NOT A STATUS WRITE (P4-K14, brief §3.3)
  * ==========================================================================
- * Requesting a commit from the browser sets status 'commit_requested' with
- * the final draft fields (buildCommitRequestFields). That is ALL a browser
- * may do. The commit itself is a fabric Resolution Event (R-35): Phase 4's
- * intake/dispatcher picks up the commit request (or an allocation action),
- * re-validates keys/bounds/exact-sum server-side, and the committer — in
+ * There is deliberately no commit builder in this file. Committing is an
+ * `allocate_season0` ACTION through the play loop (commitAction.ts builds
+ * and submits it): the fabric previews it, the member's hash-bound
+ * confirmation on the action is the binding act, and the committer — in
  * one transaction — writes the eight values into sim_cities/{cityId}.stats,
  * sets status 'committed' with commitActionId / committedSeq /
- * committedByUid, writes the versions/{version} record with its previewHash
- * and commitSeq, and logs the allocation (one action-summary + one
- * rule-effect entry, amendment §3.1). No client code writes those fields;
- * the rules fence makes it impossible, deliberately.
+ * committedByUid, writes the versions/{version} record, and logs the
+ * allocation (one action-summary + one rule-effect entry, amendment §3.1).
+ * The committer also sets 'commit_requested' when it queues the confirmed
+ * action; a browser never writes that status (the pre-Phase-4
+ * buildCommitRequestFields path was rules-legal under the Phase 1 fence
+ * and contract-wrong against the brief — removed, not deprecated).
  * ==========================================================================
  */
 
@@ -104,7 +106,8 @@ export interface DraftSaveFields {
   draftVersion: number;
   draftHash: string;
   authorUid: string;
-  status: "draft" | "commit_requested";
+  /** The only status a browser may ever write (P4-K14 narrowing). */
+  status: "draft";
 }
 
 export interface BuildDraftOptions {
@@ -116,10 +119,8 @@ export interface BuildDraftOptions {
   draftHash: string;
 }
 
-function buildFields(
-  options: BuildDraftOptions,
-  status: DraftSaveFields["status"]
-): DraftSaveFields {
+/** Fields for a draft save (status -> 'draft'). Add updatedAt at write time. */
+export function buildDraftSaveFields(options: BuildDraftOptions): DraftSaveFields {
   // Draft saves are free-form about the SUM (drafts may be revised freely
   // before commit, R-35) but never about keys/bounds/integers: a draft the
   // fabric could never accept is refused here, at the preview layer.
@@ -135,42 +136,25 @@ function buildFields(
     draftVersion: options.previousDraftVersion + 1,
     draftHash: options.draftHash,
     authorUid: options.authorUid,
-    status,
+    status: "draft",
   };
-}
-
-/** Fields for a draft save (status -> 'draft'). Add updatedAt at write time. */
-export function buildDraftSaveFields(options: BuildDraftOptions): DraftSaveFields {
-  return buildFields(options, "draft");
-}
-
-/**
- * Fields for a commit request (status -> 'commit_requested'). The caller
- * must have already established isCommittable(values) — this builder throws
- * otherwise, so a commit request can never carry a non-committable draft.
- * The commit itself is the Phase 4 fabric Resolution Event (see header).
- */
-export function buildCommitRequestFields(options: BuildDraftOptions): DraftSaveFields {
-  const issues = validateAllocation(options.values, { requireExactSum: true });
-  if (issues.length > 0) {
-    throw new Error(
-      `Allocation is not committable: ${issues.map((i) => i.message).join(" ")}`
-    );
-  }
-  return buildFields(options, "commit_requested");
 }
 
 /**
  * Shape for `sim_stat_allocations/{cityId}/versions/{version}` — immutable
- * snapshot records. Rules (Phase 1): owner may create with
- * authorUid == their uid; update/delete denied to everyone.
+ * snapshot records. Rules: create is fabric-committer-only since the
+ * P4-K14 narrowing (the Phase 1 owner-create clause is removed); update
+ * is denied to everyone.
  *
- * PHASE 4 INTEGRATION POINT — VERSIONS: per Phase 1 brief §1.6, the first
- * version doc is written at Phase 4 preview/commit time, NOT at lazy
- * creation and not on every draft save. `previewHash` and `commitSeq` stay
- * null on any pre-commit snapshot; the committing Resolution Event writes
- * the committed version with both set. This builder exists so the Phase 4
- * page wiring and the fabric share one shape definition.
+ * VERSIONS (brief §1.2): the first version doc is written by the R-35
+ * handler inside the allocation commit transaction — NOT at lazy
+ * creation, not on any draft save, and never by a browser. This builder
+ * remains the shared shape definition: the handler's version doc carries
+ * exactly these fields plus `cityId` (the §12.4 versions-by-cityId +
+ * commitSeq index query reads it) and `createdAt` (committer-stamped).
+ * `previewHash` / `commitSeq` are null here because a client-side
+ * snapshot is pre-commit by definition; the committed record carries
+ * both (see the handler for how each is bound).
  */
 export interface AllocationVersionFields {
   source: "first_login" | "reallocation_event";

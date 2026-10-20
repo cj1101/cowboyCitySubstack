@@ -15,9 +15,14 @@
 import assert from "node:assert/strict";
 
 import { canonicalJson, sha256Hex } from "../sim/canonical";
+import { buildActionId } from "../sim/intake";
+import {
+  ALLOCATE_SEASON0_ACTION_KIND,
+  buildAllocationCommitAction,
+  buildAllocationCommitPayload,
+} from "./commitAction";
 import {
   DRAFT_WRITABLE_FIELDS,
-  buildCommitRequestFields,
   buildDraftSaveFields,
   buildVersionSnapshotFields,
   computeDraftHash,
@@ -128,24 +133,52 @@ async function main(): Promise<void> {
     /Invalid allocation draft/
   );
 
-  // --- Commit request builder -------------------------------------------
-  const commit = buildCommitRequestFields({
+  // --- Commit action builder (P4-K14: commit is an action) ---------------
+  // There is no commit-request builder anymore: a browser can no longer
+  // express a commit as a status write. The commit is an allocate_season0
+  // action through the play loop — born 'received', lifecycle fields null,
+  // payload = final map + draftVersion + draftHash (brief §3.3 step 1).
+  const payload = buildAllocationCommitPayload({
+    cityId: "cityA",
     values: specialist,
-    authorUid: "uid-owner",
-    previousDraftVersion: 3,
-    draftHash: "cafef00d",
+    draftVersion: 4,
   });
-  assert.equal(commit.status, "commit_requested");
-  assert.equal(commit.draftVersion, 4);
+  assert.deepEqual(payload.allocations, specialist);
+  assert.equal(payload.draftVersion, 4);
+  assert.equal(payload.draftHash, computeDraftHash(specialist, 400));
   assert.throws(
     () =>
-      buildCommitRequestFields({
+      buildAllocationCommitPayload({
+        cityId: "cityA",
         values: emptyAllocation(),
-        authorUid: "uid-owner",
-        previousDraftVersion: 0,
-        draftHash: "cafef00d",
+        draftVersion: 1,
       }),
     /not committable/
+  );
+
+  const built = buildAllocationCommitAction({
+    cityId: "cityA",
+    values: specialist,
+    authorUid: "uid-owner",
+    draftVersion: 4,
+    now: "2026-10-19T00:00:00.000Z",
+  });
+  assert.equal(built.doc.actionType, ALLOCATE_SEASON0_ACTION_KIND);
+  assert.equal(built.doc.actionType, "allocate_season0");
+  assert.equal(built.doc.status, "received", "born received (§9.4 create shape)");
+  assert.equal(built.doc.preview, null);
+  assert.equal(built.doc.confirmation, null);
+  assert.equal(built.doc.resolutionId, null);
+  assert.equal(built.doc.firstLogSeq, null);
+  assert.equal(built.doc.lastLogSeq, null);
+  assert.deepEqual(built.doc.targetCityIds, ["cityA"]);
+  assert.deepEqual(built.doc.structuredAction, { ...payload });
+  assert.equal(built.doc.actor.type, "member");
+  assert.equal(built.doc.actor.memberId, "uid-owner");
+  assert.equal(
+    built.actionId,
+    buildActionId("uid-owner", "allocate-season0:cityA:v4"),
+    "intake idempotency: one action per (author, city, draft version)"
   );
 
   // --- Version snapshot shape -------------------------------------------

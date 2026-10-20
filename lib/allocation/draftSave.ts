@@ -1,20 +1,22 @@
 /**
  * Browser-side Firestore writes for allocation drafts.
  *
- * These are the ONLY writes this module performs, and both go through the
- * Phase 1 rules' owner draft fence on `sim_stat_allocations/{cityId}`:
- * draft-field keys only, `updatedAt` stamped with serverTimestamp(), and
- * the fence-protected fields (baselineHash, baselineStats, pointBudget,
- * commitActionId, committedSeq, committedByUid) never sent.
+ * This is the module's ONLY draft write, and it goes through the rules'
+ * owner draft fence on `sim_stat_allocations/{cityId}`: draft-field keys
+ * only, `updatedAt` stamped with serverTimestamp(), and the
+ * fence-protected fields (baselineHash, baselineStats, pointBudget,
+ * commitActionId, committedSeq, committedByUid) never sent. Since the
+ * Phase 4 Module 0 narrowing (P4-K14) the fence admits exactly one
+ * target status — 'draft'.
  *
  * ==========================================================================
- * PHASE 4 INTEGRATION POINT — COMMIT
+ * COMMIT IS NOT HERE (P4-K14, brief §3.3)
  * ==========================================================================
- * requestAllocationCommit() ends at status 'commit_requested'. Phase 4's
- * fabric turns that request into the R-35 Resolution Event (validation
- * re-run server-side, sim_cities stats write, committed fields, versions
- * record, Log entries). Until Phase 4 wires that intake, a commit request
- * is a recorded request and nothing more — the UI copy says exactly that.
+ * The pre-Phase-4 requestAllocationCommit() — a browser status write to
+ * 'commit_requested' — is REMOVED, not deprecated: allocation commit is
+ * an `allocate_season0` action through the play loop, built and
+ * submitted by commitAction.ts. Exactly one commit path exists, and it
+ * is not a draft write.
  * ==========================================================================
  */
 
@@ -23,12 +25,11 @@ import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
 import { getClientDb } from "@/lib/firebase";
 
 import {
-  buildCommitRequestFields,
   buildDraftSaveFields,
   computeDraftHash,
   type DraftSaveFields,
 } from "./draft";
-import { isCommittable, sumPoints, type AllocationValues } from "./validation";
+import { sumPoints, type AllocationValues } from "./validation";
 
 async function writeDraftFields(
   cityId: string,
@@ -44,7 +45,10 @@ async function writeDraftFields(
 /**
  * Save the working draft. Drafts may be saved at any sum (R-35: drafts are
  * revised freely before commit) but values must be integers in bounds —
- * buildDraftSaveFields throws otherwise.
+ * buildDraftSaveFields throws otherwise. Returns the written fields: the
+ * commit flow (commitAction.ts) binds the saved `draftVersion` +
+ * `draftHash` into the commit action's payload, so a commit always
+ * references the draft exactly as saved.
  */
 export async function saveAllocationDraft(args: {
   cityId: string;
@@ -57,37 +61,6 @@ export async function saveAllocationDraft(args: {
     sumPoints(args.values)
   );
   const fields = buildDraftSaveFields({
-    values: args.values,
-    authorUid: args.authorUid,
-    previousDraftVersion: args.previousDraftVersion,
-    draftHash,
-  });
-  await writeDraftFields(args.cityId, fields);
-  return fields;
-}
-
-/**
- * Request the one-time allocation commit. Refuses (throws) unless the
- * allocation is committable — sum exactly POINT_BUDGET, all values integer
- * and in bounds. On success the doc sits at 'commit_requested' for the
- * Phase 4 fabric to resolve (see header).
- */
-export async function requestAllocationCommit(args: {
-  cityId: string;
-  values: AllocationValues;
-  authorUid: string;
-  previousDraftVersion: number;
-}): Promise<DraftSaveFields> {
-  if (!isCommittable(args.values)) {
-    throw new Error(
-      "Allocation is not committable: it must spend exactly the pool with every value in bounds."
-    );
-  }
-  const draftHash = computeDraftHash(
-    { ...args.values },
-    sumPoints(args.values)
-  );
-  const fields = buildCommitRequestFields({
     values: args.values,
     authorUid: args.authorUid,
     previousDraftVersion: args.previousDraftVersion,
