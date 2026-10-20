@@ -519,7 +519,7 @@ export function composeTaxAssessment(args: {
   const payableAfter = payableBeforeForCity + payableDelta;
   let payablesChange: LogEntryDraft["changes"][number] | null = null;
   if (payableDelta > 0) {
-    planMutate(plan, snapshot, corpPath, "state", ["taxPayables"], (current) => {
+    planMutate(plan, snapshot, corpPath, "state", [`taxPayables.${fact.operatingCityId}`], (current) => {
       if (!current) return current;
       const next = { ...current };
       const map = { ...payablesOf(current) };
@@ -529,7 +529,10 @@ export function composeTaxAssessment(args: {
     });
     payablesChange = fieldChange(
       `corporations/${fact.corporationId}.taxPayables.${fact.operatingCityId}`,
-      payableBeforeForCity,
+      // The Log chain is literal: an absent key claims null, a standing
+      // key its number (§5.3's "absent and zero never differ" is the
+      // semantic reading; the chain spells the record as it stands).
+      rawPayable(corp, fact.operatingCityId),
       payableAfter,
       `F-06: uncollectible remainder of the ${fact.kind} assessment becomes a recorded payable to ${fact.operatingCityId} (§5.3 — accrues nothing, forgiven never silently)`
     );
@@ -595,6 +598,15 @@ export function composeTaxAssessment(args: {
     lawIds: schedule.lawIds,
     note: null,
   };
+}
+
+/** One city's payable as the record literally stands: the number when
+ * the key is present, null when absent (the Log chain's spelling). */
+function rawPayable(doc: Record<string, unknown> | null, cityId: string): number | null {
+  const raw = doc?.taxPayables;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = (raw as Record<string, unknown>)[cityId];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /** The corporation record's payables map, tolerantly read: absent or
@@ -673,7 +685,7 @@ function payTaxArrearsHandler(ctx: HandlerContext): ResolutionPlan {
   const payableAfter = payableBefore - amount;
   const remainingPayables = Object.keys(payables).filter((k) => k !== creditorCityId).length;
   const allCleared = payableAfter === 0 && remainingPayables === 0;
-  planMutate(plan, ctx.snapshot, corpPath, "state", ["taxPayables"], (current) => {
+  planMutate(plan, ctx.snapshot, corpPath, "state", [`taxPayables.${creditorCityId}`], (current) => {
     if (!current) return current;
     const next = { ...current };
     const map = { ...payablesOf(current) };
@@ -695,7 +707,9 @@ function payTaxArrearsHandler(ctx: HandlerContext): ResolutionPlan {
   const payablesChange = fieldChange(
     `corporations/${corporationId}.taxPayables.${creditorCityId}`,
     payableBefore,
-    payableAfter,
+    // At zero the key is removed: the chain claims null, the record's
+    // literal after-state (absent and zero never differ, §5.3).
+    payableAfter === 0 ? null : payableAfter,
     `F-07: payable to ${creditorCityId} reduced by the confirmed payment of ${amount} R`
   );
   const homeEntry = [...plan.entries].reverse().find((e) => e.cityId === homeCityId);
@@ -923,10 +937,10 @@ function foundCorporationHandler(ctx: HandlerContext): ResolutionPlan {
 
   // The founding entry's prospective seq (the lazy-open convention:
   // counterHead.lastSeq + 1 + the entry's index in plan order — the
-  // entries standing now, plus the capital movement's two entry groups
+  // entries standing now, plus the capital movement's one entry group
   // on the listed branch, precede it). Preview and commit allocate
   // identical seqs, so the record's sourceSeq is exact at plan time.
-  const foundingEntryIndex = plan.entries.length + (listAtFounding ? 2 : 0);
+  const foundingEntryIndex = plan.entries.length + (listAtFounding ? 1 : 0);
   const corpDoc: Record<string, unknown> = {
     ...buildCorporationDoc({
       corporationId,
@@ -960,8 +974,18 @@ function foundCorporationHandler(ctx: HandlerContext): ResolutionPlan {
     "sharesOutstanding", "openingReferencePriceRubars", "lastJudgment",
   ]);
 
-  // The listed branch's capital leg, composed against the just-created
-  // record: founder personal -> company cash, transfer class.
+  // The listed branch's capital leg: founder personal -> company cash,
+  // transfer class, composed through the primitive for validation and
+  // folding (it folds the cash into the just-created record). The
+  // company leg's Log change is then stated as what it is — a
+  // CREATION change (before null): the record is born holding its
+  // paid-in capital, exactly as an F-01 account is born holding its
+  // genesis grant, and validatePlan's chain for a created doc starts
+  // at null. The primitive's own company change (chained off the
+  // planned doc's 0) is therefore replaced by the creation change on
+  // the founding entry; the founder's debit change rides the movement
+  // entries unchanged.
+  let foundingCashChange: LogEntryDraft["changes"][number] | null = null;
   if (listAtFounding) {
     const line: TransferLine = {
       from: { kind: "personal", memberId: founderId },
@@ -979,10 +1003,17 @@ function foundCorporationHandler(ctx: HandlerContext): ResolutionPlan {
         `R-06: the paid-in capital of ${paidInCapital} R refused in full (transfer class): ${applied.message} No corporation is founded on unfunded capital.`
       );
     }
-    pushMovementEntries(plan, ctx, descriptorId, applied.changes, (entryCityId) =>
-      entryCityId === null
-        ? `R-06: ${founderId}'s personal account committed ${paidInCapital} R of paid-in capital to ${corporationId} at its founding (the M-01 capital act, bundled into the founding).`
-        : `R-06: ${corporationId} received ${paidInCapital} R of paid-in capital from its founder at founding.`
+    const debitChanges = applied.changes.filter(
+      (t) => !t.change.field.startsWith(`corporations/${corporationId}.`)
+    );
+    foundingCashChange = fieldChange(
+      `corporations/${corporationId}.companyCashRubars`,
+      null,
+      paidInCapital,
+      "R-06: paid-in capital held at creation — the record is born funded (the M-01 capital act, bundled into the founding)"
+    );
+    pushMovementEntries(plan, ctx, descriptorId, debitChanges, () =>
+      `R-06: ${founderId}'s personal account committed ${paidInCapital} R of paid-in capital to ${corporationId} at its founding (the M-01 capital act, bundled into the founding).`
     );
   }
 
@@ -992,7 +1023,7 @@ function foundCorporationHandler(ctx: HandlerContext): ResolutionPlan {
       cityId,
       cityIds: secondConfirmed && secondCityId ? [cityId, secondCityId] : [cityId],
       ruleIds: [descriptorId],
-      changes: homeChanges,
+      changes: foundingCashChange ? [...homeChanges, foundingCashChange] : homeChanges,
       recordsCreated: [corpPath],
       recordsUpdated: [cityPath(cityId)],
       classification: {
