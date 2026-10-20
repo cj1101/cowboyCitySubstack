@@ -634,7 +634,7 @@ function capacityProjectHandler(ctx: HandlerContext): ResolutionPlan {
       const afterValue = clampNumber(before + GROWTH_INDEX_DELTA, 0, INDEX_CAP);
       planWrite(plan, ctx.snapshot, cityPath, withDocField(cityPlanned, `stats.${capacityIndex}`, afterValue), "state", [`stats.${capacityIndex}`]);
       completionChanges.push(
-        fieldChange(`stats.${capacityIndex}`, before, afterValue, `R-36 completion: ${capacityIndex} +${GROWTH_INDEX_DELTA}${afterValue === before ? " (clamped at the 100 cap)" : ""} — the project's whole yield, banked as direct stat growth (never re-allocatable points)`)
+        fieldChange(`stats.${capacityIndex}`, before, afterValue, `R-36 completion: ${capacityIndex} +${GROWTH_INDEX_DELTA}${before + GROWTH_INDEX_DELTA > INDEX_CAP ? " (clamped at the 100 cap)" : ""} — the project's whole yield, banked as direct stat growth (never re-allocatable points)`)
       );
       const statsAfter = (plannedDoc(plan, ctx.snapshot, cityPath)?.stats ?? {}) as Record<string, unknown>;
       const runningSum = indexSumOfStats(statsAfter);

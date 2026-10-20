@@ -65,7 +65,6 @@ import {
   type LogEntryDraft,
   type ResolutionPlan,
   type SimAction,
-  type SimSnapshot,
 } from "../state";
 import {
   fieldChange,
@@ -574,9 +573,7 @@ function establishFundHandler(ctx: HandlerContext): ResolutionPlan {
       cityId,
       cityIds: [cityId],
       ruleIds,
-      changes: [
-        fieldChange("status", null, "pending", "pending consequence committed to at fund establishment (R-32 → R-33 ripening)"),
-      ],
+      changes: [],
       recordsCreated: [`sim_pending_consequences/${pendingId}`],
       pendingId,
       summaryText:
