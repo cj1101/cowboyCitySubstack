@@ -1453,6 +1453,48 @@ service cloud.firestore {
       allow create, update, delete: if isFabricCommitter();
     }
 
+    // --- Sim layer: data acquisition (Phase 4, step 9) -------------------
+    // Means are world records (R-26): a vehicle, a graded profile, a
+    // real operating cost. Reads: the means' owner, the current owners
+    // of its owner city (the standing faction ownership proof), admin,
+    // and the fabric identity — read-plan materialization and the
+    // delivery ripening's counter-means query run under it. Writes are
+    // committer-only, erasure included: a means record leaves the
+    // world through the undo engine's restore transactions like
+    // everything else (the P2-K16 posture, as with intel).
+
+    match /sim_collection_means/{meansId} {
+      allow read: if isFabricService()
+        || isAdmin()
+        || (isFullMember() && resource.data.ownerUid == request.auth.uid)
+        || (isFullMember() && ownsListedCity(resource.data.ownerCityId));
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    // The collection posture record (design C-6) is the counter-
+    // intelligence state: whose contacts are burned, what has been
+    // discovered, which cities run counter-means. NO client identity
+    // reads or writes it — not the city's own owner, not admin: any
+    // client read path would leak the covert layer's shape. The
+    // fabric service reads it inside resolutions; the committer
+    // writes it inside Resolution Events.
+
+    match /sim_collection_posture/{cityId} {
+      allow read: if isFabricService();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    // Verification adoptions (R-30): the marker that a member adopted
+    // a verification report and its consequences landed — exactly once
+    // per report. The doc carries no private data (report, claim,
+    // tier, adopter), so reads are member-wide; writes are
+    // committer-only, like every authoritative sim record.
+
+    match /sim_verification_adoptions/{adoptionId} {
+      allow read: if isFullMember() || isAdmin();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
     // --- Sim layer: trust (publications + intel) --------------------------
 
     match /sim_publications/{publicationId} {
