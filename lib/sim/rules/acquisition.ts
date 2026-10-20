@@ -372,10 +372,11 @@ function summaryDraft(args: EntryArgs) {
 
 /** This family's write helper over the landed planWrite: recordClass
  * is always "state" here (pendings travel via pendingCreates), and
- * changedFields are computed exactly — the top-level fields whose
- * values differ between the snapshot doc and the after-doc (all
- * fields on a create). Handlers that fold several writes to one path
- * get the engine's union semantics for free. */
+ * changedFields are computed exactly — the DOTTED LEAF paths whose
+ * values differ between the snapshot doc and the after-doc (every
+ * leaf on a create), which is the granularity F-02 reconciles
+ * changes against. Handlers that fold several writes to one path get
+ * the engine's union semantics for free. */
 function planWrite(
   plan: ResolutionPlan,
   snapshot: SimSnapshot,
@@ -383,16 +384,29 @@ function planWrite(
   afterDoc: Record<string, unknown> | null
 ): void {
   const before = snapshotDoc(snapshot, path);
-  let changedFields: string[];
-  if (afterDoc === null) {
-    changedFields = before ? Object.keys(before) : [];
-  } else if (before === null) {
-    changedFields = Object.keys(afterDoc);
-  } else {
-    changedFields = Object.keys(afterDoc).filter(
-      (key) => JSON.stringify(before[key]) !== JSON.stringify(afterDoc[key])
-    );
-  }
+  const changedFields: string[] = [];
+  const walk = (b: unknown, a: unknown, prefix: string): void => {
+    if (JSON.stringify(b) === JSON.stringify(a)) return;
+    const bothObjects =
+      typeof b === "object" && b !== null && !Array.isArray(b) &&
+      typeof a === "object" && a !== null && !Array.isArray(a);
+    if (bothObjects) {
+      const keys = new Set([
+        ...Object.keys(b as Record<string, unknown>),
+        ...Object.keys(a as Record<string, unknown>),
+      ]);
+      for (const key of keys) {
+        walk(
+          (b as Record<string, unknown>)[key],
+          (a as Record<string, unknown>)[key],
+          prefix ? `${prefix}.${key}` : key
+        );
+      }
+      return;
+    }
+    if (prefix) changedFields.push(prefix);
+  };
+  walk(before, afterDoc, "");
   enginePlanWrite(plan, snapshot, path, afterDoc, "state", changedFields);
 }
 
@@ -1554,8 +1568,13 @@ export function buildDeliveryPlan(
   }
 
   // No-return-path at delivery nulls the whole payload with a reason
-  // (design §9.4: the delivery still lands).
-  const returnPath = !spec.foreign || hasLiveConnectionBetween(snapshot, spec.collectorCityId, spec.targetCityId);
+  // (design §9.4: the delivery still lands). The return path is the
+  // commission grading's own test: resident apparatus, or a live
+  // connection home.
+  const residentAtDelivery =
+    means !== null && (str(means.hostCityId) ?? str(means.ownerCityId)) === spec.targetCityId;
+  const returnPath =
+    !spec.foreign || residentAtDelivery || hasLiveConnectionBetween(snapshot, spec.collectorCityId, spec.targetCityId);
   let finalFindings = findings;
   if (spec.foreign && !returnPath) {
     finalFindings = spec.questions.map((question) => ({
@@ -1639,7 +1658,15 @@ export function buildDeliveryPlan(
     const actorTreasury = num(actorCityDoc, "stats.treasuryRubars") ?? 0;
     const corpDoc = snapshotDoc(snapshot, corpPath);
     const corpCash = corpDoc !== null ? (num(corpDoc, "companyCashRubars") ?? 0) : null;
-    if (actorCityDoc !== null && corpDoc !== null && corpCash !== null) {
+    if (actorCityDoc === null || corpDoc === null) {
+      // An owed payment whose records are absent from the delivery
+      // snapshot is an assembly breach — fail loud (generation
+      // failure), never skip a payment silently.
+      throw new RipeningPreparationError(
+        "Insider offer is owed (answers branch) but the treasury or payee record is absent from the delivery snapshot."
+      );
+    }
+    if (corpCash !== null) {
       planWrite(plan, snapshot, `sim_cities/${spec.collectorCityId}`, withDocField(actorCityDoc, "stats.treasuryRubars", actorTreasury - offerRubars));
       planWrite(plan, snapshot, corpPath, withDocField(corpDoc, "companyCashRubars", corpCash + offerRubars));
       plan.entries.push(
@@ -2146,16 +2173,39 @@ function runCommission(
   }
 
   // Gate 1 (Plausibility): the approach must fit the world's physical
-  // and legal facts. The coded rows: a means whose vehicle records
-  // have vanished cannot be plausible; a foreign run over a segment
-  // the means' scope does not reach is implausible on its face.
+  // and legal facts. The coded rows decidable from the lawful read
+  // set: a means' declared scope must reach the commissioned target —
+  // a domestic-scoped apparatus does not run foreign collections, and
+  // a foreign apparatus naming other targets does not survey home.
+  // (The vehicle's own records ride the delivery spec's readPaths, so
+  // a vehicle that vanishes mid-window is named in the delivery's
+  // reliability notes — the commission snapshot cannot lawfully
+  // contain them under the one-pass seed contract.)
   const vehicle = (means.vehicle ?? {}) as Record<string, unknown>;
   const vehiclePaths = strList(vehicle.recordIds);
-  if (buildMeansDoc === null && vehiclePaths.length > 0 && vehiclePaths.every((p) => snapshotDoc(ctx.snapshot, p) === null)) {
+  const meansScope = str(means.scopeKind) ?? "domestic";
+  const namedTargets = strList(means.namedTargetCityIds);
+  if (foreign && meansScope === "domestic") {
     return {
       plan: gateFailure(
         "GATE_PLAUSIBILITY",
-        `Plausibility: every vehicle record of means ${meansId} has vanished from the world — the apparatus it claims no longer stands anywhere.`
+        `Plausibility: means ${meansId} is domestic-scoped — its apparatus does not reach ${targetCityId}. A foreign run needs a foreign/both-scoped means.`
+      ),
+    };
+  }
+  if (foreign && namedTargets.length > 0 && !namedTargets.includes(targetCityId)) {
+    return {
+      plan: gateFailure(
+        "GATE_PLAUSIBILITY",
+        `Plausibility: means ${meansId} names target(s) [${namedTargets.join(", ")}] — ${targetCityId} is not among them. The apparatus was built for somewhere else.`
+      ),
+    };
+  }
+  if (!foreign && meansScope === "foreign" && namedTargets.length > 0 && !namedTargets.includes(actorCityId)) {
+    return {
+      plan: gateFailure(
+        "GATE_PLAUSIBILITY",
+        `Plausibility: means ${meansId} is a foreign apparatus aimed at [${namedTargets.join(", ")}] — it does not survey ${actorCityId}.`
       ),
     };
   }
@@ -2264,6 +2314,7 @@ function runCommission(
     singleSourceClamp: false,
     readPaths: [
       meansPath(meansId),
+      ...vehiclePaths,
       `sim_cities/${targetCityId}`,
       ...(foreign ? [posturePath(targetCityId)] : []),
       ...target.structureIds.map((id) => `sim_cities/${targetCityId}/structures/${id}`),
@@ -2677,6 +2728,13 @@ function insiderAsk(ctx: HandlerContext): ResolutionPlan {
   if (!personCityId) {
     return rejectedPlan(descriptorId, "PERSON_RECORD_INCOMPLETE", [ruleId], `Person ${personRef} carries no cityId — the record cannot place them.`);
   }
+  const citySteer = str(payload.personCityId);
+  if (citySteer === null) {
+    return rejectedPlan(descriptorId, "PAYLOAD_INCOMPLETE", [ruleId], "insider_ask names no personCityId — you cannot reach a person you cannot place (the read plan steers from it; the record validates it).");
+  }
+  if (citySteer !== personCityId) {
+    return rejectedPlan(descriptorId, "PERSON_CITY_MISMATCH", [ruleId], `The payload places ${personRef} in ${citySteer}; the record places them in ${personCityId}. The steer is refused, not followed.`);
+  }
   const parsedQuestion = parseQuestions([payload.question], 1);
   if ("error" in parsedQuestion) {
     return rejectedPlan(descriptorId, "QUESTION_SET_INVALID", [ruleId], `An insider ask carries exactly one question. ${parsedQuestion.error}`);
@@ -2831,7 +2889,14 @@ function insiderAsk(ctx: HandlerContext): ResolutionPlan {
     kindLabel: "insider-ask",
     commissionSeq: summarySeq,
     singleSourceClamp: true,
-    readPaths: [personPath, `sim_cities/${personCityId}`, posturePath(personCityId)],
+    readPaths: [
+      personPath,
+      `sim_cities/${personCityId}`,
+      posturePath(personCityId),
+      ...(personBusinessId !== null
+        ? [`sim_cities/${personBusinessHomeCityId}/corporations/${personBusinessId}`]
+        : []),
+    ],
     buildMeans: false,
     voidRefundRubars: 0,
     insider: {
@@ -3206,6 +3271,10 @@ function loadReportAndClaim(
   if (comparisons.claimPublicationId === null) {
     return { plan: rejectedPlan(descriptorId, "REPORT_NAMES_NO_CLAIM", [ruleId], `Report ${reportPublicationId} cites no claim publication — a verification report must name the claim it verifies.`) };
   }
+  const claimSteer = str(sa(ctx.action).claimPublicationId);
+  if (claimSteer !== null && claimSteer !== comparisons.claimPublicationId) {
+    return { plan: rejectedPlan(descriptorId, "REPORT_CLAIM_MISMATCH", [ruleId], `The payload steers to claim ${claimSteer}; the report cites ${comparisons.claimPublicationId}. The steer is refused, not followed.`) };
+  }
   const claim = snapshotDoc(ctx.snapshot, `sim_publications/${comparisons.claimPublicationId}`);
   if (claim === null) {
     return { plan: rejectedPlan(descriptorId, "CLAIM_NOT_FOUND", [ruleId], `Claim publication ${comparisons.claimPublicationId} does not stand.`) };
@@ -3349,6 +3418,13 @@ function adoptVerificationReport(ctx: HandlerContext): ResolutionPlan {
     );
   }
   const publisherCityId = str(claim.cityId) ?? "";
+  const citySteer = str(payload.publisherCityId);
+  if (citySteer === null) {
+    return rejectedPlan(descriptorId, "PAYLOAD_INCOMPLETE", ["R-30"], "adopt_verification_report names no publisherCityId — the read plan steers from it; the claim record validates it.");
+  }
+  if (citySteer !== publisherCityId) {
+    return rejectedPlan(descriptorId, "CLAIM_CITY_MISMATCH", ["R-30"], `The payload steers to publisher city ${citySteer}; the claim is filed under ${publisherCityId}. The steer is refused, not followed.`);
+  }
   const publisherCity = snapshotDoc(ctx.snapshot, `sim_cities/${publisherCityId}`);
   if (publisherCity === null) {
     return rejectedPlan(descriptorId, "NO_CITY", ["R-30"], `The claim's city ${publisherCityId} does not stand.`);
@@ -3512,6 +3588,10 @@ function establishReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
 }
 
 function insiderReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  // One-pass seed contract (F-01): paths derive from the PAYLOAD.
+  // personCityId is a read STEER — the handler validates it against
+  // the person record actually read, so a wrong steer can only cause
+  // a rejection, never a wrong read of consequence.
   const payload = (seeds.action.structuredAction ?? {}) as Record<string, unknown>;
   const paths: string[] = [];
   const personRef = str(payload.personRef);
@@ -3519,17 +3599,9 @@ function insiderReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const channel = (payload.channel ?? {}) as Record<string, unknown>;
   const channelPath = str(channel.recordPath);
   if (channelPath !== null) paths.push(channelPath);
-  const person = personRef !== null ? seeds.seedDocs.get(`characters/${personRef}`) ?? null : null;
-  if (person) {
-    const personCityId = str(person.cityId);
-    if (personCityId !== null) {
-      paths.push(`sim_cities/${personCityId}`, posturePath(personCityId));
-    }
-    const businessId = str(person.businessId);
-    const home = str(person.businessHomeCityId) ?? personCityId;
-    if (businessId !== null && home !== null) {
-      paths.push(`sim_cities/${home}/corporations/${businessId}`);
-    }
+  const personCityId = str(payload.personCityId);
+  if (personCityId !== null) {
+    paths.push(`sim_cities/${personCityId}`, posturePath(personCityId));
   }
   return { paths, queries: [] };
 }
@@ -3541,6 +3613,12 @@ function publicationReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
 }
 
 function reportReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  // One-pass seed contract (F-01): the report doc is a base seed when
+  // the payload carries publicationPath (the landed convention —
+  // collectActionReadPaths seeds it), so its cited claim + evidence
+  // refs are derivable here. claimPublicationId / publisherCityId in
+  // the payload are read STEERS the handlers cross-validate against
+  // the documents actually read (a lying steer rejects, never writes).
   const payload = (seeds.action.structuredAction ?? {}) as Record<string, unknown>;
   const reportId = str(payload.reportPublicationId);
   const paths: string[] = [];
@@ -3551,19 +3629,20 @@ function reportReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
     const comparisons = reportComparisons(report);
     if (comparisons.claimPublicationId !== null) {
       paths.push(`sim_publications/${comparisons.claimPublicationId}`);
-      const claim = seeds.seedDocs.get(`sim_publications/${comparisons.claimPublicationId}`) ?? null;
-      const claimCityId = claim ? str(claim.cityId) : null;
-      if (claimCityId !== null) paths.push(`sim_cities/${claimCityId}`, `factions/${claimCityId}`);
     }
     paths.push(...comparisons.evidenceRefs);
-    paths.push(`sim_verification_adoptions/adopt_${reportId}`);
   }
+  const claimSteer = str(payload.claimPublicationId);
+  if (claimSteer !== null) paths.push(`sim_publications/${claimSteer}`);
+  const citySteer = str(payload.publisherCityId);
+  if (citySteer !== null) paths.push(`sim_cities/${citySteer}`, `factions/${citySteer}`);
+  paths.push(`sim_verification_adoptions/adopt_${reportId}`);
   return { paths, queries: [] };
 }
 
 // ---------------------------------------------------------------------------
 // The family's descriptors (Lead registers ACQUISITION_DESCRIPTORS in
-// registry.ts — prep report §5; expected registry total 44 + 6 = 50)
+// registry.ts — prep report §5; expected registry total 44 + 7 = 51)
 // ---------------------------------------------------------------------------
 
 export const ACQUISITION_DESCRIPTORS: RuleDescriptor[] = [
