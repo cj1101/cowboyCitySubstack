@@ -9,7 +9,9 @@
  * Phase 2 (decision P2-K12): they land with their Phase 4/5/7 action
  * surfaces, each one carrying its own rule table rows here. R-35
  * (Season-0 allocation) landed with Phase 4 step 3: its descriptor
- * lives in ./allocation and is registered below.
+ * lives in ./allocation and is registered below. R-18/R-37 (Defensive)
+ * landed with Phase 4 step 8: their descriptors live in ./defensive
+ * and are spread below.
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -43,6 +45,7 @@ import { allocationDescriptor } from "./allocation";
 import { FINANCE_DESCRIPTOR_META, FINANCE_DESCRIPTORS } from "./finance";
 import { STRUCTURE_DESCRIPTORS, STRUCTURE_FINANCE_ADDITIONS } from "./structures";
 import { LAW_DESCRIPTORS } from "./laws";
+import { DEFENSIVE_DESCRIPTORS } from "./defensive";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1082,6 +1085,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   ...FINANCE_REGISTERED,
   ...STRUCTURE_REGISTERED,
   ...LAW_DESCRIPTORS,
+  ...DEFENSIVE_DESCRIPTORS,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
