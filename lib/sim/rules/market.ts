@@ -810,10 +810,22 @@ function indexConstituents(
   plan: ResolutionPlan,
   snapshot: SimSnapshot
 ): { corporationId: string; officialPriceRubars: number; floatShares: number; tradingStatus: MarketListingRecord["tradingStatus"] }[] {
-  const out = [];
+  const byId = new Map<string, MarketListingRecord>();
   for (const { doc } of allListingDocs(snapshot)) {
     const planned = plannedDoc(plan, snapshot, listingPath(String(doc.corporationId))) ?? doc;
     const listing = planned as unknown as MarketListingRecord;
+    byId.set(listing.corporationId, listing);
+  }
+  // A listing created by THIS event is not in the snapshot's query
+  // results yet — the planned writes are the truth for it.
+  for (const write of plan.writes) {
+    if (write.path.startsWith("sim_market_listings/") && write.afterDoc) {
+      const listing = write.afterDoc as unknown as MarketListingRecord;
+      if (typeof listing.corporationId === "string") byId.set(listing.corporationId, listing);
+    }
+  }
+  const out = [];
+  for (const listing of byId.values()) {
     out.push({
       corporationId: listing.corporationId,
       officialPriceRubars: listing.officialPriceRubars,
