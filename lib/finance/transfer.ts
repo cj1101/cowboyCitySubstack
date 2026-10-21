@@ -118,6 +118,8 @@ function sameLedger(a: LedgerRef, b: LedgerRef): boolean {
       return a.corporationId === (b as { corporationId: string }).corporationId;
     case "market":
       return true;
+    case "institution":
+      return a.institutionId === (b as { institutionId: string }).institutionId;
     case "exterior":
       return a.scope === (b as { scope: string }).scope;
   }
@@ -204,6 +206,44 @@ export function applyTransferLines(args: {
     // ledger below. A line naming the Market Account before its
     // founding act fails naturally at endpoint existence
     // (LEDGER_NOT_FOUND), which is the honest refusal.
+
+    // Institution (DIF) lines — the fund's rule surface is CLOSED
+    // (addendum checks M10/M11): fund cash moves OUT only as B-13
+    // payout lines inside a liquidation event, and IN only as B-12
+    // premiums, B-14 assessments, or B-07 pool distributions routed
+    // by subrogation. The fund deposits nowhere (BNK-D17) and is
+    // never the Market Account's counterparty in either direction
+    // (the operator's float is not a backstop, §5.7). These are
+    // structural properties of the primitive, not per-handler habits.
+    if (line.from.kind === "institution" || line.to.kind === "institution") {
+      const other = line.from.kind === "institution" ? line.to : line.from;
+      if (other.kind === "market") {
+        return {
+          ok: false,
+          code: "FUND_MARKET_FORBIDDEN",
+          message: `transfer line under ${line.ruleId} names the deposit-insurance fund and the Market Account as counterparties — the fund is banks' money, segregated; the Market Account is never its backstop, payer, or payee (M10).`,
+        };
+      }
+      if (line.from.kind === "institution" && line.ruleId !== "B-13") {
+        return {
+          ok: false,
+          code: "FUND_SOURCE_FORBIDDEN",
+          message: `transfer line under ${line.ruleId} spends from the deposit-insurance fund — fund cash moves out only as B-13 payout lines inside a B-10 liquidation event (M11: no lender-of-last-resort or liquidity-advance mechanic exists).`,
+        };
+      }
+      if (
+        line.to.kind === "institution" &&
+        line.ruleId !== "B-12" &&
+        line.ruleId !== "B-14" &&
+        line.ruleId !== "B-07"
+      ) {
+        return {
+          ok: false,
+          code: "FUND_DESTINATION_FORBIDDEN",
+          message: `transfer line under ${line.ruleId} pays into the deposit-insurance fund — fund inflows are the closed set: B-12 premiums, B-14 assessments, B-07 subrogated pool recoveries, and governance grants under their own rules (M10).`,
+        };
+      }
+    }
   }
 
   // -- Endpoint existence + netting (§2.1.2, §2.1.4) ----------------------
