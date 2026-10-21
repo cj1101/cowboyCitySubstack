@@ -1839,6 +1839,59 @@ async function main() {
   }
   console.log("ok sim finance collections posture (P4 Finance assembly)");
 
+  // ---- sim_terms posture (Dana §3.2; PR #45 CI fix round 5). The
+  // authority stage reads sim_terms/current for every NPC-actor
+  // action and handles the record's ABSENCE — no term stands until
+  // the Phase 7 election act — so the fabric get on a missing doc
+  // must succeed (exists false). Until this round the collection
+  // had NO match block: the get threw "No matching allow
+  // statements" and N4's delegated action died at materialization
+  // (census: the single denied operation of 25). Dana §3.2:
+  // "Reads: members and guests. Writes: fabric committer only."
+  // Term records are historical, so delete is denied to everyone.
+  {
+    const committerFs = fabricCommitter.firestore();
+    const termsRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_terms", "current");
+    // The absence posture the stage depends on.
+    await assertSucceeds(getDoc(termsRef(fabricCommitter)));
+    await assertSucceeds(getDoc(termsRef(fabricWorker)));
+    await assertSucceeds(getDoc(termsRef(guestG)));
+    await assertSucceeds(getDoc(termsRef(memberC)));
+    await assertFails(getDoc(termsRef(anon)));
+    await assertFails(getDoc(termsRef(suspendedE)));
+    // Writes are the committer's alone (through R-22 actions,
+    // Phase 7 — no landed Phase 5 path writes this collection).
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_terms", "current"), { status: "current" })
+    );
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_terms", "current"), { status: "current" })
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_terms", "current"), {
+        cityId: "cowboy-city",
+        mayorUid: "ownerA",
+        viceMayorUid: "ownerB",
+        startedSeq: 1,
+        endedSeq: null,
+        sourceActionId: "fixture-term",
+        status: "current",
+      })
+    );
+    await assertSucceeds(getDoc(termsRef(ownerA)));
+    await assertFails(
+      updateDoc(doc(memberC.firestore(), "sim_terms", "current"), { status: "closed" })
+    );
+    await assertSucceeds(
+      updateDoc(doc(committerFs, "sim_terms", "current"), { status: "closed", endedSeq: 2 })
+    );
+    // Historical: delete denied to everyone, committer included.
+    await assertFails(deleteDoc(doc(committerFs, "sim_terms", "current")));
+    await assertFails(deleteDoc(doc(memberC.firestore(), "sim_terms", "current")));
+  }
+  console.log("ok sim terms posture (Dana §3.2; PR #45 round 5)");
+
   // ---- P4 Defensive assembly: sim_cases posture. Cases are
   // committer-written only (R-18's resolution opens them inside the
   // commit transaction; no client write path exists for any identity,
