@@ -80,11 +80,9 @@ import {
 } from "../../finance/transfer";
 import {
   MARKET_ACCOUNT_SEED_RUBARS,
-  PRICE_FLOOR_RUBARS,
   applyStepCap,
   blockProtectionCapRubars,
   computeValuation,
-  constituentFromListing,
   deriveRealmIndex,
   divisorBaseForGenesis,
   exchangeFeeRubars,
@@ -94,9 +92,7 @@ import {
   roundHalfUp,
   type CodedValuationInputs,
   type Execution,
-  type IncomingOrder,
   type JudgmentScores,
-  type ListingSnapshot,
   type RestingOrder,
   type StepCapException,
 } from "../../market";
@@ -333,31 +329,7 @@ function accChangesFor(acc: ChangeAcc, entryCityId: string | null): SimChange[] 
   return out;
 }
 
-/** Record the planned mutation of one doc field into the accumulator:
- * reads the field's CURRENT planned value, applies the folded write,
- * and records the chained change. `entryCityId`/`field` are the Log
- * spelling; `path`/`docField` locate the write. */
-function mutateField(
-  plan: ResolutionPlan,
-  snapshot: SimSnapshot,
-  acc: ChangeAcc,
-  args: {
-    path: string;
-    docField: string;
-    entryCityId: string | null;
-    field: string;
-    value: unknown;
-    formula: string;
-  }
-): void {
-  const current = plannedDoc(plan, snapshot, args.path);
-  const before = current ? docField(current, args.docField) : null;
-  planMutate(plan, snapshot, args.path, "state", [args.docField], (doc) => {
-    if (!doc) return doc;
-    return { ...doc, [args.docField]: args.value };
-  });
-  accChange(acc, args.entryCityId, args.field, before ?? null, args.value, args.formula);
-}
+
 
 // ---------------------------------------------------------------------------
 // Snapshot query readers (F-01 materializations). Query ids are this
@@ -406,13 +378,10 @@ function queryDocs(
 
 const bookDocs = (snapshot: SimSnapshot) => queryDocs(snapshot, BOOK_QUERY_ID, "sim_market_orders");
 const holdingDocs = (snapshot: SimSnapshot) => queryDocs(snapshot, HOLDINGS_QUERY_ID, "sim_holdings");
-const accountDocs = (snapshot: SimSnapshot) =>
-  queryDocs(snapshot, ACCOUNTS_QUERY_ID, "sim_member_accounts");
 const allListingDocs = (snapshot: SimSnapshot) =>
   queryDocs(snapshot, LISTINGS_QUERY_ID, "sim_market_listings");
 const structureDocs = (snapshot: SimSnapshot, cityId: string) =>
   queryDocs(snapshot, STRUCTURES_QUERY_ID, `sim_cities/${cityId}/structures`);
-const cityDocs = (snapshot: SimSnapshot) => queryDocs(snapshot, CITIES_QUERY_ID, "sim_cities");
 
 function bookQuery(corporationId: string): CollectionQuerySpec {
   return {
