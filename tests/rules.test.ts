@@ -2277,6 +2277,290 @@ async function main() {
   }
   console.log("ok sim undo operations rules surface (P2-G9e)");
 
+  // ---- P4 Lore assembly: lore postures (prep §4(c)(d)) + the F-L7
+  // ledger-read facts. Wiki drafts are fabric-born, owner-read and
+  // owner-decided (field-limited); the adoption commit is the
+  // committer's. Wiki provenance fields are fabric-only on client
+  // writes; version snapshots are immutable. The drafts badge fence
+  // keeps a member from hand-badging a draft `sim` into R-11.
+  {
+    const committerFs = fabricCommitter.firestore();
+
+    // -- sim_wiki_entry_drafts --------------------------------------
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_wiki_entry_drafts", "wdraft_seed1"), {
+        targetCityId: "cityA",
+        status: "pending",
+        changeType: "new_entry",
+        proposedTitle: "Seed Draft",
+      })
+    );
+    const wdraft = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_wiki_entry_drafts", "wdraft_seed1");
+    // Reads: the subject city's owner, admin, and the fabric (whose
+    // resolution path reads the named draft); nobody else.
+    await assertSucceeds(getDoc(wdraft(ownerA)));
+    await assertSucceeds(getDoc(wdraft(adminD)));
+    await assertSucceeds(getDoc(wdraft(fabricWorker)));
+    await assertFails(getDoc(wdraft(ownerB)));
+    await assertFails(getDoc(wdraft(memberC)));
+    await assertFails(getDoc(wdraft(anon)));
+    // The worker never writes one; a member never writes one at all.
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_wiki_entry_drafts", "wdraft_forged"), {
+        targetCityId: "cityA",
+        status: "pending",
+      })
+    );
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_wiki_entry_drafts", "wdraft_forged2"), {
+        targetCityId: "cityA",
+        status: "pending",
+      })
+    );
+    // The owner's decision write: pending-only, field-limited to
+    // status + decision, and only toward the two decision states —
+    // 'adopted' is the committer's outcome, never a client write.
+    await assertFails(updateDoc(wdraft(ownerA), { status: "adopted" }));
+    await assertFails(
+      updateDoc(wdraft(ownerA), { status: "rejected", resultWikiEntryId: "wiki_x" })
+    );
+    await assertFails(updateDoc(wdraft(memberC), { status: "rejected" }));
+    await assertSucceeds(
+      updateDoc(wdraft(ownerA), {
+        status: "adoption_requested",
+        decision: { byUid: "ownerA", note: "please adopt" },
+      })
+    );
+    // No longer pending: the owner's decision write has closed.
+    await assertFails(updateDoc(wdraft(ownerA), { status: "rejected" }));
+    // The adoption commit itself is the committer's.
+    await assertSucceeds(
+      updateDoc(wdraft(fabricCommitter), {
+        status: "adopted",
+        resultWikiEntryId: "wiki_wdraft_seed1",
+        resultWikiVersion: 1,
+      })
+    );
+
+    // -- wiki_entries provenance fence + versions --------------------
+    const entryRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "wiki_entries", "entry_client1");
+    // A clean member create (the Phase 1 flow) still works.
+    await assertSucceeds(
+      setDoc(entryRef(ownerA), {
+        cityId: "cityA",
+        kind: "place",
+        title: "Client Entry",
+        slug: "client-entry",
+        body: "body",
+      })
+    );
+    // A create carrying a fabric-provenance field is refused.
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "wiki_entries", "entry_forged"), {
+        cityId: "cityA",
+        kind: "place",
+        title: "Forged",
+        slug: "forged",
+        body: "body",
+        currentVersion: 7,
+      })
+    );
+    // An owner edit is fine; an owner touch of a provenance field is not.
+    await assertSucceeds(updateDoc(entryRef(ownerA), { body: "edited body" }));
+    await assertFails(updateDoc(entryRef(ownerA), { canonLayer: "realm" }));
+    // The committer advances the pointer (the adoption commit).
+    await assertSucceeds(
+      updateDoc(entryRef(fabricCommitter), {
+        currentVersion: 1,
+        versioned: true,
+        canonLayer: "current",
+        canonStatus: "canon",
+      })
+    );
+    // Versions: committer-created, member-readable (like the entry),
+    // updatable by NOBODY, deletable only via the committer's
+    // undo-erasure channel.
+    const versionRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "wiki_entries", "entry_client1", "versions", "1");
+    await assertSucceeds(
+      setDoc(versionRef(fabricCommitter), { version: 1, canonStatus: "canon" })
+    );
+    await assertSucceeds(getDoc(versionRef(memberC)));
+    await assertFails(getDoc(versionRef(anon)));
+    await assertFails(setDoc(versionRef(memberC), { version: 1 }));
+    await assertFails(updateDoc(versionRef(fabricCommitter), { canonStatus: "x" }));
+    await assertFails(deleteDoc(versionRef(memberC)));
+    await assertSucceeds(deleteDoc(versionRef(fabricCommitter)));
+
+    // -- drafts badge fence + committer paths -------------------------
+    const badgeRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "drafts", "chronicle_seed1");
+    await assertSucceeds(
+      setDoc(badgeRef(fabricCommitter), {
+        type: "lore",
+        factionId: "cityA",
+        characterId: "",
+        title: "Seed Telling",
+        body: "body",
+        authorUid: "",
+        authorType: "sim",
+        status: "draft",
+        badge: "sim",
+        canonLayer: "sim",
+        source: "sim-chronicle",
+        sourceResolutionId: "res_seed",
+        sourceCityId: "cityA",
+        sourceRuleIds: ["R-32"],
+      })
+    );
+    // The fabric reads badged drafts (the R-11 path); a plain member
+    // cannot — a badged draft is not theirs and not yet published.
+    await assertSucceeds(getDoc(badgeRef(fabricWorker)));
+    await assertFails(getDoc(badgeRef(memberC)));
+    // A member cannot forge the badge on create...
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "drafts", "draft_forged"), {
+        authorUid: "memberC",
+        status: "draft",
+        title: "Forged",
+        body: "body",
+        badge: "sim",
+      })
+    );
+    // ...and the worker cannot badge one either.
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "drafts", "draft_worker"), {
+        authorUid: "",
+        status: "draft",
+        title: "W",
+        body: "b",
+        badge: "sim",
+      })
+    );
+    // An ordinary member draft (no badge fields) is untouched by the fence.
+    await assertSucceeds(
+      setDoc(doc(memberC.firestore(), "drafts", "draft_note1"), {
+        authorUid: "memberC",
+        status: "draft",
+        title: "Ordinary",
+        body: "body",
+      })
+    );
+    // The faction owner may edit the telling but may not touch its badge.
+    await assertSucceeds(updateDoc(badgeRef(ownerA), { title: "Seed Telling (edited)" }));
+    await assertFails(updateDoc(badgeRef(ownerA), { source: "hand-written" }));
+    // Chronicle consumption deletes through the committer.
+    await assertSucceeds(deleteDoc(badgeRef(fabricCommitter)));
+
+    // -- posts: the committer publishes sim-authored posts only -------
+    const simPostRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "posts", "post_sim1");
+    await assertSucceeds(
+      setDoc(simPostRef(fabricCommitter), {
+        factionId: "cityA",
+        authorUid: "",
+        authorType: "sim",
+        type: "lore",
+        status: "published",
+        title: "Canon Telling",
+        body: "body",
+        cityIds: ["cityA"],
+      })
+    );
+    // The branch is sim-scoped: the committer cannot mint a
+    // member-authored post, and a member cannot hijack a sim post.
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "posts", "post_forged"), {
+        factionId: "cityA",
+        authorUid: "",
+        authorType: "member",
+        status: "published",
+        title: "X",
+        body: "b",
+      })
+    );
+    await assertFails(updateDoc(simPostRef(memberC), { title: "hijack" }));
+    await assertSucceeds(deleteDoc(simPostRef(fabricCommitter)));
+
+    // -- lore_cross_refs ----------------------------------------------
+    const xrefRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_cities", "cityB", "lore_cross_refs", "wiki_entry1");
+    await assertSucceeds(
+      setDoc(
+        doc(committerFs, "sim_cities", "cityB", "lore_cross_refs", "wiki_entry1"),
+        { entryId: "wiki_entry1", sourceCityId: "cityA", removableByOwner: true }
+      )
+    );
+    await assertSucceeds(getDoc(xrefRef(ownerB)));
+    await assertSucceeds(getDoc(xrefRef(memberC)));
+    await assertSucceeds(getDoc(xrefRef(guestG)));
+    await assertFails(getDoc(xrefRef(anon)));
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_cities", "cityB", "lore_cross_refs", "wiki_forged"), {
+        entryId: "x",
+      })
+    );
+
+    // -- F-L7 doc-level facts ------------------------------------------
+    // The City Ledger export runs two as-requester list queries whose
+    // results inherit these per-doc postures: a public Log entry is
+    // member-readable; an actor-private entry is readable ONLY by its
+    // own actor (never by the city's owner or any other member — the
+    // builder's client-side skip cannot rescue a query whose result
+    // set contains one); another member's action is readable only by
+    // its actor, its audience, or an admin. A list returns only docs
+    // the requester may read — so whenever such a record names the
+    // city, the ledger export fails closed (honest error, no file).
+    // That is the designed posture; these pins are its doc-level proof.
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(900)), {
+        ...validEntry,
+        seq: 900,
+        resolutionSeq: 900,
+        cityId: "cityA",
+        cityIds: ["cityA"],
+        visibility: "actor-private",
+        actor: { ...validEntry.actor, memberId: "ownerA" },
+      })
+    );
+    await assertSucceeds(
+      getDoc(doc(ownerA.firestore(), "sim_log_entries", logEntryDocId(900)))
+    );
+    await assertFails(
+      getDoc(doc(ownerB.firestore(), "sim_log_entries", logEntryDocId(900)))
+    );
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_log_entries", logEntryDocId(901)), {
+        ...validEntry,
+        seq: 901,
+        resolutionSeq: 901,
+        cityId: "cityA",
+        cityIds: ["cityA"],
+        visibility: "public",
+      })
+    );
+    await assertSucceeds(
+      getDoc(doc(memberC.firestore(), "sim_log_entries", logEntryDocId(901)))
+    );
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "sim_actions", "act_ledger1"), {
+        actor: { type: "member", memberId: "ownerA" },
+        targetCityIds: ["cityA"],
+        audienceUids: [],
+        status: "resolved",
+      });
+    });
+    await assertSucceeds(
+      getDoc(doc(ownerA.firestore(), "sim_actions", "act_ledger1"))
+    );
+    await assertFails(
+      getDoc(doc(ownerB.firestore(), "sim_actions", "act_ledger1"))
+    );
+  }
+  console.log("ok lore postures + badge fence + F-L7 facts (P4 Lore assembly)");
+
   await env.cleanup();
   assert.ok(true);
   console.log("rules tests passed");
