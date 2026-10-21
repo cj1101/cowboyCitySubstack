@@ -3364,7 +3364,7 @@ function repayLoanHandler(ctx: HandlerContext): ResolutionPlan {
   }
 
   // Pool closing (pool form): evaluate against PLANNED views.
-  let summarySeq = loanEntrySeq + groupChangesByEntryCity(tagged).size + 1;
+  const summarySeq = loanEntrySeq + groupChangesByEntryCity(tagged).size + 1;
   if (poolForm) {
     const plannedDeposits = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
       .map(({ path }) => depositRecordOf(plannedDoc(plan, ctx.snapshot, path)))
