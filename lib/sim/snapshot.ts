@@ -47,6 +47,9 @@ export const LATEST_SUMMARIES_CAP = 10;
 export interface WakeOutcomeLike {
   actionsCommitted: readonly unknown[];
   undoOpsProcessed: number;
+  /** Phase 5 (PR-4): Resolution Events committed by the wake passes
+   *  (pass steps + pass-executed delegated actions). */
+  passResolutionsCommitted?: number;
 }
 
 /**
@@ -57,7 +60,11 @@ export interface WakeOutcomeLike {
  * otherwise.
  */
 export function wakeChangedWorld(summary: WakeOutcomeLike): boolean {
-  return summary.actionsCommitted.length > 0 || summary.undoOpsProcessed > 0;
+  return (
+    summary.actionsCommitted.length > 0 ||
+    summary.undoOpsProcessed > 0 ||
+    (summary.passResolutionsCommitted ?? 0) > 0
+  );
 }
 
 // ---------------------------------------------------------------------------

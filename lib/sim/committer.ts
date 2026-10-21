@@ -60,6 +60,7 @@ import {
   snapshotFromDocs,
   validatePlan,
 } from "./resolver";
+import { resolveWakePassStep, type WakePassStep } from "./wakeSteps";
 
 export class CommitError extends Error {
   constructor(
@@ -85,7 +86,15 @@ export type CommitOutcome =
 
 export interface CommitRequest {
   resolutionId: string;
-  sourceKind: "action" | "pending-ripening" | "pending-voiding";
+  sourceKind: "action" | "pending-ripening" | "pending-voiding" | "wake-pass";
+  /** sourceKind "wake-pass" (Phase 5 PR-4): the pass step spec. A spec
+   *  is an ADDRESS, not a payload — Step 4 re-derives the plan from it
+   *  on the transaction's snapshot and the recomputed plan governs
+   *  (the P4-K20 doctrine), so no planHash parity is required of the
+   *  executor's pre-computation. */
+  passStep?: WakePassStep;
+  /** The wake cycle a wake-pass step belongs to (id derivation). */
+  cycleId?: string;
   /** Injected instant for the whole event (F3 — every Phase 2 timestamp
    * derives from it, deterministically). */
   now: string;
@@ -160,6 +169,7 @@ export function computeCommitInputHash(req: CommitRequest): string {
       pendingId: (req.pending?.pendingId as string | undefined) ?? null,
       pendingStateVersion:
         typeof req.pending?.stateVersion === "number" ? req.pending.stateVersion : null,
+      passStep: req.passStep ?? null,
       inputHeads: req.expectedHeads,
       preparedInputHash: req.preparedInputHash ?? null,
     }) as Record<string, unknown>
@@ -329,7 +339,7 @@ export async function commitResolution(
       }
     }
     let txPending: Record<string, unknown> | null = null;
-    if (req.sourceKind !== "action") {
+    if (req.sourceKind === "pending-ripening" || req.sourceKind === "pending-voiding") {
       const pendingPath = `sim_pending_consequences/${req.pending?.pendingId as string}`;
       txPending = docs.get(pendingPath) ?? null;
       if (
@@ -374,6 +384,12 @@ export async function commitResolution(
         baselineRegistry: deps.baselineRegistry,
         prepared: req.prepared,
       });
+    } else if (req.sourceKind === "wake-pass") {
+      plan = resolveWakePassStep(txSnapshot, req.passStep as WakePassStep, {
+        resolutionId: req.resolutionId,
+        cycleId: req.cycleId ?? "",
+        baselineRegistry: deps.baselineRegistry,
+      });
     } else {
       plan = resolveVoiding(txSnapshot, txPending as Record<string, unknown>, {
         baselineRegistry: deps.baselineRegistry,
@@ -403,22 +419,40 @@ export async function commitResolution(
       }
     }
 
-    const authorityRejection =
-      plan.outcome === "rejected" &&
-      plan.rejection?.code === "AUTHORITY_REVOKED" &&
-      req.plan.outcome !== "rejected";
-    if (!authorityRejection && (plan.planHash !== req.plan.planHash || headsDiffer)) {
-      // The world moved under the preview: no Log entry, no state change.
-      // The dispatcher stores a fresh preview and the action returns to
-      // awaiting_confirmation (TC-E01 parity is defined on previews).
-      return { status: "stale-preview" } as CommitOutcome;
-    }
-    if (!authorityRejection) {
-      // §4.4: authority revoked since confirmation is a deterministic
-      // rejection event, not a stale preview — so only in the authority
-      // case does the recomputed (rejection) plan replace the previewed
-      // one; otherwise the previewed plan, now proven identical, commits.
-      plan = req.plan;
+    if (req.sourceKind === "wake-pass") {
+      // Wake-pass steps carry no previewed plan to be faithful to:
+      // the spec is an address and the plan recomputed on THIS
+      // transaction's snapshot governs wholesale — the same doctrine
+      // as the AGR verdict-flip guard, generalized. A step that
+      // re-derives to nothing (its subject was handled, returned, or
+      // terminated by an earlier step of this same wake) is refused
+      // here, before seq allocation: zero-entry plans never commit.
+      if (plan.entries.length === 0) {
+        return {
+          status: "aborted",
+          code: "PASS_STEP_NOOP",
+          message:
+            "the wake-pass step re-derived to a no-op on the transaction snapshot (its subject no longer stands as the spec addresses it) — nothing was written.",
+        } as CommitOutcome;
+      }
+    } else {
+      const authorityRejection =
+        plan.outcome === "rejected" &&
+        plan.rejection?.code === "AUTHORITY_REVOKED" &&
+        req.plan.outcome !== "rejected";
+      if (!authorityRejection && (plan.planHash !== req.plan.planHash || headsDiffer)) {
+        // The world moved under the preview: no Log entry, no state change.
+        // The dispatcher stores a fresh preview and the action returns to
+        // awaiting_confirmation (TC-E01 parity is defined on previews).
+        return { status: "stale-preview" } as CommitOutcome;
+      }
+      if (!authorityRejection) {
+        // §4.4: authority revoked since confirmation is a deterministic
+        // rejection event, not a stale preview — so only in the authority
+        // case does the recomputed (rejection) plan replace the previewed
+        // one; otherwise the previewed plan, now proven identical, commits.
+        plan = req.plan;
+      }
     }
 
     // -- Step 5: ceilings -------------------------------------------------
@@ -442,7 +476,7 @@ export async function commitResolution(
       if (req.sourceKind !== "action") {
         throw new CommitError(
           "WRITE_SET_TOO_LARGE",
-          `ripening plan for ${req.resolutionId} exceeds ${MAX_WRITES_PER_RESOLUTION} transactional writes — treated as a generation failure.`
+          `${req.sourceKind} plan for ${req.resolutionId} exceeds ${MAX_WRITES_PER_RESOLUTION} transactional writes — treated as a generation failure.`
         );
       }
       plan = writeSetTooLargePlan(req, txAction as SimAction);
