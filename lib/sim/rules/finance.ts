@@ -2707,11 +2707,19 @@ function acceptLoanHandler(ctx: HandlerContext): ResolutionPlan {
     });
     if (insuredChange) tagged.push(insuredChange);
   }
+  if (branch === "cash") {
+    // The loan-book leg lands BEFORE any test reads the planned
+    // sheet — the credit branch's order, and the only one under
+    // which the sheet below is the post-funding sheet (a cash loan
+    // swaps cash for book; reading the sheet between the two legs
+    // would understate net worth by the principal).
+    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", principal, descriptorId));
+  }
   if (branch === "cash" && loan.insider) {
     // The insider cap binds cash funding identically (§3.3 reads
     // outstanding, not branch): post-funding net worth falls by
-    // nothing in a cash loan (asset swaps cash for book), so the
-    // test reads the standing sheet.
+    // nothing in a cash loan (asset swaps cash for book), and the
+    // planned sheet now shows exactly that.
     const sheet = bankBalanceSheet(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {});
     if (!sheet) {
       return rejectedPlan(descriptorId, "bank-not-chartered", [descriptorId], "B-06: the bank's charter block vanished mid-plan — refusing.");
@@ -2721,9 +2729,6 @@ function acceptLoanHandler(ctx: HandlerContext): ResolutionPlan {
       return rejectedPlan(descriptorId, "insider-cap-exceeded", [descriptorId], `B-06: insider funding would take insider outstanding to ${insiderAfter} R against net worth ${sheet.netWorthRubars} R — above the ${INSIDER_CAP_BPS} bps insider cap (BNK-D3). The offer rests.`);
     }
     tagged.push(applyBankAggregateDelta(plan, ctx, bank, "insiderLoansRubars", principal, descriptorId));
-  }
-  if (branch === "cash") {
-    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", principal, descriptorId));
   }
 
   // -- Pledge commits ----------------------------------------------

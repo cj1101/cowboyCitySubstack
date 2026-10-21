@@ -73,7 +73,7 @@ import {
   type PremiumMarkerView,
   type PremiumSettlementView,
 } from "../lib/finance/insurance";
-import { npcActorStanding } from "../lib/npcs";
+import { buildMandateVersion, npcActorStanding } from "../lib/npcs";
 
 /** Deposit records are plain documents; the harness reads them by
  * cast (the family parser is module-private to the rules file). */
@@ -81,7 +81,11 @@ function depositRecordOf(doc: Record<string, unknown> | null): BankDepositRecord
   if (!doc || typeof doc.depositId !== "string" || typeof doc.bankCorporationId !== "string") return null;
   return doc as unknown as BankDepositRecord;
 }
-import { buildBankBookDepositsWorkbook } from "../lib/export/datasets/bankingWorkbook";
+import {
+  buildBankBookDepositsWorkbook,
+  buildBankVerifiedSheetWorkbook,
+} from "../lib/export/datasets/bankingWorkbook";
+import type { ExportContext } from "../lib/export/datasets/cityData";
 import { ExportError } from "../lib/export/sheetSpec";
 import type { HandlerContext } from "../lib/sim/rules/registry";
 import type { ResolutionPlan, SimAction, SimActor, SimSnapshot, SnapshotQueryRecord } from "../lib/sim/state";
@@ -1034,3 +1038,499 @@ check("M9: the pool's book is not the old owner's — B-11 on an assigned loan r
 check("W3 conservation clean (v2 fixture + senior queue + pool recovery, standing Log)", () => {
   assertConservationClean(wF, wFEvents, "W3");
 });
+
+// ---------------------------------------------------------------------------
+section("W4 — verb batteries: B-06 boundaries, insider cap, pledges, B-08 excess/cure, netting scope, A-8 NPC Tier B");
+
+const w4 = seedWorld();
+const w4Events: ConservationEvent[] = [];
+const OWNER_W = "ownerW";
+for (const m of [OWNER_W, OWNER_A, MEMBER_B, MEMBER_C, MEMBER_D, MEMBER_E]) seedAccount(w4, m, 900000);
+seedCorp(w4, { homeCityId: CITY, corporationId: "bankW", ownerMemberId: OWNER_W, companyCashRubars: 400000 });
+charter(w4, w4Events, OWNER_W, CITY, "bankW");
+deposit(w4, w4Events, MEMBER_B, CITY, "bankW", 300000);
+// bankW: cash 700,000 · liabilities 300,000 · reserve 60,000 ·
+// lendable 640,000 · unencumbered 340,000 · net worth 400,000.
+
+check("B-06 boundary: cash funding at lendable + 1 rejects in full — and the RECORD's cash branch governs (no silent switch to credit creation)", () => {
+  const offer = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 640001, rateBpsPerKseq: 1000,
+    installmentCount: 2, dueIntervalSeqs: 50, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+  });
+  const plan = acceptLoan(w4, w4Events, memberActor(MEMBER_D), MEMBER_D, CITY, offer);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "insufficient-lendable-cash");
+  const after = loansOf(w4, "bankW").find((l) => l.loanId === offer.loanId) as BankLoanRecord;
+  assert.equal(after.status, "offered", "the offer rests, unfunded");
+  assert.equal(
+    depositsOf(w4, "bankW").filter((d) => d.origin === "credit-created").length,
+    0,
+    "no created deposit appeared — the record's funding branch governs, never the convenient one"
+  );
+});
+
+let insiderLoan: BankLoanRecord;
+check("B-06 insider cap (BNK-D3): funding AT 25% of net worth passes; 1 R over rejects", () => {
+  insiderLoan = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: OWNER_W }, principalRubars: 100000, rateBpsPerKseq: 1000,
+    installmentCount: 2, dueIntervalSeqs: 10000, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+  });
+  const atCap = acceptLoan(w4, w4Events, memberActor(OWNER_W), OWNER_W, CITY, insiderLoan);
+  assert.equal(atCap.outcome, "resolved", atCap.rejection?.summaryText ?? "");
+  assert.equal(bankBlock(w4, CITY, "bankW").insiderLoansRubars, 100000);
+  const over = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: OWNER_W }, principalRubars: 1, rateBpsPerKseq: 1000,
+    installmentCount: 1, dueIntervalSeqs: 10000, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+  });
+  const plan = acceptLoan(w4, w4Events, memberActor(OWNER_W), OWNER_W, CITY, over);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "insider-cap-exceeded");
+});
+
+check("B-07 netting scope: netting against a CASH-funded loan rejects netting-not-available (V2-§2.3)", () => {
+  const { plan } = run(w4, action(memberActor(OWNER_W), OWNER_W, "repay_loan", {
+    cityId: CITY, corporationId: "bankW", loanId: insiderLoan.loanId, borrower: { kind: "personal", memberId: OWNER_W },
+    amountRubars: 1000, netting: true, collateral: { kind: "none" },
+  }));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "netting-not-available");
+});
+
+function seedListing(world: World, corporationId: string, price: number): void {
+  world.set(listingPath(corporationId), buildListingDoc({
+    corporationId, homeCityId: CITY, ownerMemberId: MEMBER_D, openingPriceRubars: price,
+    committedFloatShares: 0, listedAtSeq: 1, sourceActionId: "seed", lastResolutionId: "seed", now: new Date(NOW),
+  }));
+}
+function seedHolding(world: World, memberId: string, corporationId: string, quantity: number): void {
+  world.set(holdingPath(memberId, corporationId), {
+    ...buildHoldingDoc({
+      memberId, corporationId, homeCityId: CITY, quantityShares: quantity, committedShares: 0,
+      costBasisRubars: quantity * 1000, sourceActionId: "seed", sourceSeq: 1, lastResolutionId: "seed", now: new Date(NOW),
+    }),
+    pledgedShares: 0,
+  });
+}
+seedListing(w4, "shareCo", 1000);
+seedHolding(w4, MEMBER_D, "shareCo", 10);
+seedHolding(w4, MEMBER_E, "shareCo", 10);
+
+let shareLoanD: BankLoanRecord;
+check("B-06 pledge validation: pledging more shares than free rejects insufficient-free-shares; at free it funds and the pledge marks", () => {
+  const tooMany = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 8000, rateBpsPerKseq: 0,
+    installmentCount: 2, dueIntervalSeqs: 40, defaultMissedCount: 1,
+    collateral: { kind: "shares", corporationId: "shareCo", cityId: CITY, quantityShares: 11 }, fundingSource: "cash",
+  });
+  const short = acceptLoan(w4, w4Events, memberActor(MEMBER_D), MEMBER_D, CITY, tooMany);
+  assert.equal(short.outcome, "rejected");
+  assert.equal(short.rejection?.code, "insufficient-free-shares");
+  shareLoanD = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 8000, rateBpsPerKseq: 0,
+    installmentCount: 2, dueIntervalSeqs: 40, defaultMissedCount: 1,
+    collateral: { kind: "shares", corporationId: "shareCo", cityId: CITY, quantityShares: 10 }, fundingSource: "cash",
+  });
+  const funded = acceptLoan(w4, w4Events, memberActor(MEMBER_D), MEMBER_D, CITY, shareLoanD);
+  assert.equal(funded.outcome, "resolved", funded.rejection?.summaryText ?? "");
+  assert.equal(doc(w4, holdingPath(MEMBER_D, "shareCo")).pledgedShares, 10);
+});
+
+check("B-08: seizure lands the mandatory excess-value return line in the same event (a plan without it does not validate)", () => {
+  advanceSeqs(w4, 50);
+  ripen(w4, `inst_${shareLoanD.loanId}_1`);
+  const loan = loansOf(w4, "bankW").find((l) => l.loanId === shareLoanD.loanId) as BankLoanRecord;
+  assert.equal(deriveLoanStanding(loan, counterSeq(w4)).inDefault, true);
+  const cashDBefore = (doc(w4, `sim_member_accounts/${MEMBER_D}`).cashRubars as number);
+  const { plan, event } = run(w4, action(memberActor(OWNER_W), OWNER_W, "seize_collateral", {
+    cityId: CITY, corporationId: "bankW", loanId: shareLoanD.loanId, borrower: { kind: "personal", memberId: MEMBER_D },
+    collateral: { kind: "shares", corporationId: "shareCo", cityId: CITY, quantityShares: 10 },
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) w4Events.push(event);
+  // Value 10 × 1,000 = 10,000 against a debt of 8,000: 8,000 of
+  // satisfaction to the bank's seized assets, 2,000 of excess back
+  // to the borrower IN CASH, in this event's Log changes.
+  assert.equal((doc(w4, `sim_member_accounts/${MEMBER_D}`).cashRubars as number) - cashDBefore, 2000, "the excess return line moved 2,000 R to the borrower");
+  const returnLine = event?.entries.flatMap((e) => e.changes).find((c) => c.field === `memberAccounts/${MEMBER_D}.cashRubars`);
+  assert.ok(returnLine, "the standing Log carries the return as a change record");
+  assert.equal(bankBlock(w4, CITY, "bankW").seizedAssetsRubars, 8000);
+  const seized = loansOf(w4, "bankW").find((l) => l.loanId === shareLoanD.loanId) as BankLoanRecord;
+  assert.equal(seized.outstandingRubars, 0);
+  assert.equal(doc(w4, holdingPath(MEMBER_D, "shareCo")).quantityShares, 0, "the pledged shares left the pledgor");
+});
+
+check("B-08: a loan cured before commit does not seize — the commit-time derivation governs", () => {
+  const loanE = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: MEMBER_E }, principalRubars: 8000, rateBpsPerKseq: 0,
+    installmentCount: 2, dueIntervalSeqs: 40, defaultMissedCount: 1,
+    collateral: { kind: "shares", corporationId: "shareCo", cityId: CITY, quantityShares: 10 }, fundingSource: "cash",
+  });
+  const funded = acceptLoan(w4, w4Events, memberActor(MEMBER_E), MEMBER_E, CITY, loanE);
+  assert.equal(funded.outcome, "resolved", funded.rejection?.summaryText ?? "");
+  advanceSeqs(w4, 50);
+  ripen(w4, `inst_${loanE.loanId}_1`);
+  const defaulted = loansOf(w4, "bankW").find((l) => l.loanId === loanE.loanId) as BankLoanRecord;
+  assert.equal(deriveLoanStanding(defaulted, counterSeq(w4)).inDefault, true, "default derived at the crossing");
+  const cure = run(w4, action(memberActor(MEMBER_E), MEMBER_E, "repay_loan", {
+    cityId: CITY, corporationId: "bankW", loanId: loanE.loanId, borrower: { kind: "personal", memberId: MEMBER_E },
+    amountRubars: 4000, collateral: { kind: "shares", corporationId: "shareCo", cityId: CITY, quantityShares: 10 },
+  }));
+  assert.equal(cure.plan.outcome, "resolved", cure.plan.rejection?.summaryText ?? "");
+  if (cure.event) w4Events.push(cure.event);
+  const cured = loansOf(w4, "bankW").find((l) => l.loanId === loanE.loanId) as BankLoanRecord;
+  assert.equal(deriveLoanStanding(cured, counterSeq(w4)).inDefault, false, "the cure un-happens the default");
+  const seize = run(w4, action(memberActor(OWNER_W), OWNER_W, "seize_collateral", {
+    cityId: CITY, corporationId: "bankW", loanId: loanE.loanId, borrower: { kind: "personal", memberId: MEMBER_E },
+    collateral: { kind: "shares", corporationId: "shareCo", cityId: CITY, quantityShares: 10 },
+  }));
+  assert.equal(seize.plan.outcome, "rejected");
+  assert.equal(seize.plan.rejection?.code, "loan-not-in-default");
+});
+
+check("B-08 structure form: a company borrower's pledged structure seizes to the bank (lien consumed, link moves, excess returned)", () => {
+  seedCorp(w4, { homeCityId: CITY, corporationId: "buildCo", ownerMemberId: MEMBER_C, companyCashRubars: 50000 });
+  const buildCoPath = corpPath(CITY, "buildCo");
+  w4.set(buildCoPath, { ...doc(w4, buildCoPath), linkedStructureIds: ["struct1"] });
+  w4.set(`sim_cities/${CITY}/structures/struct1`, {
+    structureId: "struct1", cityId: CITY, paidRubars: 30000, bankLien: null,
+  });
+  const offer = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "company", cityId: CITY, corporationId: "buildCo" }, principalRubars: 20000, rateBpsPerKseq: 0,
+    installmentCount: 2, dueIntervalSeqs: 40, defaultMissedCount: 1,
+    collateral: { kind: "structure", structureId: "struct1", cityId: CITY }, fundingSource: "cash",
+  });
+  const funded = acceptLoan(w4, w4Events, memberActor(MEMBER_C), MEMBER_C, CITY, offer);
+  assert.equal(funded.outcome, "resolved", funded.rejection?.summaryText ?? "");
+  assert.ok((doc(w4, `sim_cities/${CITY}/structures/struct1`).bankLien as Record<string, unknown> | null)?.bankCorporationId === "bankW", "the lien marked at funding");
+  advanceSeqs(w4, 50);
+  ripen(w4, `inst_${offer.loanId}_1`);
+  const { plan, event } = run(w4, action(memberActor(OWNER_W), OWNER_W, "seize_collateral", {
+    cityId: CITY, corporationId: "bankW", loanId: offer.loanId, borrower: { kind: "company", cityId: CITY, corporationId: "buildCo" },
+    collateral: { kind: "structure", structureId: "struct1", cityId: CITY },
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) w4Events.push(event);
+  const structure = doc(w4, `sim_cities/${CITY}/structures/struct1`);
+  assert.equal(structure.bankLien, null, "the lien is consumed by the seizure");
+  assert.equal((structure.seizedForBank as Record<string, unknown>).bankCorporationId, "bankW");
+  assert.equal(doc(w4, buildCoPath).companyCashRubars, 80000, "disbursement 20,000 in, excess 10,000 (30,000 value − 20,000 debt) returned");
+  assert.deepEqual(doc(w4, buildCoPath).linkedStructureIds, [], "the link leaves the borrower");
+  assert.deepEqual(bankBlock(w4, CITY, "bankW") && doc(w4, corpPath(CITY, "bankW")).linkedStructureIds, ["struct1"], "the link lands on the bank");
+  assert.equal(bankBlock(w4, CITY, "bankW").seizedAssetsRubars, 28000, "8,000 shares + 20,000 structure of recorded satisfaction");
+});
+
+check("A-8 (F-E11 closes): an NPC attempt at B-06 is a structural refusal — npc-tier-b-refused, zero writes, the offer untouched", () => {
+  const npcId = "npcB1";
+  const mandateId = "mand-b1";
+  // The stage re-reads city ownership at evaluation: the NPC's
+  // owner must own the principal city (the fixture faction's
+  // ownerUids name ownerA), so the NPC is ownerA's — attempting to
+  // accept a loan on its principal's behalf.
+  w4.set(`sim_npcs/${npcId}`, {
+    npcId, characterId: npcId, cityId: CITY, ownerUid: OWNER_A,
+    displayNameSnapshot: "Fixture Steward", titleFreeform: "Steward", roleTemplate: "steward",
+    personality: { traits: ["calm"], voiceNotes: null, characterNotes: null },
+    scopeFreeform: "fixture", permissionMode: "act-for-me", status: "active",
+    currentMandateId: mandateId, currentMandateVersion: 1,
+    activationSeq: 1, retiredSeq: null, stateVersion: 1, createdAt: null, updatedAt: null,
+  });
+  w4.set(`sim_mandates/${mandateId}`, {
+    mandateId, npcId, cityId: CITY, ownerUid: OWNER_A, currentVersion: 1, status: "active",
+    currentVersionRef: `sim_mandates/${mandateId}/versions/1`,
+    createdSeq: 1, revokedSeq: null, expiresAtSeq: null, createdAt: null, updatedAt: null,
+  });
+  const version = buildMandateVersion({
+    version: 1, npcId, cityId: CITY, ownerUid: OWNER_A, permissionMode: "act-for-me",
+    scopeFreeform: "fixture mandate",
+    structuredScope: {
+      triggerKinds: ["log-event"], allowedActionTypes: ["accept_loan"],
+      namedRecordIds: [], counterpartyCityIds: null,
+    } as never,
+    caps: {
+      perActionRubars: 10000000, perResolutionPeriodRubars: 100000000,
+      periodDefinition: null, maxProjectPhase: null, allowPartialExecution: false,
+    } as never,
+    negotiationBounds: null, alwaysEscalate: [], responseStyle: null,
+    expiresAtSeq: null, horizonActions: null, sourceActionId: "act-fixture",
+  }, new Date(NOW));
+  w4.set(`sim_mandates/${mandateId}/versions/1`, { ...(version as unknown as Record<string, unknown>), effectiveSeq: 1 });
+  const offer = offerLoan(w4, w4Events, OWNER_W, CITY, "bankW", {
+    borrower: { kind: "personal", memberId: OWNER_A }, principalRubars: 5000, rateBpsPerKseq: 500,
+    installmentCount: 1, dueIntervalSeqs: 1000, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+  });
+  const npc = npcActorStanding({ npcId, ownerUid: OWNER_A, mandateId, mandateVersion: 1 });
+  const plan = runAction(w4, action(npc as SimActor, OWNER_A, "accept_loan", {
+    cityId: CITY, corporationId: "bankW", loanId: offer.loanId,
+    borrower: { kind: "personal", memberId: OWNER_A }, collateral: { kind: "none" },
+    // The stage's causality check: a trigger rooted in a committed
+    // record (sourceSeq 0 < the world's head), of a kind the
+    // mandate contemplates.
+    trigger: { kind: "log-event", sourceId: "evt-1", sourceSeq: 0 },
+  }));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "npc-tier-b-refused", `the handler's Tier B gate is the refusal (got ${plan.rejection?.code})`);
+  assert.equal(plan.writes.length, 0, "zero writes — a structural refusal moves nothing");
+  const after = loansOf(w4, "bankW").find((l) => l.loanId === offer.loanId) as BankLoanRecord;
+  assert.equal(after.status, "offered");
+});
+
+check("W4 conservation clean (verb batteries over a live book)", () => {
+  assertConservationClean(w4, w4Events, "W4");
+});
+
+// ---------------------------------------------------------------------------
+section("W9 — failed-payment derivation (§5.1's second form) + B-09 exact-boundary cure");
+
+const w9 = seedWorld();
+const w9Events: ConservationEvent[] = [];
+const OWNER_H = "ownerH";
+for (const m of [OWNER_H, MEMBER_B, MEMBER_D]) seedAccount(w9, m, 900000);
+seedCorp(w9, { homeCityId: CITY, corporationId: "bankH", ownerMemberId: OWNER_H, companyCashRubars: 150000 });
+charter(w9, w9Events, OWNER_H, CITY, "bankH");
+const depH = deposit(w9, w9Events, MEMBER_B, CITY, "bankH", 200000);
+// bankH: cash 350,000 · liabilities 200,000 · reserve 40,000 ·
+// unencumbered 110,000 · lendable 310,000 · net worth 150,000.
+
+const w9Views: BankLogEventView[] = [];
+function commitRejection(world: World, act: SimAction, bankCorporationId: string): ResolutionPlan {
+  const plan = runAction(world, act);
+  assert.equal(plan.outcome, "rejected", "expected a rejection to commit");
+  const event = commitPlan(world, plan, act.actionId);
+  w9Events.push(event);
+  w9Views.push({
+    seq: counterSeq(world),
+    kind: "rejected",
+    ruleIds: plan.rejection?.ruleIds ?? [],
+    rejectionCode: plan.rejection?.code ?? null,
+    bankCorporationId,
+  });
+  return plan;
+}
+
+check("failed-payment: two uncured B-03 insufficient-unencumbered rejections derive failure from the standing Log alone", () => {
+  const first = commitRejection(w9, action(memberActor(MEMBER_B), MEMBER_B, "withdraw_deposit", {
+    cityId: CITY, corporationId: "bankH", depositId: depH.depositId,
+    depositor: { kind: "personal", memberId: MEMBER_B }, amountRubars: 150000,
+  }), "bankH");
+  assert.equal(first.rejection?.code, "insufficient-unencumbered");
+  const second = commitRejection(w9, action(memberActor(MEMBER_B), MEMBER_B, "withdraw_deposit", {
+    cityId: CITY, corporationId: "bankH", depositId: depH.depositId,
+    depositor: { kind: "personal", memberId: MEMBER_B }, amountRubars: 140000,
+  }), "bankH");
+  assert.equal(second.rejection?.code, "insufficient-unencumbered");
+  const derivation = deriveFailedPayment(w9Views, "bankH");
+  assert.equal(derivation.failed, true);
+  assert.equal(derivation.uncuredRejectionSeqs.length, 2);
+  assert.equal(derivation.firstUncuredRejectionSeq, w9Views[0].seq);
+  assert.equal(derivation.curedAtSeq, null);
+  // The arithmetic form still reads sound — the two forms of
+  // failure are distinct derivations, and this bank is the proof.
+  assert.equal(deriveBankHealth(doc(w9, corpPath(CITY, "bankH"))), "sound");
+});
+
+check("B-09 cure boundary: an injection 1 R short does not cure; the exact figure cures (inclusive) and clears the derivation", () => {
+  const loan = offerLoan(w9, w9Events, OWNER_H, CITY, "bankH", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 310000, rateBpsPerKseq: 0,
+    installmentCount: 2, dueIntervalSeqs: 10000, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+  });
+  const funded = acceptLoan(w9, w9Events, memberActor(MEMBER_D), MEMBER_D, CITY, loan);
+  assert.equal(funded.outcome, "resolved", funded.rejection?.summaryText ?? "");
+  const writeOff = run(w9, action(memberActor(OWNER_H), OWNER_H, "write_off_loan", {
+    cityId: CITY, corporationId: "bankH", loanId: loan.loanId, borrower: loan.borrower, amountRubars: 200000,
+  }));
+  assert.equal(writeOff.plan.outcome, "resolved", writeOff.plan.rejection?.summaryText ?? "");
+  if (writeOff.event) w9Events.push(writeOff.event);
+  assert.equal(deriveBankHealth(doc(w9, corpPath(CITY, "bankH"))), "insolvent", "net worth −50,000 after the write-off");
+  const inject = (amount: number): { plan: ResolutionPlan; stamp: Record<string, unknown> } => {
+    const { plan, event } = run(w9, action(memberActor(OWNER_H), OWNER_H, "recapitalize_bank", {
+      cityId: CITY, corporationId: "bankH", from: { kind: "personal", memberId: OWNER_H }, amountRubars: amount,
+    }));
+    assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+    if (event) w9Events.push(event);
+    const summary = plan.entries[plan.entries.length - 1];
+    const stamp = (summary.classification as Record<string, unknown>).recapitalization as Record<string, unknown>;
+    w9Views.push({
+      seq: counterSeq(w9), kind: "rule-effect", ruleIds: ["B-09"], rejectionCode: null,
+      bankCorporationId: "bankH", curesFailedPayment: stamp.curesFailedPayment === true,
+    });
+    return { plan, stamp };
+  };
+  const short = inject(49999);
+  assert.equal(short.stamp.cured, false, "net worth −1: no cure, and the entry says so");
+  assert.equal(short.stamp.curesFailedPayment, false);
+  assert.equal(deriveFailedPayment(w9Views, "bankH").failed, true, "the failed-payment episode stands through a non-cure");
+  const exact = inject(1);
+  assert.equal(exact.stamp.cured, true, "net worth exactly 0 with cash ≥ reserve: the boundary is inclusive");
+  assert.equal(exact.stamp.curesFailedPayment, true);
+  const derivation = deriveFailedPayment(w9Views, "bankH");
+  assert.equal(derivation.failed, false, "the cure clears every uncured rejection standing before it");
+  assert.equal(derivation.curedAtSeq, w9Views[w9Views.length - 1].seq);
+  assert.equal(derivation.uncuredRejectionSeqs.length, 0);
+});
+
+check("W9 conservation clean (rejections carry no movements; the cure is a plain transfer pair)", () => {
+  assertConservationClean(w9, w9Events, "W9");
+});
+
+// ---------------------------------------------------------------------------
+section("W5 — sound-bank exit: charter surrender at zero claims; live claims bar it");
+
+const w5 = seedWorld();
+const w5Events: ConservationEvent[] = [];
+const OWNER_S = "ownerS";
+for (const m of [OWNER_S, MEMBER_B]) seedAccount(w5, m, 900000);
+seedCorp(w5, { homeCityId: CITY, corporationId: "bankS", ownerMemberId: OWNER_S, companyCashRubars: 200000 });
+seedCorp(w5, { homeCityId: CITY, corporationId: "bankT", ownerMemberId: OWNER_S, companyCashRubars: 200000 });
+charter(w5, w5Events, OWNER_S, CITY, "bankS");
+charter(w5, w5Events, OWNER_S, CITY, "bankT");
+
+check("B-01 surrender: a sound bank with no live claims surrenders its charter and continues as an ordinary company", () => {
+  const { plan, event } = run(w5, action(memberActor(OWNER_S), OWNER_S, "surrender_charter", {
+    cityId: CITY, corporationId: "bankS",
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) w5Events.push(event);
+  const corp = doc(w5, corpPath(CITY, "bankS"));
+  const block = corp.bank as Record<string, unknown> | undefined;
+  assert.ok(!block || block.status !== "active", "the charter no longer stands active");
+  assert.equal(corp.status, "active", "the company itself continues — surrender ends banking powers, not the company");
+});
+
+check("B-01 surrender barred with live claims: the bank exits by ceasing to owe and be owed first (§1.4)", () => {
+  deposit(w5, w5Events, MEMBER_B, CITY, "bankT", 10000);
+  const { plan } = run(w5, action(memberActor(OWNER_S), OWNER_S, "surrender_charter", {
+    cityId: CITY, corporationId: "bankT",
+  }));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "charter-has-live-claims");
+});
+
+check("W5 conservation clean", () => {
+  assertConservationClean(w5, w5Events, "W5");
+});
+
+// ---------------------------------------------------------------------------
+section("X — tamper negatives (falsifiability), §4.1 loan interest from the Log, frozen world, export scope");
+
+check("§4.1 extended to loan interest: the settled figure recomputes from the record + the settlement entry's seq alone", () => {
+  const loan = loansOf(w4, "bankW").find((l) => l.loanId === insiderLoan.loanId) as BankLoanRecord;
+  advanceSeqs(w4, 500);
+  const counterBefore = counterSeq(w4);
+  const cashBefore = (doc(w4, `sim_member_accounts/${OWNER_W}`).cashRubars as number);
+  const { plan, event } = run(w4, action(memberActor(OWNER_W), OWNER_W, "repay_loan", {
+    cityId: CITY, corporationId: "bankW", loanId: loan.loanId, borrower: { kind: "personal", memberId: OWNER_W },
+    amountRubars: 50000, collateral: { kind: "none" },
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) w4Events.push(event);
+  const settleIdx = plan.entries.findIndex((e) =>
+    e.changes.some((c) => c.field === `bankLoans/${loan.loanId}.lastSettledSeq`)
+  );
+  assert.ok(settleIdx >= 0, "the settlement entry advances the loan's watermark");
+  const settleSeq = counterBefore + settleIdx + 1;
+  // The §4.1 formula, recomputed from first principles off the
+  // record: floor(outstanding × rate × Δseq / 10^7).
+  const expected = Math.floor((loan.outstandingRubars * loan.rateBpsPerKseq * (settleSeq - loan.lastSettledSeq)) / 10_000_000);
+  assert.equal(deriveLoanStanding(loan, settleSeq).accruedInterestRubars, expected, "the pure derivation IS the formula");
+  const summary = plan.entries[plan.entries.length - 1];
+  const loanClass = (summary.classification as Record<string, unknown>).loan as Record<string, unknown>;
+  assert.equal(loanClass.interestRubars, expected, "the event settled exactly the recomputed figure");
+  const after = loansOf(w4, "bankW").find((l) => l.loanId === loan.loanId) as BankLoanRecord;
+  assert.equal(after.totalInterestPaidRubars, expected);
+  assert.equal(cashBefore - (doc(w4, `sim_member_accounts/${OWNER_W}`).cashRubars as number), 50000);
+});
+
+function cloneWorld(world: World): World {
+  return new Map([...world.entries()].map(([k, v]) => [k, v ? structuredClone(v) : v] as [string, Record<string, unknown> | null]));
+}
+
+check("tamper negative A-B2: a +1 R edit to a loan record's outstanding (no event) is CAUGHT by the standing assertion", () => {
+  const clean = checkConservation(w4Events, conservationRecords(w4));
+  assert.equal(clean.ok, true, "the untampered book is clean first (the negative is falsifiable, not vacuous)");
+  const tampered = cloneWorld(w4);
+  const loan = loansOf(tampered, "bankW").find((l) => l.status === "active") as BankLoanRecord;
+  const path = `sim_bank_loans/${loan.loanId}`;
+  tampered.set(path, { ...doc(tampered, path), outstandingRubars: loan.outstandingRubars + 1 });
+  const result = checkConservation(w4Events, conservationRecords(tampered));
+  assert.equal(result.ok, false);
+  assert.ok(result.findings.some((f) => f.code === "A_B2_LOAN_BOOK_AGGREGATE"), `expected A_B2_LOAN_BOOK_AGGREGATE, got ${result.findings.map((f) => f.code).join(", ")}`);
+});
+
+check("tamper negative A-B4: repointing a created deposit's fundingLoanId at no loan is CAUGHT (unpaired issuance is visible)", () => {
+  const tampered = cloneWorld(wF);
+  const created = depositsOf(tampered, "bankG").find((d) => d.origin === "credit-created") as BankDepositRecord;
+  const path = `sim_bank_deposits/${created.depositId}`;
+  tampered.set(path, { ...doc(tampered, path), fundingLoanId: "loan_does_not_exist" });
+  const result = checkConservation(wFEvents, conservationRecords(tampered));
+  assert.equal(result.ok, false);
+  assert.ok(result.findings.some((f) => f.code === "A_B4_CREATION_PAIRING"), `expected A_B4_CREATION_PAIRING, got ${result.findings.map((f) => f.code).join(", ")}`);
+});
+
+check("tamper negative CLAIM_UNEXPLAINED: a claim increase with no settlement cash in the event is CAUGHT", () => {
+  const synthetic: ConservationEvent = {
+    resolutionId: "tamper-claim",
+    entries: [{ seq: 999999, cityId: null, ruleIds: ["B-02"], changes: [] }],
+    writeSet: [{
+      path: "sim_bank_deposits/dep_tamper",
+      op: "update",
+      beforeDoc: { depositId: "dep_tamper", bankCorporationId: "bankA", origin: "cash-funded", principalRubars: 100000, creditedInterestRubars: 0 },
+      afterDoc: { depositId: "dep_tamper", bankCorporationId: "bankA", origin: "cash-funded", principalRubars: 150000, creditedInterestRubars: 0 },
+    }],
+  };
+  const result = checkConservation([synthetic], conservationRecords(w1));
+  assert.equal(result.ok, false);
+  assert.ok(result.findings.some((f) => f.code === "CLAIM_UNEXPLAINED"), `expected CLAIM_UNEXPLAINED, got ${result.findings.map((f) => f.code).join(", ")}`);
+});
+
+check("frozen world: 10,000 seqs of other realms' traffic change no banking state (no clock, no auto-debit, no ripening without a cause)", () => {
+  const before = new Map(
+    [...wF.entries()].filter(([path]) => !path.startsWith("sim_counters/") && path !== "sim_world/current")
+  );
+  advanceSeqs(wF, 10000);
+  for (const [path, docBefore] of before) {
+    assert.deepEqual(wF.get(path), docBefore, `frozen: ${path} unchanged`);
+  }
+});
+
+check("item 15 exports: §7.5 scope is fail-closed in the pure layer; the verified sheet labels tracked cash and created supply separately (G4)", () => {
+  const ctx: ExportContext = { asOfSeq: counterSeq(w4), rulesVersion: null, exportedAtIso: NOW, exportedByLabel: "harness" };
+  const row = {
+    depositId: "dep_x", bankCorporationId: "bankW", depositorLabel: MEMBER_B, depositorMemberId: MEMBER_B,
+    principalRubars: 100, creditedInterestRubars: 0, origin: "cash", rateBpsPerKseq: 500,
+    status: "active", openedAtSeq: 1, lastChangedSeq: 1, stateVersion: 1,
+  };
+  assert.throws(
+    () => buildBankBookDepositsWorkbook(
+      { bankCorporationId: "bankW", bankCityId: CITY, bankLabel: "bankW", bankOwnerMemberId: OWNER_W, view: "bank-owner", deposits: [row] },
+      ctx, MEMBER_D
+    ),
+    ExportError,
+    "a non-owner asking for the owner's book throws"
+  );
+  assert.throws(
+    () => buildBankBookDepositsWorkbook(
+      { bankCorporationId: "bankW", bankCityId: CITY, bankLabel: "bankW", bankOwnerMemberId: OWNER_W, view: "depositor", deposits: [row] },
+      ctx, MEMBER_C
+    ),
+    ExportError,
+    "a depositor view containing someone else's row throws"
+  );
+  const lawful = buildBankBookDepositsWorkbook(
+    { bankCorporationId: "bankW", bankCityId: CITY, bankLabel: "bankW", bankOwnerMemberId: OWNER_W, view: "depositor", deposits: [row] },
+    ctx, MEMBER_B
+  );
+  assert.ok(lawful.sheets.length >= 1, "the lawful view builds");
+  const sheet = buildBankVerifiedSheetWorkbook({
+    bankCorporationId: "bankW", bankCityId: CITY, bankLabel: "bankW", charterStatus: "active",
+    reserveRatioBps: 2000, depositRateCeilingBpsPerKseq: 2000, loanRateCeilingBpsPerKseq: 3000,
+    trackedCashRubars: 592000, loanBookRubars: 100000, seizedAssetsRubars: 28000,
+    depositLiabilitiesRubars: 300000, netWorthRubars: 400000, liquidReserveRubars: 60000,
+    health: "sound", createdSupplyRubars: 0, insurancePosture: "no-institution", asOfSeq: counterSeq(w4), stateVersion: 1,
+  }, ctx);
+  const rendered = JSON.stringify(sheet);
+  assert.ok(rendered.includes("tracked_cash_rubars"), "tracked cash is labeled as tracked cash");
+  assert.ok(rendered.includes("created_supply_rubars"), "created supply is labeled as created supply");
+  assert.ok(!rendered.includes("money_supply"), "no unqualified money-supply label anywhere (G4)");
+});
+
+console.log(`\nbanking harness: ${checks} checks passed`);
