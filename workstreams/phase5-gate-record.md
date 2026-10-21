@@ -1350,3 +1350,114 @@ now-real output assertions, N7 trigger candidacy, N9(b)
 `DEPENDENTS_EXIST` as before.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 9, 2026-10-21.*
+
+---
+
+## CI fix round 10 (PR #45) — N7: pending B never existed; the suite's own N6 drive starved it
+
+**The failure (CI, remote head `23a6797`):** Install + Rules +
+Vercel green; sim-core + play-core pass; npc-core N0–N6 pass.
+N7 stops at `tests/npc-core.test.ts:1062`, "pending B stands" —
+actual `null`, expected `true`. Note where :1062 stands: it is
+the *pre-patch* existence check, immediately after fundB's
+`submitConfirmWake` and before the countersign fixture state is
+applied or any N7 wake runs. The §6.4 conversion was never
+reached; pending B's fate was decided two sections earlier.
+
+**B's fate: (i) never created — its origin action was lawfully
+rejected.** The chain, every link from standing code + suite
+text:
+
+1. The suite seeds cityB `stats.treasuryRubars: 500_000`
+   (npc-core.test.ts initial conditions).
+2. N6's resurrection-check drive submits ownerB `fixture_adjust`
+   on cityB `stats.treasuryRubars`, delta 1, to run a worker
+   wake. The FIXTURE-ADJUST handler
+   (`lib/sim/rules/registry.ts`, `adjustHandler`) bounds every
+   stat it touches: `after = min(1000, max(0, before + delta))`.
+   CityB's treasury lands at **1,000**.
+3. N7's fundB submits `fixture_fund`, `amountRubars: 10_000`.
+   The fund handler's designed guard (`amount > treasury` →
+   rejected plan, code `INSUFFICIENT_TREASURY`) fires:
+   10,000 > 1,000. A rejected resolution creates no fund doc
+   and no pending, so `sim_pending_consequences/pend_<fundB.
+   actionId>_01` never exists and :1062 reads `null`.
+4. The A/B asymmetry localises it: no treasury-field
+   `fixture_adjust` ever touches cityA before N7 (N4's delegated
+   spec adjusts `stats.infrastructure`), so cityA's seeded
+   1,000,000 stands, fundA resolves, and pending A — created as
+   `pend_<resolutionId>_01` with `resolutionId = actionId` for
+   an action resolution (resolver's handler context) — passes
+   :1061. The pending-id derivation is innocent; the round-9
+   doc-id class does not recur here.
+
+**Layer verdict: SUITE construction — the fixture-economy
+lesson's seventh bite.** The engine behaved as designed at
+every step: the [0,1000] clamp is `fixture_adjust`'s documented
+semantics (the discipline sim-core's CK6 established and this
+suite itself recites at N4 for infrastructure), and
+`INSUFFICIENT_TREASURY` is `fixture_fund`'s designed guard
+against establishing a fund a treasury cannot carry. The
+defect is the N6 drive's field choice: a wake-driving action
+picked the one field whose clamping silently destroys a later
+section's precondition. The tasking hypotheses are disposed
+of: the §6.4 conversion never ran (the failure precedes it),
+so its posture derivation is neither indicted nor exercised
+by this failure; the countersign's fixture state describes
+the *pending* fields (attempts / flag / requiredSeq), which
+the suite patches correctly — the wrong construction was
+upstream, in N6, not in the N7 patch.
+
+**Fix (suite layer only; no engine code; no assertion
+weakened):** the N6 drive now runs on `stats.infrastructure`
+(80 → 81 under the clamp; nothing in the suite asserts cityB
+infrastructure, and the drive's purpose — run a worker wake to
+prove the cancelled envelope never resurrects — is
+field-agnostic), with the trap commented at the site. N7
+additionally asserts both fund actions **resolved** immediately
+after submission, so if a future edit destroys a treasury
+precondition again the failure names the action and its
+rejection instead of surfacing as a vanished pending two
+assertions later. All N7 amounts, the countersign patch, and
+every downstream assertion stand exactly as written — B
+standing now follows from the scenario's own construction
+(cityB treasury 500,000 ≥ the 10,000 R fund), not from any
+relaxed expectation.
+
+**Sibling disposition.** Two more treasury-field drives exist
+in N7 and are *safe as written*, audited not assumed: the
+conversion drive (ownerB, cityB, delta 1) and the dedupe drive
+(ownerA, cityA, delta 1) both land *after* their sections'
+funds exist and after the last absolute-treasury read of their
+city; every later treasury read in the suite is a before/after
+pair (N8's blocked-fire and N9's reads), which a clamp cannot
+falsify. They are left untouched — changing them would be
+churn, and the W27 pin plus the fund-status assertions guard
+the precondition that actually matters.
+
+**Pin — W27 (wake harness 26 → 27 checks).** The two engine
+facts the construction rule rests on, chained through the real
+handlers via the harness's real resolver path: (1)
+`fixture_adjust` on a money field clamps a seeded 500,000 to
+exactly 1,000; (2) `fixture_fund` (10,000 R) against the
+clamped treasury rejects `INSUFFICIENT_TREASURY` with
+`pendingCreates` empty; (3) control — the same fund against
+the standing 500,000 resolves, debits the treasury to
+490,000, and creates the pending as `pend_<actionId>_01`.
+If either engine semantic ever changes, W27 fails with the
+chain named, and the suite's drive-field rule can be
+re-derived instead of rediscovered.
+
+**Local regression (branch tip after this round):**
+`tsc --noEmit` clean · scoped ESLint on the two touched files
+0 errors · full pure battery green at landed counts
+(governance 59, banking 54, situations 32, wake **27** incl.
+the new W27, closeout 29, chains 34, cat2 34, cat1 all,
+defense 12, acq 14, market 27, lore 27; npc-core harness 37,
+authority + envelopes harnesses all-pass) · `next build`
+green. Emulator suites are CI's venue on this push; watch
+items: N7 runs end-to-end for the first time (conversion ×2 —
+draft + silence postures, dedupe across wakes, P5-K8), then
+N8's revocation boundary, N9(b) `DEPENDENTS_EXIST` as before.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 10, 2026-10-21.*
