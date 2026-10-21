@@ -1341,6 +1341,22 @@ check("B-09 cure boundary: an injection 1 R short does not cure; the exact figur
   assert.equal(writeOff.plan.outcome, "resolved", writeOff.plan.rejection?.summaryText ?? "");
   if (writeOff.event) w9Events.push(writeOff.event);
   assert.equal(deriveBankHealth(doc(w9, corpPath(CITY, "bankH"))), "insolvent", "net worth −50,000 after the write-off");
+  // Failure freezes the book: B-04 settles nothing post-failure in
+  // either branch (§5.3 fixes claim figures at the failure seq),
+  // and B-11 may not forgive debt out of a failed bank (§5.4).
+  for (const mode of ["credited", "cash"] as const) {
+    const settle = run(w9, action(memberActor(OWNER_H), OWNER_H, "settle_deposit_interest", {
+      cityId: CITY, corporationId: "bankH", depositId: depH.depositId, settlementMode: mode,
+      depositor: { kind: "personal", memberId: MEMBER_B },
+    }));
+    assert.equal(settle.plan.outcome, "rejected");
+    assert.equal(settle.plan.rejection?.code, "bank-failed", `B-04 ${mode} branch rejects against a failed bank`);
+  }
+  const forgive = run(w9, action(memberActor(OWNER_H), OWNER_H, "write_off_loan", {
+    cityId: CITY, corporationId: "bankH", loanId: loan.loanId, borrower: loan.borrower, amountRubars: 1000,
+  }));
+  assert.equal(forgive.plan.outcome, "rejected");
+  assert.equal(forgive.plan.rejection?.code, "write-off-in-failure");
   const inject = (amount: number): { plan: ResolutionPlan; stamp: Record<string, unknown> } => {
     const { plan, event } = run(w9, action(memberActor(OWNER_H), OWNER_H, "recapitalize_bank", {
       cityId: CITY, corporationId: "bankH", from: { kind: "personal", memberId: OWNER_H }, amountRubars: amount,
@@ -1407,6 +1423,153 @@ check("B-01 surrender barred with live claims: the bank exits by ceasing to owe 
 
 check("W5 conservation clean", () => {
   assertConservationClean(w5, w5Events, "W5");
+});
+
+
+// ---------------------------------------------------------------------------
+section("W6 — creation tests at their boundaries, the premium ladder walk, REC-6 per-term identity, B-10 trigger branches");
+
+const w6 = seedWorld();
+const w6Events: ConservationEvent[] = [];
+const OWNER_L = "ownerL";
+for (const m of [OWNER_L, MEMBER_B, MEMBER_C, MEMBER_D, MEMBER_E]) seedAccount(w6, m, 900000);
+foundDif(w6, memberActor(OWNER_L), OWNER_L);
+seedCorp(w6, { homeCityId: CITY, corporationId: "bankL", ownerMemberId: OWNER_L, companyCashRubars: 400000 });
+charter(w6, w6Events, OWNER_L, CITY, "bankL");
+deposit(w6, w6Events, MEMBER_B, CITY, "bankL", 100000);
+
+function ladderOf(world: World, bankCorporationId: string) {
+  const markers: PremiumMarkerView[] = [];
+  const settlements: PremiumSettlementView[] = [];
+  for (const entry of entriesOf(world)) {
+    const classification = (entry.classification ?? {}) as Record<string, unknown>;
+    const due = classification.premiumDue as { bankCorporationId?: string; pendingId?: string; dueRubars?: number } | undefined;
+    if (due?.bankCorporationId === bankCorporationId) {
+      markers.push({ pendingId: due.pendingId ?? "", seq: entry.seq as number, dueRubars: due.dueRubars ?? 0, periodIndex: 0 });
+    }
+    const settlement = classification.premiumSettlement as { bankCorporationId?: string; settledPendingIds?: string[] } | undefined;
+    if (settlement?.bankCorporationId === bankCorporationId) {
+      settlements.push({ seq: entry.seq as number, settledPendingIds: settlement.settledPendingIds ?? [] });
+    }
+  }
+  return derivePremiumLadder({ markers, settlements });
+}
+
+check("item 12 ladder walk: one unsettled period delinques, two suspend (B-02 rejects), arrears paid in full cure — all derived from the standing Log", () => {
+  assert.ok(maybeDoc(w6, "sim_pending_consequences/prem_bankL_0"), "the post-founding charter seeded the premium chain (B-01's additive branch)");
+  assert.equal(ladderOf(w6, "bankL").state, "current");
+  advanceSeqs(w6, 1000);
+  ripen(w6, "prem_bankL_0");
+  const afterOne = ladderOf(w6, "bankL");
+  assert.equal(afterOne.state, "delinquent");
+  assert.equal(afterOne.arrearsRubars, premiumDueRubars({ insuredLiabilitiesRubars: 100000, riskMultiplier: 2, periodSeqs: 1000 }));
+  advanceSeqs(w6, 1000);
+  ripen(w6, "prem_bankL_1");
+  const afterTwo = ladderOf(w6, "bankL");
+  assert.equal(afterTwo.state, "suspended", "two consecutive unsettled periods suspend (V2-§1.3)");
+  assert.equal(afterTwo.arrearsRubars, 400);
+  assert.equal(afterTwo.suspensionIntervals.length, 1);
+  assert.equal(afterTwo.suspensionIntervals[0].toSeq, null, "the suspension interval stands open");
+  const blocked = run(w6, action(memberActor(MEMBER_C), MEMBER_C, "deposit_funds", {
+    cityId: CITY, corporationId: "bankL", depositor: { kind: "personal", memberId: MEMBER_C }, amountRubars: 1000, rateBpsPerKseq: 500,
+  }));
+  assert.equal(blocked.plan.outcome, "rejected");
+  assert.equal(blocked.plan.rejection?.code, "premium-delinquent-suspended");
+  const cure = run(w6, action(memberActor(OWNER_L), OWNER_L, "pay_insurance_premium", {
+    cityId: CITY, corporationId: "bankL", amountRubars: 400,
+  }));
+  assert.equal(cure.plan.outcome, "resolved", cure.plan.rejection?.summaryText ?? "");
+  if (cure.event) w6Events.push(cure.event);
+  const cured = ladderOf(w6, "bankL");
+  assert.equal(cured.state, "current", "paying arrears in full cures by derivation — no flag flips");
+  assert.equal(cured.arrearsRubars, 0);
+  assert.equal(cured.suspensionIntervals[0].toSeq !== null, true, "the interval closes at the cure");
+  const again = deposit(w6, w6Events, MEMBER_C, CITY, "bankL", 1000);
+  assert.ok(again.depositId, "deposits flow again after the cure");
+});
+
+check("item 5 creation tests at their boundaries: reserve test and equity floor reject independently; the floor's exact boundary funds", () => {
+  seedCorp(w6, { homeCityId: CITY, corporationId: "bankR", ownerMemberId: OWNER_L, companyCashRubars: 150000 });
+  charter(w6, w6Events, OWNER_L, CITY, "bankR");
+  deposit(w6, w6Events, MEMBER_E, CITY, "bankR", 10000);
+  // bankR: cash 160,000 · liabilities 10,000. A created 800,000
+  // takes liabilities to 810,000 → reserve 162,000 > cash 160,000.
+  const reserveOffer = offerLoan(w6, w6Events, OWNER_L, CITY, "bankR", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 800000, rateBpsPerKseq: 1000,
+    installmentCount: 2, dueIntervalSeqs: 100, defaultMissedCount: 1, collateral: { kind: "none" },
+    fundingSource: "credit", createdDepositRateBpsPerKseq: 0,
+  });
+  const reservePlan = acceptLoan(w6, w6Events, memberActor(MEMBER_D), MEMBER_D, CITY, reserveOffer);
+  assert.equal(reservePlan.outcome, "rejected");
+  assert.equal(reservePlan.rejection?.code, "creation-reserve-shortfall");
+  seedCorp(w6, { homeCityId: CITY, corporationId: "bankK", ownerMemberId: OWNER_L, companyCashRubars: 150000 });
+  charter(w6, w6Events, OWNER_L, CITY, "bankK");
+  deposit(w6, w6Events, MEMBER_E, CITY, "bankK", 500000);
+  // bankK: cash 650,000 · liabilities 500,000 · net worth 150,000.
+  // Creation of 900,000: reserve passes (280,000 ≤ 650,000) but the
+  // equity floor fails (150,000 < 10% × 1,550,000 assets).
+  const floorOffer = offerLoan(w6, w6Events, OWNER_L, CITY, "bankK", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 900000, rateBpsPerKseq: 1000,
+    installmentCount: 2, dueIntervalSeqs: 100, defaultMissedCount: 1, collateral: { kind: "none" },
+    fundingSource: "credit", createdDepositRateBpsPerKseq: 0,
+  });
+  const floorPlan = acceptLoan(w6, w6Events, memberActor(MEMBER_D), MEMBER_D, CITY, floorOffer);
+  assert.equal(floorPlan.outcome, "rejected");
+  assert.equal(floorPlan.rejection?.code, "creation-capital-floor");
+  // At exactly 850,000 the floor is met exactly (150,000 == 10% of
+  // 1,500,000) — the boundary is inclusive and the pair books.
+  const edgeOffer = offerLoan(w6, w6Events, OWNER_L, CITY, "bankK", {
+    borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 850000, rateBpsPerKseq: 1000,
+    installmentCount: 2, dueIntervalSeqs: 100, defaultMissedCount: 1, collateral: { kind: "none" },
+    fundingSource: "credit", createdDepositRateBpsPerKseq: 0,
+  });
+  const cashBefore = (doc(w6, corpPath(CITY, "bankK")).companyCashRubars as number);
+  const edgePlan = acceptLoan(w6, w6Events, memberActor(MEMBER_D), MEMBER_D, CITY, edgeOffer);
+  assert.equal(edgePlan.outcome, "resolved", edgePlan.rejection?.summaryText ?? "");
+  assert.equal((doc(w6, corpPath(CITY, "bankK")).companyCashRubars as number), cashBefore, "creation at the boundary still moves no cash");
+});
+
+check("item 2: the REC-6 identity is per-term real — an adjudicated-payables term tips a slice-solvent bank to insolvent; receivables default to zero (M3)", () => {
+  const base = doc(w1, corpPath(CITY, "bankA"));
+  const sheet = bankBalanceSheet(base);
+  assert.ok(sheet);
+  assert.equal(sheet.recognizedInsuranceReceivablesRubars, 0, "no recognition stands → the term is zero, never contingent coverage (M3)");
+  assert.ok(sheet.netWorthRubars > 0, "bankA is solvent on its standing sheet");
+  const taxed = { ...base, taxPayables: { [CITY]: 7000 } };
+  assert.equal(bankBalanceSheet(taxed)?.taxPayablesRubars, 7000, "the tax term reads the record's payables map");
+  assert.equal(bankBalanceSheet(taxed)?.netWorthRubars, sheet.netWorthRubars - 7000);
+  const tipped = { ...base, adjudicatedPayablesRubars: sheet.netWorthRubars + 1 };
+  assert.equal(bankBalanceSheet(tipped)?.netWorthRubars, -1);
+  assert.equal(deriveBankHealth(tipped), "insolvent", "solvent under the Phase 4 slice form (cash − deposits), insolvent under REC-6 — the swap is not cosmetic");
+  const recognized = bankBalanceSheet(base, { recognizedInsuranceReceivablesRubars: 123 });
+  assert.equal(recognized?.totalAssetsRubars, sheet.totalAssetsRubars + 123, "receivables enter only as an explicit post-recognition input");
+});
+
+check("item 9 branches: a depositor trigger against a sound bank rejects bank-not-failed; the owner's voluntary dissolution of a sound bank runs the waterfall and pays claims in full", () => {
+  seedCorp(w6, { homeCityId: CITY, corporationId: "bankV", ownerMemberId: OWNER_L, companyCashRubars: 300000 });
+  charter(w6, w6Events, OWNER_L, CITY, "bankV");
+  const depV = deposit(w6, w6Events, MEMBER_C, CITY, "bankV", 100000);
+  const triggerAttempt = run(w6, action(memberActor(MEMBER_C), MEMBER_C, "liquidate_bank", {
+    cityId: CITY, corporationId: "bankV", trigger: "depositor", depositId: depV.depositId,
+  }));
+  assert.equal(triggerAttempt.plan.outcome, "rejected");
+  assert.equal(triggerAttempt.plan.rejection?.code, "bank-not-failed");
+  const live = depositsOf(w6, "bankV").find((d) => d.depositId === depV.depositId) as BankDepositRecord;
+  const frozen = live.principalRubars + live.creditedInterestRubars + accruedUnsettledRubars(live, counterSeq(w6) + 1);
+  const cashCBefore = (doc(w6, `sim_member_accounts/${MEMBER_C}`).cashRubars as number);
+  const { plan, event } = run(w6, action(memberActor(OWNER_L), OWNER_L, "liquidate_bank", {
+    cityId: CITY, corporationId: "bankV", trigger: "owner",
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) w6Events.push(event);
+  assert.equal(doc(w6, corpPath(CITY, "bankV")).status, "dissolved");
+  assert.equal((doc(w6, `sim_member_accounts/${MEMBER_C}`).cashRubars as number) - cashCBefore, frozen, "the estate paid the full frozen claim — no failure precondition on the owner branch (§5.5)");
+  const after = depositsOf(w6, "bankV").find((d) => d.depositId === depV.depositId) as BankDepositRecord;
+  assert.equal(poolUnpaidRubars(after), 0, "nothing stands as a pool claim — the position closed whole");
+});
+
+check("W6 conservation clean (ladder, creation boundaries, sound-bank dissolution)", () => {
+  assertConservationClean(w6, w6Events, "W6");
 });
 
 // ---------------------------------------------------------------------------
@@ -1490,6 +1653,16 @@ check("frozen world: 10,000 seqs of other realms' traffic change no banking stat
   for (const [path, docBefore] of before) {
     assert.deepEqual(wF.get(path), docBefore, `frozen: ${path} unchanged`);
   }
+});
+
+check("item 13 evidence: a B-14 supplemental assessment obligation arose for the surviving bankG at its premium ripening after failure 1 drained the fund", () => {
+  const summaries = entriesOf(wF).map((e) => String(e.summaryText ?? ""));
+  assert.ok(
+    summaries.some((t) => t.includes("B-14 assessment obligation") && t.includes("bankG")),
+    "bankG's premium ripening entry states the B-14 obligation it created (fund deficient after bankF)"
+  );
+  const asm = [...wF.keys()].filter((path) => path.startsWith("sim_pending_consequences/asm_bankG_"));
+  assert.ok(asm.length >= 1, "the assessment pending stands as its own obligation (asm_bankG_*)");
 });
 
 check("item 15 exports: §7.5 scope is fail-closed in the pure layer; the verified sheet labels tracked cash and created supply separately (G4)", () => {
