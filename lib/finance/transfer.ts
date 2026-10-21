@@ -197,15 +197,13 @@ export function applyTransferLines(args: {
         message: `transfer line under ${line.ruleId} names ${ledgerLabel(line.from)} as both endpoints — a plan defect (§2.1.3).`,
       };
     }
-    for (const ref of [line.from, line.to]) {
-      if (ref.kind === "market") {
-        return {
-          ok: false,
-          code: "MARKET_LEDGER_UNAVAILABLE",
-          message: `transfer line under ${line.ruleId} names the Market Account, whose ledger the Market module owns — finance Phase 4 lines never touch it.`,
-        };
-      }
-    }
+    // Market-ledger lines: refused (MARKET_LEDGER_UNAVAILABLE) until
+    // the Market module landed its account — Phase 4 step 7 has now
+    // landed it (record at MARKET_ACCOUNT_PATH, founding act M-00), so
+    // market refs resolve and validate like every other tracked
+    // ledger below. A line naming the Market Account before its
+    // founding act fails naturally at endpoint existence
+    // (LEDGER_NOT_FOUND), which is the honest refusal.
   }
 
   // -- Endpoint existence + netting (§2.1.2, §2.1.4) ----------------------
