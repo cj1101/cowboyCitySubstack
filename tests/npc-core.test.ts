@@ -1372,7 +1372,14 @@ async function main() {
     const blockedOpId = await createUndoOp("ownerA", mandateSetActionId);
     await wake();
     const blockedOp = await adminDoc(`sim_undo_operations/${blockedOpId}`);
-    assert.equal(blockedOp?.status, "failed");
+    // Vocabulary is the Phase 2 contract (brief §2.5 status enum, §8.5:
+    // "Blockers ⇒ status refused"): a target that STANDS but whose undo is
+    // declined on the merits (authority, suffix, dependents) is "refused" —
+    // nothing was attempted, the dependencyReport stands. "failed" is
+    // reserved for an op whose target does not stand at all
+    // (TARGET_NOT_FOUND; sim-core TC-U11 / genesis). The cascaded case is a
+    // refusal: the mandate.set stands, the fire is its semantic dependent.
+    assert.equal(blockedOp?.status, "refused");
     assert.equal(
       (blockedOp?.failure as Record<string, unknown>)?.code,
       "DEPENDENTS_EXIST",
