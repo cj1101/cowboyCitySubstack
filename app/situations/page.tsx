@@ -524,7 +524,7 @@ function RulesPanel(props: {
                       ? ` · fired ${stats.count} time${stats.count === 1 ? "" : "s"}${stats.lastSeq !== null ? `, last at seq ${stats.lastSeq}` : ""}`
                       : " · has not fired"
                     : ""}
-                  {stats?.lastSeq !== null && stats !== undefined && stats !== null && (
+                  {stats && stats.lastSeq !== null && (
                     <>
                       {" "}
                       <Link href={`/log?anchor=${stats.lastSeq}`} className="text-accent-gold underline">
@@ -608,6 +608,11 @@ function RuleComposer(props: {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [cityId, setCityId] = useState<string>(props.ownedCityIds[0] ?? "");
+  useEffect(() => {
+    if (cityId === "" && props.ownedCityIds.length > 0) {
+      setCityId(props.ownedCityIds[0]);
+    }
+  }, [cityId, props.ownedCityIds]);
   const [kinds, setKinds] = useState<string[]>([]);
   const [sourceKinds, setSourceKinds] = useState("");
   const [counterpartyCityIds, setCounterpartyCityIds] = useState<string[]>([]);

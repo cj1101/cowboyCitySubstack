@@ -486,11 +486,13 @@ export function EnvelopeMarker({
       ) : terminal ? (
         <div className="flex flex-col gap-1">
           <p className="font-bold">
-            {output?.outcome === "NEED-INFO" || envelope.status === "NEED-INFO"
-              ? "Needs information"
-              : envelope.status === "FAILED"
-                ? "Failed as recorded"
-                : "Done"}
+            {envelope.lastError?.code === "cancelled_before_claim"
+              ? "Cancelled"
+              : output?.outcome === "NEED-INFO" || envelope.status === "NEED-INFO"
+                ? "Needs information"
+                : envelope.status === "FAILED"
+                  ? "Failed as recorded"
+                  : "Done"}
           </p>
           {output?.outputText ? (
             <p className="whitespace-pre-wrap">{output.outputText}</p>
