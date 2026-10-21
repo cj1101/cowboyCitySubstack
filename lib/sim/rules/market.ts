@@ -129,6 +129,7 @@ import {
   type LogEntryDraft,
   type ResolutionPlan,
   type SimAction,
+  type SimActor,
   type SimChange,
   type SimSnapshot,
 } from "../state";
@@ -268,7 +269,7 @@ function pruneRecordClaims(plan: ResolutionPlan): void {
  * finance's change grammar assigns them. */
 function pushMovementEntries(
   plan: ResolutionPlan,
-  ctx: HandlerContext,
+  ctx: { action: { actor: SimActor } },
   ruleIds: string[],
   tagged: TaggedChange[],
   summaryFor: (entryCityId: string | null) => string,
@@ -2998,3 +2999,1044 @@ function suspendResumeHandler(mode: "suspend" | "resume") {
     });
   };
 }
+
+// ---------------------------------------------------------------------------
+// M-08 — declare a distribution (dividend). The exported composer is
+// also the leg Catalogue II's listed Contract cash withdrawal routes
+// through under P4-K22 (Lead wiring, prep report §5): a listed
+// company's cash reaches its owner ONLY pro-rata through here (or
+// retires shares through M-09) — never as a bare company -> owner
+// line. Refuse-in-full discipline: a distribution the company's cash
+// cannot cover is refused, never trimmed silently.
+// ---------------------------------------------------------------------------
+
+export type DistributionOutcome =
+  | {
+      status: "distributed";
+      paidOutRubars: number;
+      remainderRubars: number;
+      perHolder: { memberId: string; quantityShares: number; amountRubars: number }[];
+    }
+  | { status: "refused"; code: string; message: string };
+
+export function composeDistribution(args: {
+  plan: ResolutionPlan;
+  snapshot: SimSnapshot;
+  actor: HandlerContext["action"]["actor"];
+  corporationId: string;
+  homeCityId: string;
+  totalRubars: number;
+  invokedByRuleId: string;
+  entryRuleIds: string[];
+}): DistributionOutcome {
+  const { plan, snapshot } = args;
+  const corpPath = corporationPath(args.homeCityId, args.corporationId);
+  const corp = plannedDoc(plan, snapshot, corpPath);
+  if (!corp) {
+    return { status: "refused", code: "company-not-found", message: `no corporation record for ${args.corporationId} in ${args.homeCityId}` };
+  }
+  const holders = holdingDocs(snapshot)
+    .map(({ doc }) => doc as unknown as ShareHoldingRecord)
+    .filter((h) => h.corporationId === args.corporationId && h.quantityShares > 0)
+    .sort((a, b) => (a.memberId < b.memberId ? -1 : 1));
+  const heldTotal = holders.reduce((sum, h) => sum + h.quantityShares, 0);
+  const live = liveShares(corp);
+  if (heldTotal !== live) {
+    return {
+      status: "refused",
+      code: "share-ledger-inconsistent",
+      message: `holdings sum to ${heldTotal} shares against ${live} live shares on the record — the market refuses to distribute against a ledger that disagrees with itself (§1.8 posture; remedy is the correction path, M-11)`,
+    };
+  }
+  if (holders.length === 0) {
+    return { status: "refused", code: "no-shareholders", message: `no shareholder of record holds shares of ${args.corporationId}` };
+  }
+  const cash = plannedBalance(plan, snapshot, companyRef(args.homeCityId, args.corporationId));
+  if (cash === null || args.totalRubars > cash) {
+    return {
+      status: "refused",
+      code: "distribution-exceeds-cash",
+      message: `the declared distribution of ${args.totalRubars} R exceeds ${args.corporationId}'s company cash of ${cash ?? 0} R — refused in full, never trimmed silently (the owner may re-confirm the coverable maximum)`,
+    };
+  }
+  // Recipients receive into personal accounts (step 0 for each, in
+  // member order — a shareholder who never opened one is opened under
+  // F-01 exactly like any first money touch).
+  for (const holder of holders) {
+    composeLazyOpen({ plan, snapshot, actor: args.actor, memberId: holder.memberId, viaActionKind: "declare_distribution" });
+  }
+  const perHolder = holders.map((h) => ({
+    memberId: h.memberId,
+    quantityShares: h.quantityShares,
+    amountRubars: Math.floor((args.totalRubars * h.quantityShares) / live),
+  }));
+  const lines: TransferLine[] = perHolder
+    .filter((p) => p.amountRubars > 0)
+    .map((p) => ({
+      from: companyRef(args.homeCityId, args.corporationId),
+      to: personalRef(p.memberId),
+      amountRubars: p.amountRubars,
+      ruleId: "M-08",
+      memo: `distribution from ${args.corporationId} — pro-rata on ${p.quantityShares} shares of record`,
+    }));
+  const applied = applyTransferLines({ plan, snapshot, lines, shortfallClass: "transfer" });
+  if (!applied.ok) {
+    return { status: "refused", code: applied.code.toLowerCase().replace(/_/g, "-"), message: applied.message };
+  }
+  const paidOutRubars = perHolder.reduce((sum, p) => sum + p.amountRubars, 0);
+  const remainderRubars = args.totalRubars - paidOutRubars;
+  pushMovementEntries(plan, { action: { actor: args.actor } }, args.entryRuleIds, applied.changes, (entryCityId) =>
+    entryCityId === null
+      ? `M-08 distribution from ${args.corporationId} (invoked by ${args.invokedByRuleId}): ${perHolder.map((p) => `${p.memberId} +${p.amountRubars} R (${p.quantityShares} shares)`).join("; ")}.`
+      : `M-08 distribution: ${args.corporationId}'s company cash paid out ${paidOutRubars} R of the declared ${args.totalRubars} R; the ${remainderRubars} R integer-division remainder stays in company cash, logged — never rounded into anyone's pocket.`
+  );
+  return { status: "distributed", paidOutRubars, remainderRubars, perHolder };
+}
+
+function declareDistributionHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-08";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  const total = positiveAmount(ctx.action, "totalRubars") ?? positiveAmount(ctx.action, "amountRubars");
+  if (!corporationId || !homeCityId || total === null) {
+    return rejectedPlan(descriptorId, "malformed-distribution", [descriptorId], "M-08: declare_distribution requires corporationId, homeCityId and totalRubars (a positive integer — the gross amount declared).");
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const ownerGate = requireOwner(ctx, descriptorId, gate.corp, corporationId);
+  if (isPlan(ownerGate)) return ownerGate;
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const outcome = composeDistribution({
+    plan,
+    snapshot: ctx.snapshot,
+    actor: ctx.action.actor,
+    corporationId,
+    homeCityId,
+    totalRubars: total,
+    invokedByRuleId: descriptorId,
+    entryRuleIds: [descriptorId],
+  });
+  if (outcome.status === "refused") {
+    return rejectedPlan(descriptorId, outcome.code, [descriptorId], `M-08: ${outcome.message}.`);
+  }
+  composeMarketRepricing({
+    plan,
+    snapshot: ctx.snapshot,
+    actor: ctx.action.actor,
+    corporationId,
+    homeCityId,
+    judgment: judgmentFromPrepared(ctx),
+    judgmentRationale: judgmentRationaleFromPrepared(ctx),
+    judgmentInputHash: ctx.prepared?.inputHash ?? null,
+    stepCapException: null,
+    invokedByRuleId: descriptorId,
+  });
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "declare-distribution",
+    scope: "company",
+    cityId: homeCityId,
+    summaryText: `Declared a distribution of ${total} R from ${corporationId}: ${outcome.paidOutRubars} R paid pro-rata to ${outcome.perHolder.length} shareholder(s) of record at seq ${seq}; ${outcome.remainderRubars} R of integer-division remainder stays in company cash. Repricing ran in-event (M-06).`,
+    major: true,
+    extraClassification: {
+      distribution: {
+        totalRubars: total,
+        paidOutRubars: outcome.paidOutRubars,
+        remainderRubars: outcome.remainderRubars,
+        recordSeq: seq,
+        perHolder: outcome.perHolder,
+      },
+      invokesRules: ["M-06"],
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-09 — buy back shares. The company buys through the book, in the
+// open (never directly off-book from the founder — that would be a
+// disguised cash withdrawal, §5.2 seam), funded from company cash at
+// a stated cap; bought shares retire. Partial fills are lawful: the
+// sweep stops when the quantity, the cap, or the cash binds. A
+// zero-fill buyback resolves as a logged no-op, not a rejection.
+// ---------------------------------------------------------------------------
+
+function buyBackSharesHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-09";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  const maxQuantity = positiveAmount(ctx.action, "maxQuantityShares") ?? positiveAmount(ctx.action, "quantityShares");
+  const capPrice = positiveAmount(ctx.action, "capPriceRubars") ?? positiveAmount(ctx.action, "limitPriceRubars");
+  if (!corporationId || !homeCityId || maxQuantity === null || capPrice === null) {
+    return rejectedPlan(descriptorId, "malformed-buyback", [descriptorId], "M-09: buy_back_shares requires corporationId, homeCityId, maxQuantityShares and capPriceRubars (positive integers).");
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const ownerGate = requireOwner(ctx, descriptorId, gate.corp, corporationId);
+  if (isPlan(ownerGate)) return ownerGate;
+  const { corp, corpPath, listing } = gate;
+  if (listing.tradingStatus === "halted") {
+    return rejectedPlan(descriptorId, "listing-halted", [descriptorId], `M-09: trading in ${corporationId} is halted — a buyback executes through the book, and the book does not execute while halted (§1.8).`);
+  }
+  if (listing.tradingStatus === "suspended") {
+    return rejectedPlan(descriptorId, "listing-suspended", [descriptorId], `M-09: trading in ${corporationId} is suspended — a buyback executes through the book, and the book does not execute while suspended.`);
+  }
+  if (!snapshotDoc(ctx.snapshot, MARKET_ACCOUNT_PATH)) {
+    return rejectedPlan(descriptorId, "market-account-missing", [descriptorId], "M-09: the Market Account does not stand — execution fees cannot settle without it (M-00 founds it; it is never lazy-invented inside a trade).");
+  }
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const now = new Date(ctx.snapshot.now);
+  const acc: ChangeAcc = new Map();
+  const expired = expirySweep({
+    plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+    seq, resolutionId: ctx.resolutionId, now,
+  });
+  if (expired.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId, "M-05"],
+        changes: accFlush(acc, null),
+        recordsUpdated: expired.map((o) => orderPath(o.orderId)),
+        summaryText: `M-05 expiry evaluated in this event: ${expired.map((o) => o.orderId).join(", ")} — status expired; committed shares released.`,
+      })
+    );
+  }
+
+  // Sellers settle in this event: their accounts stand ready (step 0).
+  const { book, docsById } = buildEngineBook(plan, ctx.snapshot, corporationId);
+  const sellOwners = [...new Set(book.filter((o) => o.side === "sell").map((o) => o.memberId))].sort();
+  for (const owner of sellOwners) {
+    composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: owner, viaActionKind: "buy_back_shares" });
+  }
+
+  // The sweep: resting sells in price–time order, each fill bounded
+  // by the remaining want, the order's quantity, and company cash
+  // (value + buyer fee at that fill size).
+  const restingSells = book
+    .filter((o) => o.side === "sell")
+    .sort((a, b) => a.limitPriceRubars - b.limitPriceRubars || a.placedAtSeq - b.placedAtSeq);
+  let cashLeft = plannedBalance(plan, ctx.snapshot, companyRef(homeCityId, corporationId)) ?? 0;
+  let want = maxQuantity;
+  interface BuybackFill {
+    order: MarketOrderRecord;
+    quantityShares: number;
+    priceRubars: number;
+    tradeValueRubars: number;
+    buyerFeeRubars: number;
+    sellerFeeRubars: number;
+  }
+  const fills: BuybackFill[] = [];
+  for (const resting of restingSells) {
+    if (want <= 0) break;
+    if (resting.limitPriceRubars > capPrice) break;
+    const price = resting.limitPriceRubars;
+    let q = Math.min(want, resting.quantityShares, Math.floor(cashLeft / price));
+    while (q > 0 && q * price + exchangeFeeRubars(q * price) > cashLeft) q -= 1;
+    while (
+      q + 1 <= Math.min(want, resting.quantityShares) &&
+      (q + 1) * price + exchangeFeeRubars((q + 1) * price) <= cashLeft
+    ) {
+      q += 1;
+    }
+    if (q <= 0) break; // dearer orders follow — cash binds here
+    const tradeValueRubars = q * price;
+    const buyerFeeRubars = exchangeFeeRubars(tradeValueRubars);
+    const sellerFeeRubars = exchangeFeeRubars(tradeValueRubars);
+    fills.push({
+      order: docsById.get(resting.orderId) as MarketOrderRecord,
+      quantityShares: q,
+      priceRubars: price,
+      tradeValueRubars,
+      buyerFeeRubars,
+      sellerFeeRubars,
+    });
+    cashLeft -= tradeValueRubars + buyerFeeRubars;
+    want -= q;
+  }
+
+  if (fills.length === 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: [],
+        summaryText: `M-09 buyback for ${corporationId}: zero fills — no resting sell within the cap of ${capPrice} R was coverable from company cash (${intOr(corp, "companyCashRubars", 0)} R standing). A zero-fill buyback resolves as a logged no-op, not a rejection; no cash moved, no shares retired, and no repricing runs (no coded input changed).`,
+      })
+    );
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: "buy-back-shares",
+      scope: "company",
+      cityId: homeCityId,
+      summaryText: `Buyback of ${corporationId} filled zero shares (cap ${capPrice} R, max ${maxQuantity}) — logged no-op.`,
+      extraClassification: { buyback: { maxQuantityShares: maxQuantity, capPriceRubars: capPrice, filledShares: 0 } },
+    });
+  }
+
+  const lines: TransferLine[] = [];
+  for (const fill of fills) {
+    lines.push(
+      {
+        from: companyRef(homeCityId, corporationId),
+        to: personalRef(fill.order.memberId),
+        amountRubars: fill.tradeValueRubars,
+        ruleId: "M-09",
+        memo: `buyback value — ${fill.quantityShares} shares of ${corporationId} at ${fill.priceRubars} R (resting order ${fill.order.orderId})`,
+      },
+      {
+        from: companyRef(homeCityId, corporationId),
+        to: MARKET_REF,
+        amountRubars: fill.buyerFeeRubars,
+        ruleId: "M-09",
+        memo: "exchange fee — buyer side (the company as buyer, §5.3)",
+      },
+      {
+        from: personalRef(fill.order.memberId),
+        to: MARKET_REF,
+        amountRubars: fill.sellerFeeRubars,
+        ruleId: "M-09",
+        memo: "exchange fee — seller side (§5.3)",
+      }
+    );
+  }
+  const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines, shortfallClass: "transfer" });
+  if (!applied.ok) {
+    return rejectedPlan(
+      descriptorId,
+      applied.code === "INSUFFICIENT_FUNDS" ? "insufficient-funds" : applied.code.toLowerCase().replace(/_/g, "-"),
+      [descriptorId, "M-04"],
+      `M-09/M-04: buyback settlement refused in full: ${applied.message}`
+    );
+  }
+  pushMovementEntries(plan, ctx, [descriptorId, "M-04"], applied.changes, (entryCityId) =>
+    entryCityId === null
+      ? `M-09/M-04 buyback settlement for ${corporationId}: sellers received their proceeds and both sides' fees credited the Market Account (per-execution lines are in the execution entries).`
+      : `M-09/M-04 buyback settlement: ${corporationId}'s company cash funded the buyback (value + buyer-side fees).`
+  );
+
+  // Share side per fill: seller delivers committed shares; the bought
+  // shares RETIRE (no company holding exists — the company is not a
+  // shareholder of itself in v1; treasury shares are out, §6 M-09).
+  const totalBought = fills.reduce((sum, f) => sum + f.quantityShares, 0);
+  const totalCost = fills.reduce((sum, f) => sum + f.tradeValueRubars + f.buyerFeeRubars, 0);
+  const fillEntries: LogEntryDraft[] = [];
+  fills.forEach((fill, index) => {
+    const tradeId = `trade_${ctx.resolutionId}_${String(index + 1).padStart(2, "0")}`;
+    const execAcc: ChangeAcc = new Map();
+    mutateHolding(plan, ctx.snapshot, execAcc, {
+      memberId: fill.order.memberId,
+      corporationId,
+      homeCityId,
+      deltaQuantity: -fill.quantityShares,
+      deltaCommitted: -fill.quantityShares,
+      deltaCostBasis: 0,
+      create: false,
+      seq,
+      resolutionId: ctx.resolutionId,
+      now,
+      formula: `M-09 execution ${tradeId}: the seller delivers shares committed behind resting order ${fill.order.orderId}; the bought shares retire`,
+    });
+    const orderPlanned = plannedDoc(plan, ctx.snapshot, orderPath(fill.order.orderId));
+    const qtyAfter = intOr(orderPlanned, "quantityShares", 0) - fill.quantityShares;
+    patchOrder(plan, ctx.snapshot, execAcc, fill.order.orderId, {
+      quantityShares: qtyAfter,
+      filledShares: intOr(orderPlanned, "filledShares", 0) + fill.quantityShares,
+      status: qtyAfter <= 0 ? "filled" : "resting",
+    }, `M-09 execution ${tradeId}: resting sell consumed by the company's buyback at its own price`);
+    const tradeDoc = buildTradeDoc({
+      tradeId,
+      corporationId,
+      homeCityId,
+      buyerMemberId: `company:${corporationId}`,
+      sellerMemberId: fill.order.memberId,
+      quantityShares: fill.quantityShares,
+      priceRubars: fill.priceRubars,
+      buyerFeeRubars: fill.buyerFeeRubars,
+      sellerFeeRubars: fill.sellerFeeRubars,
+      incomingOrderId: `buyback_${ctx.resolutionId}`,
+      restingOrderId: fill.order.orderId,
+      seq,
+      sourceActionId: ctx.action.actionId,
+      lastResolutionId: ctx.resolutionId,
+      now,
+    });
+    planWrite(plan, ctx.snapshot, tradePath(tradeId), tradeDoc, "state", ["quantityShares", "priceRubars"]);
+    // Listing counters + the print (buyback executions are M-04
+    // executions: last-trade and official follow the print, §4.1).
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "lastTradePriceRubars", entryCityId: null,
+      field: listingField(corporationId, "lastTradePriceRubars"), value: fill.priceRubars,
+      formula: `M-09 execution ${tradeId}: trade print (§1.4 mechanism 1)`,
+    });
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "officialPriceRubars", entryCityId: null,
+      field: listingField(corporationId, "officialPriceRubars"), value: fill.priceRubars,
+      formula: "M-09/§4.1: the print is the official price until a repricing supersedes it",
+    });
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "tradedSinceLastRepricing", entryCityId: null,
+      field: listingField(corporationId, "tradedSinceLastRepricing"), value: true,
+      formula: "M-09: a trade occurred since the last repricing",
+    });
+    const listingNow = plannedListing(plan, ctx.snapshot, corporationId);
+    if (listingNow) {
+      if (fill.order.kind === "float-offer") {
+        setField(plan, ctx.snapshot, acc, {
+          path: listingPath(corporationId), docField: "committedFloatShares", entryCityId: null,
+          field: listingField(corporationId, "committedFloatShares"),
+          value: listingNow.committedFloatShares - fill.quantityShares,
+          formula: `M-09 execution ${tradeId}: the float offer filled into the buyback — committed float falls`,
+        });
+      } else if (fill.order.memberId !== listing.ownerMemberId) {
+        setField(plan, ctx.snapshot, acc, {
+          path: listingPath(corporationId), docField: "publicHeldShares", entryCityId: null,
+          field: listingField(corporationId, "publicHeldShares"),
+          value: listingNow.publicHeldShares - fill.quantityShares,
+          formula: `M-09 execution ${tradeId}: publicly held shares retired out of the float`,
+        });
+      }
+    }
+    fillEntries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId, "M-04"],
+        changes: [
+          ...accChangesFor(execAcc, null),
+          fieldChange(`marketTrades/${tradeId}.priceRubars`, null, fill.priceRubars, `M-09 execution ${tradeId}: the tape record — the company bought ${fill.quantityShares} shares at the resting price ${fill.priceRubars} R`),
+        ],
+        recordsCreated: [tradePath(tradeId)],
+        recordsUpdated: [orderPath(fill.order.orderId), holdingPath(fill.order.memberId, corporationId)],
+        summaryText: `M-09 execution ${tradeId}: ${corporationId} bought back ${fill.quantityShares} shares from ${fill.order.memberId} at ${fill.priceRubars} R (resting order ${fill.order.orderId}); value ${fill.tradeValueRubars} R; fees ${fill.buyerFeeRubars} R buyer (company) / ${fill.sellerFeeRubars} R seller to the Market Account. The shares retire in this event.${fill.order.kind === "float-offer" ? " The fill consumed part of the founder's float offer — a book execution at the resting price, in the open, exactly as any member's fill (never an off-book purchase from the founder)." : ""}`,
+      })
+    );
+  });
+  // Retirement lands on the corporation record (cumulative issued
+  // stands; retired accumulates — the checker's identity, D-4).
+  setField(plan, ctx.snapshot, acc, {
+    path: corpPath, docField: "retiredShares", entryCityId: homeCityId,
+    field: corpField(corporationId, "retiredShares"),
+    value: retiredShares(corp) + totalBought,
+    formula: "M-09: bought-back shares retire — retiredShares accumulates; sharesOutstanding (cumulative issued) stands (D-4)",
+  });
+  // Listing-level changes ride the last execution entry; the corp
+  // retirement change rides its own home-city entry.
+  const listingChanges = accFlush(acc, null);
+  if (listingChanges.length > 0 && fillEntries.length > 0) {
+    fillEntries[fillEntries.length - 1].changes.push(...listingChanges);
+    fillEntries[fillEntries.length - 1].recordsUpdated.push(listingPath(corporationId));
+  }
+  plan.entries.push(...fillEntries);
+  const corpChanges = accFlush(acc, homeCityId);
+  if (corpChanges.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: homeCityId,
+        cityIds: [homeCityId],
+        ruleIds: [descriptorId],
+        changes: corpChanges,
+        recordsUpdated: [corpPath],
+        summaryText: `M-09: ${corporationId} retired ${totalBought} shares in this event; live shares ${liveShares(corp)} → ${liveShares(corp) - totalBought} (issued ${issuedShares(corp)} − retired ${retiredShares(corp) + totalBought}). Total buyback cost ${totalCost} R from company cash.`,
+      })
+    );
+  }
+  composeMarketRepricing({
+    plan,
+    snapshot: ctx.snapshot,
+    actor: ctx.action.actor,
+    corporationId,
+    homeCityId,
+    judgment: judgmentFromPrepared(ctx),
+    judgmentRationale: judgmentRationaleFromPrepared(ctx),
+    judgmentInputHash: ctx.prepared?.inputHash ?? null,
+    stepCapException: null,
+    invokedByRuleId: descriptorId,
+  });
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "buy-back-shares",
+    scope: "company",
+    cityId: homeCityId,
+    summaryText: `Bought back and retired ${totalBought} shares of ${corporationId} for ${totalCost} R of company cash (cap ${capPrice} R, max ${maxQuantity}); repricing ran in-event (M-06).`,
+    major: true,
+    extraClassification: {
+      buyback: { maxQuantityShares: maxQuantity, capPriceRubars: capPrice, filledShares: totalBought, totalCostRubars: totalCost },
+      invokesRules: ["M-04", "M-06"],
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-10 — liquidate / delist. The exported composer is also the path
+// R-07's listed Dissolve routes through (Lead wiring, prep report
+// §5). Waterfall (§5.5, D-7): trading halts in-event and every
+// resting order cancels; company cash pays taxes/fees payable to
+// their creditor treasuries first; the remainder divides pro-rata
+// across ALL live shares (the founder's included — no founder
+// preference) and pays to personal accounts in the same event; the
+// integer-division dust stays on the dissolved record; shares retire;
+// the listing exits the index at its final liquidation reference.
+// The salvage line is DISCLOSED, never paid: paying it would mint
+// unbacked cash (no structure-sale mechanism exists in Phase 4) and
+// break the conservation invariant this slice exists to prove.
+// ---------------------------------------------------------------------------
+
+export type LiquidationOutcome =
+  | {
+      status: "liquidated";
+      distributableRubars: number;
+      finalLiquidationPriceRubars: number;
+      paidToHoldersRubars: number;
+      payablesPaidRubars: number;
+      payablesWrittenOffRubars: number;
+      salvageDisclosedRubars: number;
+      dustRubars: number;
+      perHolder: { memberId: string; quantityShares: number; amountRubars: number }[];
+    }
+  | { status: "refused"; code: string; message: string };
+
+export function composeLiquidation(args: {
+  plan: ResolutionPlan;
+  snapshot: SimSnapshot;
+  actor: HandlerContext["action"]["actor"];
+  corporationId: string;
+  homeCityId: string;
+  invokedByRuleId: string;
+  entryRuleIds: string[];
+  seq: number;
+  resolutionId: string;
+  now: Date;
+}): LiquidationOutcome {
+  const { plan, snapshot } = args;
+  const corpPath = corporationPath(args.homeCityId, args.corporationId);
+  const corp = plannedDoc(plan, snapshot, corpPath);
+  const listing = plannedListing(plan, snapshot, args.corporationId);
+  if (!corp || !listing) {
+    return { status: "refused", code: "not-listed", message: `no standing listing record for ${args.corporationId}` };
+  }
+  const live = liveShares(corp);
+  const holders = holdingDocs(snapshot)
+    .map(({ doc }) => doc as unknown as ShareHoldingRecord)
+    .filter((h) => h.corporationId === args.corporationId && h.quantityShares > 0)
+    .sort((a, b) => (a.memberId < b.memberId ? -1 : 1));
+  const heldTotal = holders.reduce((sum, h) => sum + h.quantityShares, 0);
+  if (heldTotal !== live) {
+    return {
+      status: "refused",
+      code: "share-ledger-inconsistent",
+      message: `holdings sum to ${heldTotal} shares against ${live} live shares — liquidation refuses to pay against a ledger that disagrees with itself (§1.8 posture; remedy is M-11 under a verdict)`,
+    };
+  }
+  const acc: ChangeAcc = new Map();
+
+  // 1) Halt in-event + every resting order cancels (the halt is a
+  //    Log fact; the listing's one folded write lands delisted below).
+  const resting = bookDocs(snapshot)
+    .map(({ doc }) => doc as unknown as MarketOrderRecord)
+    .filter((o) => o.corporationId === args.corporationId && o.status === "resting");
+  for (const order of resting) {
+    patchOrder(plan, snapshot, acc, order.orderId, {
+      status: "cancelled",
+      cancelReason: "listing-liquidated",
+    }, "M-10: liquidation cancels every resting order in-event (their commitments die with the listing; no cash or shares move on a cancel)");
+  }
+  if (resting.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: args.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: args.entryRuleIds,
+        changes: accFlush(acc, null),
+        recordsUpdated: resting.map((o) => orderPath(o.orderId)),
+        summaryText: `M-10: trading in ${args.corporationId} halts in this event and all ${resting.length} resting order(s) are cancelled (${resting.map((o) => o.orderId).join(", ")}).`,
+      })
+    );
+  }
+
+  // 2) Waterfall figures. Salvage is a disclosure (D-7): the recorded
+  //    budgets of the company's linked structures that stand.
+  const cash = intOr(corp, "companyCashRubars", 0);
+  const linkedIds = strList(corp.linkedStructureIds);
+  const structuresById = new Map(
+    structureDocs(snapshot, args.homeCityId).map(({ doc }) => [String(doc.structureId), doc])
+  );
+  const salvageDisclosedRubars = linkedIds.reduce(
+    (sum, id) => sum + (structuresById.get(id) ? intOr(structuresById.get(id) ?? null, "totalBudgetRubars", 0) : 0),
+    0
+  );
+  const payablesMap = (corp.taxPayables as Record<string, unknown> | undefined) ?? {};
+  const payables = Object.entries(payablesMap)
+    .map(([cityId, amount]) => ({ cityId, amountRubars: typeof amount === "number" && amount > 0 ? amount : 0 }))
+    .filter((p) => p.amountRubars > 0)
+    .sort((a, b) => (a.cityId < b.cityId ? -1 : 1));
+  const totalPayables = payables.reduce((sum, p) => sum + p.amountRubars, 0);
+  const payablesPaid = payables.map((p) => ({
+    ...p,
+    paidRubars:
+      totalPayables <= cash
+        ? p.amountRubars
+        : Math.floor((p.amountRubars * cash) / totalPayables),
+  }));
+  const payablesPaidRubars = payablesPaid.reduce((sum, p) => sum + p.paidRubars, 0);
+  const payablesWrittenOffRubars = totalPayables - payablesPaidRubars;
+  const distributableRubars = cash - payablesPaidRubars;
+  const finalLiquidationPriceRubars =
+    live > 0 ? roundHalfUp(distributableRubars / live) : 0;
+  // Holders are paid into personal accounts (step 0 for each).
+  for (const holder of holders) {
+    composeLazyOpen({ plan, snapshot, actor: args.actor, memberId: holder.memberId, viaActionKind: "liquidate_company" });
+  }
+  const perHolder = holders.map((h) => ({
+    memberId: h.memberId,
+    quantityShares: h.quantityShares,
+    amountRubars: live > 0 ? Math.floor((distributableRubars * h.quantityShares) / live) : 0,
+  }));
+  const paidToHoldersRubars = perHolder.reduce((sum, p) => sum + p.amountRubars, 0);
+  const dustRubars = distributableRubars - paidToHoldersRubars;
+
+  const lines: TransferLine[] = [];
+  for (const p of payablesPaid) {
+    if (p.paidRubars > 0) {
+      lines.push({
+        from: companyRef(args.homeCityId, args.corporationId),
+        to: { kind: "treasury", cityId: p.cityId },
+        amountRubars: p.paidRubars,
+        ruleId: "M-10",
+        memo: `liquidation waterfall — tax/fees payable to ${p.cityId} paid ahead of shareholders (§5.5)`,
+      });
+    }
+  }
+  for (const p of perHolder) {
+    if (p.amountRubars > 0) {
+      lines.push({
+        from: companyRef(args.homeCityId, args.corporationId),
+        to: personalRef(p.memberId),
+        amountRubars: p.amountRubars,
+        ruleId: "M-10",
+        memo: `liquidation proceeds — pro-rata on ${p.quantityShares} shares of ${args.corporationId}`,
+      });
+    }
+  }
+  if (lines.length > 0) {
+    const applied = applyTransferLines({ plan, snapshot, lines, shortfallClass: "transfer" });
+    if (!applied.ok) {
+      return { status: "refused", code: applied.code.toLowerCase().replace(/_/g, "-"), message: applied.message };
+    }
+    pushMovementEntries(plan, { action: { actor: args.actor } }, args.entryRuleIds, applied.changes, (entryCityId) => {
+      if (entryCityId === null) {
+        return `M-10 waterfall payments for ${args.corporationId} (invoked by ${args.invokedByRuleId}): ${perHolder.map((p) => `${p.memberId} +${p.amountRubars} R (${p.quantityShares} shares)`).join("; ") || "no holder payments"}.`;
+      }
+      if (entryCityId === args.homeCityId) {
+        return `M-10 waterfall: ${args.corporationId}'s company cash paid payables first, then shareholders pro-rata; ${dustRubars} R of integer-division dust stays on the dissolved record (finance §3.3's stated dust posture).`;
+      }
+      return `M-10 waterfall: the payable owed to ${entryCityId} is paid from ${args.corporationId}'s cash ahead of shareholders (§5.5).`;
+    });
+  }
+
+  // 3) Shares retire; holdings are deleted; the corporation closes.
+  for (const { doc } of holdingDocs(snapshot)) {
+    const holding = doc as unknown as ShareHoldingRecord;
+    if (holding.corporationId !== args.corporationId) continue;
+    planWrite(plan, snapshot, holdingPath(holding.memberId, args.corporationId), null, "state", ["quantityShares"]);
+    accChange(acc, null, holdingField(holding.memberId, args.corporationId, "quantityShares"), holding.quantityShares, null, "M-10: the holding is retired and its record deleted in the liquidation event");
+  }
+  setField(plan, snapshot, acc, {
+    path: corpPath, docField: "retiredShares", entryCityId: args.homeCityId,
+    field: corpField(args.corporationId, "retiredShares"),
+    value: retiredShares(corp) + live,
+    formula: "M-10: all live shares retire — retired accumulates to the cumulative issued count (D-4 identity: Σ holdings 0 + retired = sharesOutstanding)",
+  });
+  setField(plan, snapshot, acc, {
+    path: corpPath, docField: "status", entryCityId: args.homeCityId,
+    field: corpField(args.corporationId, "status"), value: "dissolved",
+    formula: "M-10: the corporation record closes as dissolved",
+  });
+  setField(plan, snapshot, acc, {
+    path: corpPath, docField: "valuationRubars", entryCityId: args.homeCityId,
+    field: corpField(args.corporationId, "valuationRubars"), value: 0,
+    formula: "M-10/§4.4: a price of exactly 0 is reserved for liquidation",
+  });
+  setField(plan, snapshot, acc, {
+    path: corpPath, docField: "taxPayables", entryCityId: args.homeCityId,
+    field: corpField(args.corporationId, "taxPayables"), value: {},
+    formula: "M-10: payables are paid or written off in the waterfall — the dissolved record carries none forward",
+  });
+
+  // 4) The listing delists at the final liquidation reference.
+  const listingPatch: [string, unknown, string][] = [
+    ["status", "delisted", "M-10: the listing delists in the liquidation event"],
+    ["tradingStatus", "delisted", "M-10: trading ends at this event (§2.3)"],
+    ["haltReason", null, "M-10: delisting supersedes the halt"],
+    ["delistedAtSeq", args.seq, "M-10: delisting seq"],
+    ["finalLiquidationPriceRubars", finalLiquidationPriceRubars, "M-10/§5.5: the final liquidation reference = distributable ÷ live shares (rounded half-up; payments floor)"],
+    ["committedFloatShares", 0, "M-10: no float survives delisting"],
+    ["publicHeldShares", 0, "M-10: no public holding survives delisting"],
+  ];
+  for (const [docField, value, formula] of listingPatch) {
+    setField(plan, snapshot, acc, {
+      path: listingPath(args.corporationId), docField, entryCityId: null,
+      field: listingField(args.corporationId, docField), value, formula,
+    });
+  }
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: args.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: args.entryRuleIds,
+      changes: accFlush(acc, null),
+      recordsUpdated: [listingPath(args.corporationId)],
+      summaryText: `M-10 liquidation waterfall for ${args.corporationId}, line by line (§5.5): company cash ${cash} R; salvage value of linked structures DISCLOSED at ${salvageDisclosedRubars} R — not paid (D-7: paying salvage would mint unbacked cash; the structures themselves are not transferred and their records stand as their own rules leave them); taxes/fees payable ${totalPayables} R — paid ${payablesPaidRubars} R to creditor treasuries ahead of shareholders${payablesWrittenOffRubars > 0 ? `, ${payablesWrittenOffRubars} R written off with the dissolution (cash bound the waterfall)` : ""}; adjudicated amounts 0 R (no verdict-attached amount stands against this company in v1); distributable ${distributableRubars} R over ${live} live shares = final liquidation price ${finalLiquidationPriceRubars} R/share; paid to holders ${paidToHoldersRubars} R; dust ${dustRubars} R stays on the dissolved record. Shares retire; the listing exits the index in this event (§3.3). ${indexNote(plan, snapshot)}`,
+    })
+  );
+  const corpChanges = accFlush(acc, args.homeCityId);
+  if (corpChanges.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: args.actor,
+        cityId: args.homeCityId,
+        cityIds: [args.homeCityId],
+        ruleIds: args.entryRuleIds,
+        changes: corpChanges,
+        recordsUpdated: [corpPath],
+        summaryText: `M-10: ${args.corporationId} is dissolved; its record, trade history and Log entries remain permanently readable (§2.3).`,
+      })
+    );
+  }
+  return {
+    status: "liquidated",
+    distributableRubars,
+    finalLiquidationPriceRubars,
+    paidToHoldersRubars,
+    payablesPaidRubars,
+    payablesWrittenOffRubars,
+    salvageDisclosedRubars,
+    dustRubars,
+    perHolder,
+  };
+}
+
+function liquidateCompanyHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-10";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  if (!corporationId || !homeCityId) {
+    return rejectedPlan(descriptorId, "malformed-liquidation", [descriptorId], "M-10: liquidate_company requires corporationId and homeCityId.");
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const ownerGate = requireOwner(ctx, descriptorId, gate.corp, corporationId);
+  if (isPlan(ownerGate)) return ownerGate;
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const outcome = composeLiquidation({
+    plan,
+    snapshot: ctx.snapshot,
+    actor: ctx.action.actor,
+    corporationId,
+    homeCityId,
+    invokedByRuleId: descriptorId,
+    entryRuleIds: [descriptorId],
+    seq,
+    resolutionId: ctx.resolutionId,
+    now: new Date(ctx.snapshot.now),
+  });
+  if (outcome.status === "refused") {
+    return rejectedPlan(descriptorId, outcome.code, [descriptorId], `M-10: ${outcome.message}.`);
+  }
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "liquidate-company",
+    scope: "company",
+    cityId: homeCityId,
+    summaryText: `Liquidated ${corporationId}: distributable ${outcome.distributableRubars} R at a final liquidation price of ${outcome.finalLiquidationPriceRubars} R/share; ${outcome.paidToHoldersRubars} R paid to shareholders, ${outcome.payablesPaidRubars} R of payables paid first, dust ${outcome.dustRubars} R on the dissolved record. The listing is delisted and exits the index.`,
+    major: true,
+    extraClassification: {
+      liquidation: {
+        distributableRubars: outcome.distributableRubars,
+        finalLiquidationPriceRubars: outcome.finalLiquidationPriceRubars,
+        paidToHoldersRubars: outcome.paidToHoldersRubars,
+        payablesPaidRubars: outcome.payablesPaidRubars,
+        payablesWrittenOffRubars: outcome.payablesWrittenOffRubars,
+        salvageDisclosedRubars: outcome.salvageDisclosedRubars,
+        dustRubars: outcome.dustRubars,
+        perHolder: outcome.perHolder,
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-11 — correct a market record (dispute path). FAIL-CLOSED in
+// Phase 4: corrections apply only under a Town Hall motion / tribunal
+// verdict (Phase 7 owns verdicts), and settled trades are
+// locked-at-commit (P4-K25) — the remedy a verdict orders is a
+// compensating event, never an edit of settled history. Until
+// verdicts land, every correction action rejects with the path
+// named, rather than improvising an authority this phase lacks.
+// ---------------------------------------------------------------------------
+
+function correctMarketRecordHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-11";
+  const corporationId = stringField(ctx.action, "corporationId");
+  return rejectedPlan(
+    descriptorId,
+    "correction-requires-verdict",
+    [descriptorId],
+    `M-11: a correction to a market record${corporationId ? ` for ${corporationId}` : ""} applies only under a Town Hall motion or tribunal verdict (§6 M-11), recorded by a member with the mandate — verdict machinery is Phase 7, and no verdict stands behind this action. Settled trades are locked-at-commit (P4-K25): the correction a verdict orders is a compensating transfer computed from the Log, never an unwinding of settled history or an edit of a standing record by fiat.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Read plans (F-01). Seeds derive only from the action's own fields
+// and the actor — never from citations. Settlement events read the
+// whole member-account collection: the member universe is tiny and a
+// settlement must read/write whichever members rest in the book (the
+// build-prep §2.4 graph read, market instance).
+// ---------------------------------------------------------------------------
+
+function marketReadPlan(opts: {
+  book?: boolean;
+  holdings?: boolean;
+  accounts?: boolean;
+  listings?: boolean;
+  structures?: boolean;
+  cities?: boolean;
+  actorHolding?: boolean;
+  counterpartyHolding?: boolean;
+  namedOrder?: boolean;
+}): (seeds: ReadPlanSeeds) => DescriptorReadPlan {
+  return (seeds: ReadPlanSeeds): DescriptorReadPlan => {
+    const params = (seeds.action.structuredAction ?? {}) as Record<string, unknown>;
+    const paths: string[] = [MARKET_ACCOUNT_PATH];
+    const queries: CollectionQuerySpec[] = [];
+    const actorId = actorMemberId(seeds.action.actor);
+    if (actorId) paths.push(memberAccountPath(actorId));
+    const corporationId = typeof params.corporationId === "string" ? params.corporationId : null;
+    const homeCityId = typeof params.homeCityId === "string" ? params.homeCityId : null;
+    if (homeCityId) paths.push(cityPath(homeCityId));
+    if (corporationId && homeCityId) paths.push(corporationPath(homeCityId, corporationId));
+    if (corporationId) {
+      paths.push(listingPath(corporationId));
+      paths.push(orderPath(floatOfferOrderId(corporationId)));
+      if (opts.book) queries.push(bookQuery(corporationId));
+      if (opts.holdings) queries.push(holdingsQuery(corporationId));
+      if (opts.actorHolding && actorId) paths.push(holdingPath(actorId, corporationId));
+      if (opts.counterpartyHolding && typeof params.toMemberId === "string") {
+        paths.push(holdingPath(params.toMemberId, corporationId));
+      }
+    }
+    if (opts.namedOrder && typeof params.orderId === "string") {
+      paths.push(orderPath(params.orderId));
+    }
+    if (opts.accounts) queries.push(accountsQuery());
+    if (opts.listings) queries.push(listingsQuery());
+    if (opts.structures && homeCityId) queries.push(structuresQuery(homeCityId));
+    if (opts.cities) queries.push(citiesQuery());
+    return { paths, queries };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Descriptors + finance additions (finance §2.4) + undo classes
+// (P4-K25). The Build Lead registers MARKET_DESCRIPTORS into
+// RULE_DESCRIPTORS and folds MARKET_FINANCE_ADDITIONS onto each
+// descriptor's `finance` field — the Finance/Catalogue assembly
+// pattern, unchanged.
+// ---------------------------------------------------------------------------
+
+export const MARKET_DESCRIPTORS: Record<string, RuleDescriptor> = {
+  "M-00": {
+    id: "M-00",
+    actionKinds: ["found_market_account"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { found_market_account: foundMarketAccountHandler },
+    readPlan: () => ({ paths: [MARKET_ACCOUNT_PATH] }),
+    summary: "Found the Market Account (genesis-class): the exchange operator's singleton ledger at sim_market_account/main is created with its 1,000,000 R seed — a mint under finance §3.3's closed list — and the RCI divisor anchor slot. The account holds no shares, takes no positions, and moves only by published rule; until this act stands, trade handlers reject market-account-missing rather than inventing the account inside a trade.",
+  },
+  "M-01": {
+    id: "M-01",
+    actionKinds: ["list_company"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { list_company: listCompanyHandler },
+    readPlan: marketReadPlan({ holdings: true, listings: true, structures: true }),
+    summary: "List a company (owner only, §2.2 eligibility). Two branches: completion — a corporation listed at founding under R-06 gains its listing record and founder holding from its standing founding figures, exactly the founder-holding backfill planner's repair (PR #33 obligation); and full listing — paid-in capital moves founder-personal -> company (treasury sourcing suspended, P4-K21(ii)), shares issue to the founder, the float portion is committed as the standing float offer, and the opening price is computed by the M-06 coded-input assembly + §4.4 formula with the prepared payload's judgment (an action naming its own scores rejects judgment-required). Zero capital and zero operating footprint refuses listing-unpriced — no price is invented.",
+  },
+  "M-02": {
+    id: "M-02",
+    actionKinds: ["market_issue"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { market_issue: marketIssueHandler },
+    readPlan: marketReadPlan({ book: true, holdings: true, listings: true, structures: true }),
+    summary: "Issue shares / inject capital / place or recall float (owner only). Issuance creates shares to the founder (optionally direct to float) with per-holder dilution disclosed exactly in the Log; injection moves personal capital into company cash and maintains paidInCapitalRubars; both reprice in-event via M-06. Float placement commits founder shares behind the standing float offer and recall releases the commitment — under custody (P4-K21) float shares never leave the founder's holding, so neither branch moves shares and neither reprices (no §4.3 input changes); the index float inputs update in-event.",
+  },
+  "M-03": {
+    id: "M-03",
+    actionKinds: ["place_order"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { place_order: placeOrderHandler },
+    readPlan: marketReadPlan({ book: true, holdings: true, accounts: true, actorHolding: true }),
+    summary: "Place an order (any member; NPC mandates are Phase 5). Market orders require a protection cap; block orders derive their cap from the reference ± half-spread; limit orders rest. Placement validates free shares for sells and worst-case cash (cap value + per-execution fee headroom) for buys; expiry evaluates first (M-05 mechanism); matching is price–time priority at the resting order's price with self-match prevention (M-04 composed in-event); a resting buyer who cannot cover at crossing is cancelled in-event (cancelled-insufficient-cash, D-5 — resting buys carry no cash reservation in v1) and matching continues. Market/block remainders cancel; limit remainders rest with their shares committed.",
+  },
+  "M-04": {
+    id: "M-04",
+    actionKinds: ["transfer_shares"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { transfer_shares: transferSharesHandler },
+    readPlan: marketReadPlan({ actorHolding: true, counterpartyHolding: true }),
+    summary: "Execute a trade (matching + settlement). As an action kind it carries the zero-price member-to-member transfer path: free shares move between holdings, fees are 0 and the fee line is still stated, no price prints. Executions themselves are not submitted actions — they compose inside M-03 (incoming orders) and M-09 (buybacks) in the same event: per execution, seller shares -q, buyer shares +q, buyer cash -(value + buyer fee), seller cash +(value - seller fee), Market Account +fees (0.25% per side, rounded up, minimum 1 R), a trade record on the tape, and last-trade/official price updates per §4.1. Settlement is T+0 and atomic (§5.6).",
+  },
+  "M-05": {
+    id: "M-05",
+    actionKinds: ["cancel_order"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { cancel_order: cancelOrderHandler },
+    readPlan: marketReadPlan({ book: true, namedOrder: true, actorHolding: true }),
+    summary: "Cancel / expire an order. Owner cancels their own resting order(s) — one named order, or all of theirs on a listing — free and instant, in any trading status; committed shares release (cancelling the float offer is equivalent to an M-02 recall). Expiry is this rule's other half: no timer exists — every book-touching event first evaluates resting orders whose expiresAtSeq has passed and expires them in that event, logged.",
+  },
+  "M-06": {
+    id: "M-06",
+    actionKinds: [],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: {},
+    summary: "Repricing (resolver step, no action kinds): composed in-event by rules that change a listed company's §4.3 coded inputs or invoke judgment (M-01 opening, M-02 issue/inject, M-08, M-09, and — by Lead wiring — R-07's listed branches and structure/case events). The ONLY writer of a listed company's reference price and valuationRubars cache (P4-K18): coded inputs from a closed list (legacyBookRubars structurally absent, P4-G6), judgment from the prepared payload or carried lastJudgment (never from the action, never invented — an unjudged company is not repriced), the §4.4 formula, the locked ±25% step cap (exceptions: dissolution, tier-2 case against the company), official price per §4.1 (a same-event print supersedes), downtime halt/resume evaluation, and the full show-your-work Log entry.",
+  },
+  "M-07": {
+    id: "M-07",
+    actionKinds: ["suspend_listing", "resume_listing"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: {
+      suspend_listing: suspendResumeHandler("suspend"),
+      resume_listing: suspendResumeHandler("resume"),
+    },
+    readPlan: marketReadPlan({ structures: true }),
+    summary: "Suspend / resume a listing (owner only). Suspension is the owner's deliberate dormancy — shares remain held, resting orders persist unexecutable, no price changes. Resume re-evaluates the coded halt condition in-event: a downtime halt whose condition still holds rejects halt-condition-holds (no unhalt button exists for a standing condition, §1.8); with the condition clear, trading opens.",
+  },
+  "M-08": {
+    id: "M-08",
+    actionKinds: ["declare_distribution"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { declare_distribution: declareDistributionHandler },
+    readPlan: marketReadPlan({ holdings: true, accounts: true, listings: true, structures: true }),
+    summary: "Declare a distribution (owner only): a stated total from company cash, paid pro-rata across all shareholders of record at the event's seq (founder included; integer division; the remainder stays in company cash, logged). A distribution the cash cannot cover refuses in full (distribution-exceeds-cash) — never trimmed silently. Repricing follows in-event (M-06). This is also the only lawful cash-out leg for a listed company under P4-K22: R-07's listed Contract withdrawal routes here (or to M-09) by Lead wiring, never to a bare company -> owner line.",
+  },
+  "M-09": {
+    id: "M-09",
+    actionKinds: ["buy_back_shares"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { buy_back_shares: buyBackSharesHandler },
+    readPlan: marketReadPlan({ book: true, holdings: true, accounts: true, listings: true, structures: true }),
+    summary: "Buy back shares (owner only): the company buys through the book in the open — resting sells in price–time order up to a stated maximum quantity and cap price, funded from company cash (value + buyer fee per fill) — never directly off-book from the founder (a disguised withdrawal, §5.2). Partial fills are lawful (quantity, cap, or cash binds); a zero-fill buyback is a logged no-op, not a rejection. Bought shares retire: retiredShares accumulates while sharesOutstanding (cumulative issued) stands (D-4). Executions are M-04 executions (fees both sides, tape records, prints); repricing follows in-event (M-06).",
+  },
+  "M-10": {
+    id: "M-10",
+    actionKinds: ["liquidate_company"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { liquidate_company: liquidateCompanyHandler },
+    readPlan: marketReadPlan({ book: true, holdings: true, accounts: true, listings: true, structures: true, cities: true }),
+    summary: "Liquidate / delist (owner only; R-07's listed Dissolve routes here by Lead wiring). In one event: trading halts and every resting order cancels; the §5.5 waterfall pays taxes/fees payable to creditor treasuries first (pro-rata when cash binds, the unpaid remainder written off with the dissolution and disclosed), then divides the distributable remainder pro-rata across all live shares (founder included, no preference) into personal accounts; salvage is disclosed, never paid (D-7 — paying it would mint unbacked cash); integer-division dust stays on the dissolved record; shares retire, holdings are deleted, the corporation closes dissolved with valuation 0, and the listing delists at the final liquidation reference and exits the index. A holdings/record disagreement refuses share-ledger-inconsistent rather than paying against a broken ledger.",
+  },
+  "M-11": {
+    id: "M-11",
+    actionKinds: ["correct_market_record"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { correct_market_record: correctMarketRecordHandler },
+    readPlan: marketReadPlan({}),
+    summary: "Correct a market record (dispute path) — fail-closed in Phase 4: every correction action rejects correction-requires-verdict. Corrections apply only under a Town Hall motion / tribunal verdict (Phase 7 owns verdicts), as compensating transfers computed from the Log; settled trades are locked-at-commit (P4-K25) and are never unwound or edited by fiat. The descriptor stands now so the path is named, published, and refuses honestly instead of improvising an authority this phase lacks.",
+  },
+  "M-12": {
+    id: "M-12",
+    actionKinds: [],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: {},
+    summary: "Publish company figures (market-facing publication) — descriptor-only stub in this slice: the publication layer is step 9's R-30 (sim_publications records stamped owner-published · unverified), and M-12 is its market instance. No price, index, or state effect ever (§4.8): owner-published figures are claims, labeled as claims, and are never inputs to §4.3, §4.4, or the judgment evidence pack. The descriptor stands so the rule is published with the family; the verb lands with step 9's wiring.",
+  },
+};
+
+export const MARKET_FINANCE_ADDITIONS: Record<string, FinanceDescriptorAdditions> = {
+  "M-00": { shortfallClass: "none", ledgersTouched: ["market"], invokesRules: [] },
+  "M-01": { shortfallClass: "transfer", ledgersTouched: ["personal", "company", "market"], invokesRules: ["M-02", "M-06"] },
+  "M-02": { shortfallClass: "transfer", ledgersTouched: ["personal", "company"], invokesRules: ["M-06"] },
+  "M-03": { shortfallClass: "transfer", ledgersTouched: ["personal", "market"], invokesRules: ["M-04", "M-05"] },
+  "M-04": { shortfallClass: "transfer", ledgersTouched: ["personal", "market"], invokesRules: [] },
+  "M-05": { shortfallClass: "none", ledgersTouched: [], invokesRules: [] },
+  "M-06": { shortfallClass: "none", ledgersTouched: [], invokesRules: [] },
+  "M-07": { shortfallClass: "none", ledgersTouched: [], invokesRules: [] },
+  "M-08": { shortfallClass: "transfer", ledgersTouched: ["company", "personal"], invokesRules: ["M-06"] },
+  "M-09": { shortfallClass: "transfer", ledgersTouched: ["company", "personal", "market"], invokesRules: ["M-04", "M-06"] },
+  "M-10": { shortfallClass: "transfer", ledgersTouched: ["company", "personal", "treasury"], invokesRules: [] },
+  "M-11": { shortfallClass: "none", ledgersTouched: [], invokesRules: [] },
+  "M-12": { shortfallClass: "none", ledgersTouched: [], invokesRules: [] },
+};
+
+/** P4-K25 lock classes, shipped with the descriptors from day one so
+ * Phase 7's undo pass extends a populated field instead of
+ * retrofitting one (the registry's RuleDescriptor type gains the
+ * `undoClass` field at Lead assembly; until then the map is the
+ * record). M-03 carries the class because its events settle M-04
+ * executions; undo of such a target refuses with the class named,
+ * and the remedy is the corrective-event path (M-11). */
+export const MARKET_UNDO_CLASSES: Record<string, "locked-at-commit"> = {
+  "M-03": "locked-at-commit",
+  "M-04": "locked-at-commit",
+  "M-10": "locked-at-commit",
+};
