@@ -4,7 +4,24 @@
  *
  * Usage:
  *   firebase emulators:exec --only firestore,auth --project cowboycityrealm \
- *     "tsx scripts/sim-run-wake.ts [--now <ISO>] [--prepared <payloads.json>]"
+ *     "tsx scripts/sim-run-wake.ts [--now <ISO>] [--prepared <payloads.json>] [--worker-fixture <outcomes.json>]"
+ *
+ * The wake's step order as wired (Phase 5 PR-4):
+ *   1. confirmed actions, each followed by exactly one ripeness scan;
+ *   2. queued undo operations (never triggering a scan or a pass step);
+ *   3. Phase 5 passes over this wake's commits — needsAttention
+ *      conversions, the delegation pass, the standing-team trigger
+ *      pass, delegated-action follow-ups, the §8 silence pass, and the
+ *      envelope claim pass (cap 5/wake);
+ *   4. the terminal dashboard snapshot refresh, iff the wake changed
+ *      the world.
+ * No step reads a clock or runs on a timer: this script is still the
+ * only thing that can start a wake, and it starts one only when run.
+ *
+ * --worker-fixture <json>: a map of taskId (or "*") to a worker
+ * outcome { outcome, outputText, summary, ... } for the claim pass —
+ * the emulator stand-in for the fabric's envelope worker. Without it,
+ * the claim pass claims nothing and reports the deferral.
  *
  * Emulator-only, doubly: the script refuses unless BOTH emulator hosts
  * are set, and the only Admin SDK use is minting a custom token for the
@@ -27,6 +44,8 @@ import { connectAuthEmulator, getAuth as getClientAuth, signInWithCustomToken } 
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 import { getSimDb, requireEmulator, SIM_PROJECT_ID } from "./sim-admin";
 import { runWake } from "../lib/sim/dispatcher";
+import type { EnvelopeWorker } from "../lib/sim/wakePasses";
+import type { EnvelopeWorkerOutcome } from "../lib/sim/wakeSteps";
 import { PRODUCTION_BASELINE_REGISTRY } from "../lib/sim/baseline/registry";
 import type { PreparedPayload } from "../lib/sim/state";
 
@@ -55,6 +74,15 @@ async function main() {
     >;
     preparedPayloads = new Map(Object.entries(parsed));
   }
+  const workerIdx = args.indexOf("--worker-fixture");
+  let envelopeWorker: EnvelopeWorker | undefined;
+  if (workerIdx >= 0) {
+    const fixture = JSON.parse(readFileSync(args[workerIdx + 1], "utf8")) as Record<
+      string,
+      EnvelopeWorkerOutcome | null
+    >;
+    envelopeWorker = async (env) => fixture[env.taskId] ?? fixture["*"] ?? null;
+  }
 
   const token = await getAuth().createCustomToken("fabric-service", {
     fabric: true,
@@ -75,7 +103,7 @@ async function main() {
 
   const summary = await runWake(
     { fabricDb: db, committerDb: db, baselineRegistry: PRODUCTION_BASELINE_REGISTRY },
-    { now, cycleId: `cycle-${now}`, preparedPayloads }
+    { now, cycleId: `cycle-${now}`, preparedPayloads, envelopeWorker }
   );
   console.log(JSON.stringify(summary, null, 2));
 }
