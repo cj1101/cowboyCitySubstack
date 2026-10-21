@@ -34,11 +34,15 @@ import {
   type RulesTestContext,
 } from "@firebase/rules-unit-testing";
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
+  query,
   setDoc,
   Timestamp,
   updateDoc,
+  where,
 } from "firebase/firestore";
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore as getAdminFirestore, type Firestore as AdminFirestore } from "firebase-admin/firestore";
@@ -671,6 +675,65 @@ async function main() {
   console.log("ok N3 delegationRule.set x2 (root+version, ruleHash parity in the emulator venue)");
 
   // ======================================================================
+  // DIAG (PR #45 fix round 3 — TEMPORARY, remove with the fix): N4 dies
+  // on an uncaught FirebaseError "No matching allow statements" — the
+  // emulator's QUERY-denial message (document denials carry the verbose
+  // "false for 'get' @ L…" text). The only operation in N4 with no prior
+  // emulator-venue precedent is the wake's delegation seed query
+  // (WAKE_RULES_QUERY_ID: sim_delegation_rules where cityId == …) as the
+  // fabric committer; that collection's read rule is the only queried
+  // one whose branches call get() on resource-derived paths
+  // (ownsListedCity). These read-only probes discriminate: Q1 the
+  // suspect, Q2 a known-good query pattern, Q3 the member-side query on
+  // the same collection, Q4 the other ownsListedCity-bearing read rule
+  // (fabric-first) under a query. Probes catch and log — the suite
+  // proceeds to the real failure either way.
+  // ======================================================================
+  {
+    const probe = async (label: string, run: () => Promise<unknown>) => {
+      try {
+        const result = await run();
+        const size =
+          result && typeof result === "object" && "size" in result
+            ? (result as { size: number }).size
+            : "?";
+        console.log(`DIAG ${label}: ALLOWED (size ${size})`);
+      } catch (error) {
+        console.log(
+          `DIAG ${label}: DENIED (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
+        );
+      }
+    };
+    await probe("Q1 sim_delegation_rules where cityId==cityA as fabricSvc", () =>
+      getDocs(
+        query(
+          collection(committerFs, "sim_delegation_rules"),
+          where("cityId", "==", "cityA")
+        )
+      )
+    );
+    await probe("Q2 sim_npcs where cityId==cityA as fabricSvc (control)", () =>
+      getDocs(query(collection(committerFs, "sim_npcs"), where("cityId", "==", "cityA")))
+    );
+    await probe("Q3 sim_delegation_rules where ownerUid==ownerA as ownerA (control)", () =>
+      getDocs(
+        query(
+          collection(ownerA.firestore(), "sim_delegation_rules"),
+          where("ownerUid", "==", "ownerA")
+        )
+      )
+    );
+    await probe("Q4 sim_situations where audienceCityId==cityA as fabricSvc (control)", () =>
+      getDocs(
+        query(
+          collection(committerFs, "sim_situations"),
+          where("audienceCityId", "==", "cityA")
+        )
+      )
+    );
+  }
+
+  // ======================================================================
   // N4 — The rule fire (P5-G1's trigger leg, P5-G2, P5-G7): a proposal
   // card carrying a delegated action spec is touched by its owner's
   // own situation.handle; the same wake's delegation pass fires
@@ -709,7 +772,9 @@ async function main() {
       now: nowIso(),
     });
     fireSituationId = card.situationId;
+    console.log("DIAG N4 stage: seeding the fixture card (Admin SDK)");
     await adminDb.doc(`sim_situations/${fireSituationId}`).set(card);
+    console.log("DIAG N4 stage: card seeded; submitting the owner's touch + wake");
 
     const treasuryBefore = await treasury("cityA");
     const cycle = wakeCounter + 1;
@@ -741,6 +806,7 @@ async function main() {
       },
       { targetCityIds: fireCityId ? [fireCityId] : [] }
     );
+    console.log("DIAG N4 stage: touch + wake returned");
     assert.equal(await actionStatus(touch.actionId), "resolved");
     const passes = touch.summary.passes;
     assert.ok(passes, "the wake ran its passes");
