@@ -1221,3 +1221,132 @@ on this push; watch items: N4 completes through `verifyOk()`; N5
 `DEPENDENTS_EXIST` as before.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 8, 2026-10-21.*
+
+## CI fix round 9 (PR #45) — N5: the output stood; the suite read it by a field the record never carries
+
+**The failure (CI on `0facbe3`):** Install + Rules + Vercel
+GREEN. Sim core: **N4 COMPLETES** — "ok N4 rule fire -> delegated
+action under mandate (NPC entries traced) -> card handled;
+verifier clean" (rounds 6–8 proven in the venue). N5 (the
+ask-first fire as an envelope) stopped at
+`tests/npc-core.test.ts:891`: "exactly one output record stands"
+— actual 0, expected 1, from
+`sim_task_outputs.where("taskId", "==", askTaskId)`.
+
+**Post-wake state evidence (the suite's own passed assertions,
+in execution order):** the ask-first rule fired as an envelope
+(`passes.delegation.fired`, kind "envelope") · the claim pass
+completed it in the same wake (`passes.claims.completed` =
+DONE) · the worker saw the claim standing RUNNING (npcId
+charA1) · the envelope doc stands **DONE**. The claim pass
+pushes `claims.completed` only when the terminal step's
+`commitStep` returns true, and the terminal plan commits
+output write + envelope patch + outcome entry wholesale — so
+the terminal transaction committed, output included. The only
+assertion that failed is the output READ. Segment indicted:
+**the read, not the chain** — spawn, claim, and terminal
+execution all proven by the suite itself before the stop.
+
+**Root cause — SUITE reading (hypothesis (c), the PR-6 loans
+class).** The output record (`TaskOutputRecord`, built by
+`buildTaskOutput`) carries `outputId`, `npcId`,
+`envelopeTaskId`, `outcome`, `outputText`,
+`structuredOutput`, `createdSeq`, `audienceUids` — **there is
+no `taskId` field on the record, and there never has been**.
+Outputs are addressed by doc id (`sim_task_outputs/{taskId}`):
+types.ts §4.3 ("exactly one per envelope, ever");
+`validateTaskOutput` ("exactly-one is provable only if the ids
+coincide" — `outputId === envelopeTaskId`); the terminal
+preconditions' own comment ("the output's id is the task id,
+so this is an existence check, not a query"); the verifier
+binds outputs by path + `recordsCreated`, never by a `taskId`
+field; and every production reader doc()-reads by id
+(`lib/situations/client.ts`, `components/sim/SpawnNpcForm.tsx`).
+A Firestore `where("taskId", "==", …)` matches only documents
+carrying that field — zero, standing or not. The suite was the
+only reader in the repo querying outputs by `taskId` (grep:
+four sites, all in `tests/npc-core.test.ts`).
+
+**Discriminations.** (a) CLAIM ELIGIBILITY — refuted twice.
+Behaviorally: CI proves the fire-spawned envelope was claimed
+and completed in the same wake. At the code level:
+`composeFirePlan` stamps `availableAt: snapshot.now` — the
+wake's own instant — so the claim planner's availability floor
+cannot bite, and the claim pass scans the live collection at
+pass time (after the delegation pass commits), not the
+wake-start snapshot; the assembly ruling (same-wake spawns
+claimable) is what the code does. The F-E9 sibling is not
+implicated: pass spawns inject the instant explicitly (W2's
+standing assertion). (b) TERMINAL EXECUTION — refuted: a
+revalidation failure terminates FAILED *with* an output record
+(outcome FAILED) and the envelope standing FAILED; the
+envelope stands DONE and `claims.completed` records DONE, so
+the terminal plan — whose output `planWrite` is unconditional
+once preconditions pass — committed whole. No silent-failure
+channel exists on this path: W14 proves the same resolver
+lands output + patch + entry as one bijection. (c) confirmed
+as above.
+
+**Fix (suite layer only; no engine code touched).** All four
+`where("taskId", …)` output reads become doc-id reads via the
+suite's `adminDoc` — the production reading:
+- N5: doc read + stands + `envelopeTaskId === askTaskId` +
+  outcome DONE (the exactly-one claim now rests on the §4.3
+  mechanism itself: the doc id is the task id and the record's
+  ids coincide).
+- N6 cancelled envelope: doc read === null. This assertion
+  previously passed **vacuously** — the field query returns 0
+  whether or not an output stands — so the F-E8
+  terminal-without-output assertion was no assertion at all;
+  it is one now.
+- N6 P5-K4 silent tasking and N10 novel NPC: doc read +
+  `envelopeTaskId` equality (both expected a standing output
+  and would have failed identically when reached).
+
+**Pin — W26 (wake harness 25 → 26).** The joint the pure
+venues had never chained: W13's claim-planner fixtures and
+W14's terminal fixtures are hand-built envelopes with past
+`availableAt`. W26 drives a **fire-spawned** envelope — the
+real `evaluateDelegationStep`, N5's shape (ask-first handler
+citing no mandate, a question card with no delegated spec) —
+asserts `availableAt === NOW` on the fire's own output, runs
+the real `planEnvelopeClaims` over that record (claimed in its
+own wake, nothing skipped), applies the real lifecycle
+`claimEnvelope` (the claim `claimEnvelopeTx` applies), and
+completes it through the real `resolveEnvelopeTerminalStep` in
+a world where the fire entry stands at the envelope's
+`createdSeq`. It asserts the whole bijection (output at
+`sim_task_outputs/{taskId}` with `outputId`/`envelopeTaskId`
+=== taskId and outcome DONE; envelope DONE with `outputId`
+set and claim cleared; one outcome entry whose
+`recordsCreated` names the output path and whose actor is the
+envelope actor) — and the record-shape fact the corrected
+suite reading rests on: **the output record's `taskId` field
+is `undefined`**, so a `taskId` field query can never match a
+standing output.
+
+**Sibling disposition.** N6's owner-direct envelopes ride
+the same claim pass and the same terminal step, and the
+defect was never spawn-path-specific: the suite's reading was
+wrong for every output. :974 (cancelled, owner-direct) was
+vacuous-pass; :1005 (silent direct tasking, owner-direct) and
+:1415 (N10) would have failed exactly as N5 did. All four
+sites are fixed; the engine paths for owner-direct spawns are
+untouched and were never indicted (their claims/completions
+are asserted from the wake summary and the envelope doc,
+which read correctly throughout).
+
+**Local regression (branch tip after this round):**
+`tsc --noEmit` clean · scoped ESLint on the two touched files
+0 errors · full pure battery green at landed counts
+(governance 59, banking 54, situations 32, wake **26** incl.
+the new W26, closeout 29, chains 34, cat2 34, cat1 all,
+defense 12, acq 14, market 27, lore 27; npc-core harness 37,
+authority + envelopes harnesses all-pass) · `next build`
+green. Emulator suites are CI's venue on this push; watch
+items: N5 completes through its outcome-entry assertions and
+`verifyOk()` (first exercise of both past :891), then N6's
+now-real output assertions, N7 trigger candidacy, N9(b)
+`DEPENDENTS_EXIST` as before.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 9, 2026-10-21.*
