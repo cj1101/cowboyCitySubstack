@@ -832,7 +832,10 @@ function adoptChronicleDraftHandler(ctx: HandlerContext): ResolutionPlan {
   const denied = requireSubjectOwnership(ctx, subjectCityId, actor);
   if (denied) return denied;
 
-  const layer = chosenCanonLayer(ctx, draft.canonLayer);
+  // The draft's own canonLayer field carries the "sim" BADGE, not a
+  // layer proposal — adoption defaults to `current` unless the
+  // owner's action names a canon layer explicitly.
+  const layer = chosenCanonLayer(ctx, "current");
   if (typeof layer !== "string") return layer;
 
   const title = str(draft, "title") ?? draftId;
