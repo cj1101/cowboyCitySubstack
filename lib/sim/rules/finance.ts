@@ -94,6 +94,7 @@ import {
   buildBankDepositDoc,
   buildSchedulePendingDraft,
   CHARTER_MIN_CAPITAL_RUBARS,
+  COVERAGE_CAP_RUBARS,
   deriveBankHealth,
   EQUITY_FLOOR_BPS,
   INSIDER_CAP_BPS,
@@ -112,6 +113,7 @@ import {
   createdSupplyOf,
   deriveLoanStanding,
   distributeProRata,
+  frozenClaimOf,
   fundingSourceOf,
   installmentPrincipalOf,
   isInsiderBorrower,
@@ -130,6 +132,7 @@ import {
   derivePremiumLadder,
   fundDeficient,
   fundRecordOf,
+  fundTargetBalanceRubars,
   insuredLiabilitiesForBank,
   premiumDueRubars,
   premiumRiskMultiplier,
@@ -445,6 +448,14 @@ function applyInsuredLiabilityDelta(
 
 function corporationRef(cityId: string, corporationId: string): LedgerRef {
   return { kind: "company", corporationId, cityId };
+}
+
+function personalRef(memberId: string): LedgerRef {
+  return { kind: "personal", memberId };
+}
+
+function treasuryRef(cityId: string): LedgerRef {
+  return { kind: "treasury", cityId };
 }
 
 // ---------------------------------------------------------------------------
@@ -4140,6 +4151,714 @@ function recapitalizeBankReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   if (from?.kind === "company") paths.push(corporationPath(from.cityId, from.corporationId));
   if (from?.kind === "treasury") paths.push(cityPath(from.cityId), `factions/${from.cityId}`);
   if (from?.kind === "personal") paths.push(memberAccountPath(from.memberId));
+  return { paths, queries };
+}
+
+// ---------------------------------------------------------------------------
+// B-10 — liquidate_bank (amendment §5). The waterfall, run ONCE, in
+// one Resolution Event, over figures frozen at the event's first
+// entry seq (REC-5: principal + credited + computable unsettled
+// interest at the failure seq — one basis for tier (c), coverage,
+// and setoff). Order: (a) taxes, (b) adjudicated payables (none
+// stand in this build — the derivation reads the corp doc's field,
+// which no Phase 5 verb writes), (c) depositors pro-rata on FULL
+// frozen claims net of setoff, (d) shareholders. B-13 pays inside
+// this event and nowhere else: FIRST the senior queue (earlier
+// failures' unpaid covered shortfalls, REC-7), then this failure's
+// covered shortfalls. Loans ASSIGN to the depositor pool with
+// setoff applied in-event; the charter surrenders and the company
+// dissolves in the same event (its payouts validate against the
+// estate's gross cash because the surrender lands in the plan
+// before the lines do). NO recursive liquidation: an interbank
+// loss this event evidences (RIDER-7 propagation lines) is
+// recognized by the affected bank's own derivation afterwards —
+// if it fails, that is a later event, player- or
+// derivation-triggered like any other.
+// ---------------------------------------------------------------------------
+
+function refKey(ref: LedgerRef): string {
+  switch (ref.kind) {
+    case "personal":
+      return `personal:${ref.memberId}`;
+    case "company":
+      return `company:${ref.cityId}:${ref.corporationId}`;
+    case "treasury":
+      return `treasury:${ref.cityId}`;
+    case "market":
+      return "market";
+    case "exterior":
+      return "exterior";
+    case "institution":
+      return `institution:${ref.institutionId}`;
+  }
+}
+
+interface LiquidationDepositFigure {
+  deposit: BankDepositRecord;
+  frozenClaim: number;
+  setoff: number;
+  netClaim: number;
+  covered: number;
+  estatePaid: number;
+  fundPaid: number;
+  fundShortfall: number;
+}
+
+function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-10";
+  const tierB = rejectTierBNpc(ctx, descriptorId);
+  if (tierB) return tierB;
+  const bankOrPlan = parseBankTarget(ctx, descriptorId);
+  if ("outcome" in bankOrPlan) return bankOrPlan;
+  const cityId = stringField(ctx.action, "cityId") as string;
+  const corporationId = stringField(ctx.action, "corporationId") as string;
+  const bank: BankTarget & { cityId: string; corporationId: string } = { ...bankOrPlan, cityId, corporationId };
+  const ownerId = bank.corp.ownerMemberId as string;
+  const actorId = actorMemberId(ctx.action.actor);
+  const trigger = sa(ctx.action).trigger === "depositor" ? "depositor" : "owner";
+  if (trigger === "owner") {
+    if (!actorId || actorId !== ownerId) {
+      return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], "B-10: voluntary liquidation is the bank owner's act. A depositor's trigger requires trigger: \"depositor\" and a derived failure.");
+    }
+  } else {
+    const depositId = stringField(ctx.action, "depositId");
+    const triggerDeposit = depositId ? depositRecordOf(snapshotDoc(ctx.snapshot, bankDepositPath(depositId))) : null;
+    if (!triggerDeposit || triggerDeposit.bankCorporationId !== corporationId || triggerDeposit.status !== "active") {
+      return rejectedPlan(descriptorId, "trigger-deposit-not-active", [descriptorId], "B-10: the depositor trigger names an ACTIVE deposit at this bank held by the actor.");
+    }
+    const control = borrowerControlRejection(ctx, descriptorId, triggerDeposit.depositor);
+    if (control) {
+      return rejectedPlan(descriptorId, "trigger-not-depositor", [descriptorId], "B-10: the actor does not control the named trigger deposit.");
+    }
+    if (deriveBankHealth(bank.corp) !== "insolvent") {
+      return rejectedPlan(descriptorId, "bank-not-failed", [descriptorId], `B-10: ${corporationId} does not derive failed on the REC-6 identity (solvent and liquid on its standing sheet) — a depositor's trigger requires a failed bank. (A bank failed ONLY by an uncured failed payment — solvent on paper, bounced in fact — awaits the Log-slice read seam named in the prep report; the owner may always liquidate voluntarily.)`);
+    }
+  }
+
+  // -- Read completeness (fail-closed) --------------------------------
+  const depositRows = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
+    .map(({ doc }) => depositRecordOf(doc))
+    .filter((d): d is BankDepositRecord => d !== null && d.bankCorporationId === corporationId);
+  const loanRows = queryDocs(ctx.snapshot, "bankLoans", "sim_bank_loans")
+    .map(({ doc }) => loanRecordOf(doc))
+    .filter((l): l is BankLoanRecord => l !== null && l.bankCorporationId === corporationId);
+  const activeDeposits = depositRows.filter((d) => d.status === "active");
+  const activeLoans = loanRows.filter((l) => l.status === "active");
+  for (const ref of [
+    ...activeDeposits.map((d) => d.depositor),
+    ...activeLoans.map((l) => l.borrower),
+  ]) {
+    if (ref.kind === "company" && !snapshotDoc(ctx.snapshot, corporationPath(ref.cityId, ref.corporationId))) {
+      return rejectedPlan(descriptorId, "liquidation-read-incomplete", [descriptorId], `B-10: the liquidation's read set does not cover corporation ${ref.corporationId} in ${ref.cityId} — a waterfall over a partial claimant set is not a waterfall. Name every involved city in the action's target cities and re-file.`);
+    }
+  }
+
+  const plan = emptyPlan(descriptorId);
+  const freezeSeq = ctx.snapshot.counterHead.lastSeq + 1;
+  const liquidationId = `liq_${ctx.resolutionId}`;
+  const fund = snapshotDoc(ctx.snapshot, INSURANCE_FUND_PATH);
+  const ladder = bankPremiumLadder(ctx.snapshot, corporationId);
+
+  // -- Charter surrender FIRST (the estate posture) -------------------
+  planMutate(plan, ctx.snapshot, bank.corpPath, "state", ["bank", "status", "retiredShares"], (current) => {
+    if (!current) return current;
+    const block = bankBlockOf(current as unknown as Record<string, unknown>);
+    return {
+      ...current,
+      bank: block ? { ...block, status: "surrendered" } : current.bank,
+      status: "dissolved",
+      retiredShares:
+        (typeof current.retiredShares === "number" ? current.retiredShares : 0) +
+        (typeof current.sharesOutstanding === "number" ? current.sharesOutstanding : 0),
+    };
+  });
+
+  // -- Freeze + setoff (§5.3, BNK-D16) --------------------------------
+  const figures = new Map<string, LiquidationDepositFigure>();
+  for (const deposit of activeDeposits) {
+    figures.set(deposit.depositId, {
+      deposit,
+      frozenClaim: frozenClaimOf(deposit, accruedUnsettledRubars(deposit, freezeSeq)),
+      setoff: 0,
+      netClaim: 0,
+      covered: 0,
+      estatePaid: 0,
+      fundPaid: 0,
+      fundShortfall: 0,
+    });
+  }
+  const setoffByLoan = new Map<string, number>();
+  const loansByBorrower = new Map<string, BankLoanRecord[]>();
+  for (const loan of activeLoans) {
+    const key = refKey(loan.borrower);
+    loansByBorrower.set(key, [...(loansByBorrower.get(key) ?? []), loan]);
+  }
+  const depositsByDepositor = new Map<string, BankDepositRecord[]>();
+  for (const deposit of activeDeposits) {
+    const key = refKey(deposit.depositor);
+    depositsByDepositor.set(key, [...(depositsByDepositor.get(key) ?? []), deposit]);
+  }
+  for (const [key, deposits] of depositsByDepositor) {
+    const loans = (loansByBorrower.get(key) ?? []).slice().sort((a, b) => a.loanId.localeCompare(b.loanId));
+    let owed = loans.reduce((sum, l) => sum + l.outstandingRubars, 0);
+    if (owed <= 0) continue;
+    for (const deposit of deposits.slice().sort((a, b) => a.depositId.localeCompare(b.depositId))) {
+      const figure = figures.get(deposit.depositId);
+      if (!figure || owed <= 0) continue;
+      const applied = Math.min(figure.frozenClaim, owed);
+      figure.setoff = applied;
+      owed -= applied;
+      let remaining = applied;
+      for (const loan of loans) {
+        if (remaining <= 0) break;
+        const room = loan.outstandingRubars - (setoffByLoan.get(loan.loanId) ?? 0);
+        const take = Math.min(room, remaining);
+        if (take > 0) {
+          setoffByLoan.set(loan.loanId, (setoffByLoan.get(loan.loanId) ?? 0) + take);
+          remaining -= take;
+        }
+      }
+    }
+  }
+  for (const figure of figures.values()) {
+    figure.netClaim = figure.frozenClaim - figure.setoff;
+  }
+  // Coverage (§5.5): per depositor, the cap applies across their
+  // ELIGIBLE deposits' combined net claims.
+  const fundRecord = fundRecordOf(fund);
+  for (const [, deposits] of depositsByDepositor) {
+    const eligible = deposits.filter((d) =>
+      depositCoveredClass(d, {
+        fund: fundRecord,
+        bankOwnerMemberId: ownerId,
+        suspensionIntervals: ladder.suspensionIntervals,
+      })
+    );
+    const eligibleNet = eligible.reduce((sum, d) => sum + (figures.get(d.depositId)?.netClaim ?? 0), 0);
+    let coveredTotal = Math.min(eligibleNet, COVERAGE_CAP_RUBARS);
+    const sorted = eligible.slice().sort((a, b) => (figures.get(b.depositId)?.netClaim ?? 0) - (figures.get(a.depositId)?.netClaim ?? 0));
+    for (const deposit of sorted) {
+      const figure = figures.get(deposit.depositId);
+      if (!figure) continue;
+      const share =
+        deposit === sorted[sorted.length - 1]
+          ? coveredTotal
+          : eligibleNet > 0
+            ? Math.floor((coveredTotal * figure.netClaim) / Math.max(eligibleNet, 1))
+            : 0;
+      figure.covered = Math.min(share, figure.netClaim);
+      coveredTotal -= figure.covered;
+    }
+  }
+
+  // -- The waterfall ----------------------------------------------------
+  const cash = typeof bank.corp.companyCashRubars === "number" ? bank.corp.companyCashRubars : 0;
+  const lines: TransferLine[] = [];
+  const taxPayables = (bank.corp.taxPayables as Record<string, number> | undefined) ?? {};
+  const taxCities = Object.keys(taxPayables).filter((c) => taxPayables[c] > 0);
+  const taxTotal = taxCities.reduce((sum, c) => sum + taxPayables[c], 0);
+  const taxDistribution = distributeProRata(
+    Math.min(cash, taxTotal),
+    taxCities.map((c) => ({ key: c, weight: taxPayables[c], cap: taxPayables[c] }))
+  );
+  let taxPaidTotal = 0;
+  for (const taxCity of taxCities) {
+    const paid = taxDistribution.payouts.get(taxCity) ?? 0;
+    taxPaidTotal += paid;
+    if (paid > 0) {
+      lines.push({
+        from: corporationRef(cityId, corporationId),
+        to: treasuryRef(taxCity),
+        amountRubars: paid,
+        ruleId: descriptorId,
+        memo: `liquidation waterfall tier (a) — taxes owed to ${taxCity}`,
+      });
+    }
+  }
+  let cashLeft = cash - taxPaidTotal;
+  const tierCDistribution = distributeProRata(
+    cashLeft,
+    activeDeposits.map((d) => {
+      const net = figures.get(d.depositId)?.netClaim ?? 0;
+      return { key: d.depositId, weight: net, cap: net };
+    })
+  );
+  let estatePaidTotal = 0;
+  for (const deposit of activeDeposits) {
+    const figure = figures.get(deposit.depositId);
+    const paid = tierCDistribution.payouts.get(deposit.depositId) ?? 0;
+    if (figure) figure.estatePaid = paid;
+    estatePaidTotal += paid;
+  }
+  cashLeft -= estatePaidTotal;
+  for (const figure of figures.values()) {
+    if (figure.estatePaid > 0) {
+      lines.push({
+        from: corporationRef(cityId, corporationId),
+        to: figure.deposit.depositor,
+        amountRubars: figure.estatePaid,
+        ruleId: descriptorId,
+        memo: `liquidation waterfall tier (c) — estate payment on frozen claim ${figure.frozenClaim} R (net ${figure.netClaim} R after setoff)`,
+      });
+    }
+  }
+  // B-13: senior queue first, then this failure's top-ups.
+  let fundCashLeft = fund ? fundCashOf(fund) : 0;
+  const seniorPaid: { deposit: BankDepositRecord; paid: number }[] = [];
+  if (fund) {
+    const allDeposits = queryDocs(ctx.snapshot, "allDeposits", "sim_bank_deposits")
+      .map(({ doc }) => depositRecordOf(doc))
+      .filter((d): d is BankDepositRecord => d !== null);
+    for (const queued of queuedShortfallsOf(allDeposits)) {
+      if (fundCashLeft <= 0) break;
+      const paid = Math.min(queued.shortfallRubars, fundCashLeft);
+      if (paid <= 0) continue;
+      const queuedRecord = allDeposits.find((d) => d.depositId === queued.depositId);
+      if (!queuedRecord) continue;
+      fundCashLeft -= paid;
+      seniorPaid.push({ deposit: queuedRecord, paid });
+      lines.push({
+        from: difRef(),
+        to: queued.depositor,
+        amountRubars: paid,
+        ruleId: "B-13",
+        memo: `B-13 senior queue — queued covered shortfall from the liquidation of ${queued.bankCorporationId} settles before any newer failure's top-ups (REC-7)`,
+      });
+    }
+    const topUps = [...figures.values()].map((figure) => {
+      const estateOnCovered =
+        figure.netClaim > 0 ? Math.floor((figure.estatePaid * figure.covered) / figure.netClaim) : 0;
+      return { figure, due: Math.max(0, figure.covered - estateOnCovered) };
+    });
+    const topUpDistribution = distributeProRata(
+      fundCashLeft,
+      topUps.map((t) => ({ key: t.figure.deposit.depositId, weight: t.due, cap: t.due }))
+    );
+    for (const t of topUps) {
+      const paid = topUpDistribution.payouts.get(t.figure.deposit.depositId) ?? 0;
+      t.figure.fundPaid = paid;
+      t.figure.fundShortfall = t.due - paid;
+      fundCashLeft -= paid;
+      if (paid > 0) {
+        lines.push({
+          from: difRef(),
+          to: t.figure.deposit.depositor,
+          amountRubars: paid,
+          ruleId: "B-13",
+          memo: `B-13 payout inside liquidation ${liquidationId} — covered shortfall on deposit ${t.figure.deposit.depositId}${t.figure.fundShortfall > 0 ? `; ${t.figure.fundShortfall} R queues senior unpaid (REC-7)` : ""}`,
+        });
+      }
+    }
+  }
+  // (d) shareholders.
+  const holdingRows = queryDocs(ctx.snapshot, "bankHoldings", "sim_holdings").filter(
+    ({ doc }) => doc.corporationId === corporationId && typeof doc.quantityShares === "number" && doc.quantityShares > 0
+  );
+  const dividendDistribution = distributeProRata(
+    cashLeft,
+    holdingRows.map((row) => ({
+      key: row.path,
+      weight: row.doc.quantityShares as number,
+      cap: cashLeft,
+    }))
+  );
+  let dividendsTotal = 0;
+  for (const row of holdingRows) {
+    const paid = dividendDistribution.payouts.get(row.path) ?? 0;
+    dividendsTotal += paid;
+    if (paid > 0) {
+      lines.push({
+        from: corporationRef(cityId, corporationId),
+        to: personalRef(row.doc.memberId as string),
+        amountRubars: paid,
+        ruleId: descriptorId,
+        memo: "liquidation waterfall tier (d) — residual to shareholders pro-rata",
+      });
+    }
+  }
+  cashLeft -= dividendsTotal;
+
+  const appliedLines = applyTransferLines({ plan, snapshot: ctx.snapshot, lines, shortfallClass: "custodial" });
+  if (!appliedLines.ok) {
+    return rejectedPlan(descriptorId, "waterfall-unpayable", [descriptorId], `B-10: the waterfall does not validate: ${appliedLines.message}`);
+  }
+  const tagged: TaggedChange[] = [...appliedLines.changes];
+
+  // -- Senior-queue record updates --------------------------------------
+  const recordChanges: SimChange[] = [
+    fieldChange(`corporations/${corporationId}.status`, bank.corp.status ?? null, "dissolved", "B-10 liquidation — the company dissolves in the event that runs its waterfall"),
+    fieldChange(`corporations/${corporationId}.bank.status`, "active", "surrendered", "B-10 liquidation — the charter surrenders; the premium chain ends (no successor after the charter ends, SPEC-1)"),
+  ];
+  const recordsUpdated: string[] = [bank.corpPath];
+  for (const { deposit, paid } of seniorPaid) {
+    const path = bankDepositPath(deposit.depositId);
+    planMutate(plan, ctx.snapshot, path, "state", ["liquidation.fundPaidRubars", "liquidation.fundShortfallRubars"], (current) => {
+      if (!current) return current;
+      const record = current as unknown as BankDepositRecord;
+      if (!record.liquidation) return current;
+      return {
+        ...current,
+        liquidation: {
+          ...record.liquidation,
+          fundPaidRubars: record.liquidation.fundPaidRubars + paid,
+          fundShortfallRubars: record.liquidation.fundShortfallRubars - paid,
+        },
+      };
+    });
+    recordChanges.push(
+      fieldChange(`bankDeposits/${deposit.depositId}.liquidation.fundShortfallRubars`, deposit.liquidation?.fundShortfallRubars ?? 0, (deposit.liquidation?.fundShortfallRubars ?? 0) - paid, "B-13 senior queue — the queued shortfall settles inside this liquidation, before its own top-ups")
+    );
+    recordsUpdated.push(path);
+  }
+
+  // -- Assignment + deposit sweep ----------------------------------------
+  const aggregateDeltas: { field: "loanBookRubars" | "insiderLoansRubars" | "depositLiabilitiesRubars" | "seizedAssetsRubars"; amount: number }[] = [
+    { field: "loanBookRubars", amount: -(typeof bank.bank.loanBookRubars === "number" ? bank.bank.loanBookRubars : 0) },
+    { field: "insiderLoansRubars", amount: -(typeof bank.bank.insiderLoansRubars === "number" ? bank.bank.insiderLoansRubars : 0) },
+    { field: "depositLiabilitiesRubars", amount: -(typeof bank.bank.depositLiabilitiesRubars === "number" ? bank.bank.depositLiabilitiesRubars : 0) },
+    { field: "seizedAssetsRubars", amount: -seizedAssetsOf(bank.bank) },
+  ];
+  for (const delta of aggregateDeltas) {
+    if (delta.amount !== 0) tagged.push(applyBankAggregateDelta(plan, ctx, bank, delta.field, delta.amount, descriptorId));
+  }
+  for (const loan of activeLoans) {
+    const setoff = setoffByLoan.get(loan.loanId) ?? 0;
+    planMutate(plan, ctx.snapshot, bankLoanPath(loan.loanId), "state", ["status", "assignee", "assignedAtSeq", "outstandingRubars", "setoffAppliedRubars"], (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        status: "assigned",
+        assignee: `depositor-pool:${corporationId}`,
+        assignedAtSeq: freezeSeq,
+        outstandingRubars: loan.outstandingRubars - setoff,
+        setoffAppliedRubars: loan.setoffAppliedRubars + setoff,
+      };
+    });
+    recordsUpdated.push(bankLoanPath(loan.loanId));
+  }
+  for (const figure of figures.values()) {
+    const deposit = figure.deposit;
+    planMutate(plan, ctx.snapshot, bankDepositPath(deposit.depositId), "state", ["status", "liquidation"], (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        status: "assigned",
+        liquidation: {
+          liquidationId,
+          liquidationResolutionId: ctx.resolutionId,
+          bankCorporationId: corporationId,
+          frozenClaimRubars: figure.frozenClaim,
+          coveredRubars: figure.covered,
+          uninsuredRubars: figure.netClaim - figure.covered,
+          setoffRubars: figure.setoff,
+          estatePaidRubars: figure.estatePaid,
+          fundPaidRubars: figure.fundPaid,
+          fundShortfallRubars: figure.fundShortfall,
+          poolDistributedRubars: 0,
+          fundRecoveredRubars: 0,
+          liquidatedAtSeq: freezeSeq,
+        },
+      };
+    });
+    recordsUpdated.push(bankDepositPath(deposit.depositId));
+  }
+  // The fund's insured aggregate sheds this bank's contribution.
+  if (fund) {
+    const shed = insuredLiabilitiesForBank({
+      deposits: activeDeposits,
+      bankCorporationId: corporationId,
+      fund: fundRecord,
+      bankOwnerMemberId: ownerId,
+      suspensionIntervals: ladder.suspensionIntervals,
+    });
+    if (shed > 0) {
+      planMutate(plan, ctx.snapshot, INSURANCE_FUND_PATH, "state", ["totalInsuredLiabilitiesRubars"], (current) => {
+        if (!current) return current;
+        const before = typeof current.totalInsuredLiabilitiesRubars === "number" ? current.totalInsuredLiabilitiesRubars : 0;
+        return { ...current, totalInsuredLiabilitiesRubars: before - shed };
+      });
+      recordChanges.push(
+        fieldChange("institutionAccount.totalInsuredLiabilitiesRubars", insuredAggregateOf(fund), insuredAggregateOf(fund) - shed, "B-10 — the liquidated bank's deposits leave the insured aggregate as their claims sweep to the pool (A-B6)")
+      );
+      recordsUpdated.push(INSURANCE_FUND_PATH);
+    }
+  }
+  // Shares retire with the dissolution.
+  const recordsCreated: string[] = [];
+  for (const row of holdingRows) {
+    planWrite(plan, ctx.snapshot, row.path, null, "state", ["quantityShares", "committedShares"]);
+    recordsUpdated.push(row.path);
+    recordChanges.push(
+      fieldChange(`holdings/${row.doc.memberId as string}__${corporationId}.quantityShares`, row.doc.quantityShares as number, 0, "B-10 — the dissolved bank's shares retire with the company (holdings close; retiredShares carries the count)")
+    );
+  }
+
+  // -- Propagation lines (RIDER-7) ---------------------------------------
+  const propagation: Record<string, unknown>[] = [];
+  for (const figure of figures.values()) {
+    const depositor = figure.deposit.depositor;
+    if (depositor.kind !== "company") continue;
+    const corp = snapshotDoc(ctx.snapshot, corporationPath(depositor.cityId, depositor.corporationId));
+    const theirBank = corp ? bankBlockOf(corp) : null;
+    if (!theirBank || theirBank.status !== "active") continue;
+    const poolUnpaid = figure.netClaim - figure.estatePaid - figure.fundPaid;
+    propagation.push({
+      sourceInstitutionId: corporationId,
+      exposureRecordId: figure.deposit.depositId,
+      edgeKind: "interbank-deposit",
+      amountBefore: figure.frozenClaim,
+      amountAfter: figure.estatePaid + figure.fundPaid,
+      lossRecognized: figure.netClaim - figure.estatePaid - figure.fundPaid,
+      ruleId: "B-10",
+      causedBySeq: freezeSeq,
+      idempotenceKey: `${figure.deposit.depositId}:${liquidationId}:${freezeSeq}`,
+      poolClaimOutstandingRubars: poolUnpaid,
+    });
+  }
+
+  // -- Cards: D1 per depositor, B6/B7 per borrower, K5, K2 terminal ------
+  const cardSeq = freezeSeq + 1;
+  const situationClaims = { created: [] as string[], updated: [] as string[] };
+  for (const [key, deposits] of depositsByDepositor) {
+    const depositor = deposits[0].depositor;
+    const totals = deposits.reduce(
+      (acc, d) => {
+        const f = figures.get(d.depositId);
+        if (!f) return acc;
+        return {
+          frozen: acc.frozen + f.frozenClaim,
+          covered: acc.covered + f.covered,
+          estate: acc.estate + f.estatePaid,
+          fundPaid: acc.fundPaid + f.fundPaid,
+          shortfall: acc.shortfall + f.fundShortfall,
+          setoff: acc.setoff + f.setoff,
+          pool: acc.pool + (f.netClaim - f.estatePaid - f.fundPaid),
+        };
+      },
+      { frozen: 0, covered: 0, estate: 0, fundPaid: 0, shortfall: 0, setoff: 0, pool: 0 }
+    );
+    const addressing = situationAddressingFor(ctx.snapshot, depositor, cityId);
+    const card = mintSituation(
+      plan,
+      ctx,
+      buildIncidentSituation({
+        cityId,
+        audienceCityId: cityId,
+        audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+        recipientUid: addressing.recipientUid ?? null,
+        severity: "major",
+        createdSeq: cardSeq,
+        now: ctx.snapshot.now,
+        sourceSeq: freezeSeq,
+        sourceResolutionId: ctx.resolutionId,
+        title: `${corporationId} has been liquidated — your claim`,
+        summary: `${corporationId} was liquidated at seq ${freezeSeq}. Your frozen claim: ${totals.frozen} R${totals.setoff > 0 ? ` (${totals.setoff} R set off against your borrowing)` : ""}. The estate paid ${totals.estate} R; the Deposit Insurance Fund paid ${totals.fundPaid} R of your ${totals.covered} R covered portion${totals.shortfall > 0 ? `; ${totals.shortfall} R of covered shortfall queues senior unpaid` : ""}. ${totals.pool} R stands as your pool claim against the bank's assigned loan book.`,
+        consequenceSummary: `Covered portion: ${totals.covered} R (cap ${COVERAGE_CAP_RUBARS} R per depositor per bank); uninsured: ${totals.frozen - totals.setoff - totals.covered} R. Pool distributions route first to the fund until its payout on your claim is recovered (subrogation — derived, never stored), then to you. The pool closing entry will supersede this card with final figures.`,
+        ask: "No action is required. Borrowers repay the pool under B-07's pool form; distributions arrive as events, each logged.",
+        amountRubars: totals.frozen,
+        subject: { kind: "corporation", id: corporationId },
+      })
+    );
+    situationClaims.created.push(...card.created);
+    situationClaims.updated.push(...card.updated);
+    void key;
+  }
+  for (const [key, loans] of loansByBorrower) {
+    const assigned = loans.filter((l) => l.status === "active");
+    if (assigned.length === 0) continue;
+    const borrower = assigned[0].borrower;
+    const addressing = situationAddressingFor(ctx.snapshot, borrower, cityId);
+    const linesText = assigned
+      .map((l) => {
+        const setoff = setoffByLoan.get(l.loanId) ?? 0;
+        return `loan ${l.loanId}: outstanding ${l.outstandingRubars - setoff} R assigned to the depositor pool${setoff > 0 ? ` (setoff of ${setoff} R applied against your deposits at this bank — your net position was computed claim-first, BNK-D16)` : ""}; schedule and collateral unchanged`;
+      })
+      .join("; ");
+    const card = mintSituation(
+      plan,
+      ctx,
+      buildIncidentSituation({
+        cityId,
+        audienceCityId: cityId,
+        audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+        recipientUid: addressing.recipientUid ?? null,
+        severity: "important",
+        createdSeq: cardSeq,
+        now: ctx.snapshot.now,
+        sourceSeq: freezeSeq,
+        sourceResolutionId: ctx.resolutionId,
+        title: `Your loans at ${corporationId} are assigned to the depositor pool`,
+        summary: `${corporationId} was liquidated; its loan book assigns to the depositor pool. ${linesText}.`,
+        consequenceSummary: "Repayment continues under B-07's pool form — same schedule, same rates, same collateral. Excess obligations beyond your claims survive as unsecured pool obligations, stated per loan above.",
+        ask: "Keep repaying on schedule — to the pool now. Nothing else changes.",
+        subject: { kind: "corporation", id: corporationId },
+      })
+    );
+    situationClaims.created.push(...card.created);
+    situationClaims.updated.push(...card.updated);
+    void key;
+  }
+  if (trigger === "depositor") {
+    const addressing = situationAddressingFor(ctx.snapshot, personalRef(ownerId), cityId);
+    const card = mintSituation(
+      plan,
+      ctx,
+      buildIncidentSituation({
+        cityId,
+        audienceCityId: cityId,
+        audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+        recipientUid: ownerId,
+        severity: "major",
+        createdSeq: cardSeq,
+        now: ctx.snapshot.now,
+        sourceSeq: freezeSeq,
+        sourceResolutionId: ctx.resolutionId,
+        title: `Your bank ${corporationId} was liquidated on a depositor's trigger`,
+        summary: `A depositor of ${corporationId} exercised the B-10 trigger against a bank deriving failed; the waterfall ran in this event. Depositor claims froze at seq ${freezeSeq}; the charter is surrendered and the company dissolved.`,
+        consequenceSummary: "The full waterfall, the frozen figures, and every payout stand in this event's Log entries. Your controller position is barred from a new charter under B-01's controller bar until its conditions pass.",
+        ask: "No action is available — liquidation is final. The Log is the record.",
+        subject: { kind: "corporation", id: corporationId },
+      })
+    );
+    situationClaims.created.push(...card.created);
+    situationClaims.updated.push(...card.updated);
+  }
+  const episodeStanding = findSituation(
+    ctx,
+    (doc) =>
+      doc.dedupeKey ===
+        dedupeKeyFor({
+          sourceKind: "system",
+          sourceId: episodeSourceId(`bank:${corporationId}`, "failed-payment"),
+          situationKind: "incident",
+          audienceKey: cityId,
+        }) && doc.status === "open"
+  );
+  if (episodeStanding) {
+    const closedPath = closeSituationWhere(plan, ctx, (doc) => doc.situationId === episodeStanding.situationId, {
+      resolvedSeq: freezeSeq,
+      resolutionId: ctx.resolutionId,
+    });
+    if (closedPath) situationClaims.updated.push(closedPath);
+  }
+
+  // -- Entries ------------------------------------------------------------
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId,
+      cityIds: [cityId],
+      ruleIds: [descriptorId],
+      major: true,
+      changes: recordChanges,
+      recordsCreated: [...recordsCreated, ...situationClaims.created],
+      recordsUpdated: [...recordsUpdated, ...situationClaims.updated],
+      summaryText: `B-10: ${corporationId} liquidated (${trigger} trigger) — claims frozen at seq ${freezeSeq} on the REC-5 basis. Waterfall: (a) taxes ${taxPaidTotal} R; (b) adjudicated 0 R (no adjudicated payables stand); (c) depositors ${estatePaidTotal} R pro-rata on full frozen claims; B-13 paid ${seniorPaid.reduce((s, p) => s + p.paid, 0)} R of senior queued shortfalls BEFORE this failure's top-ups of ${[...figures.values()].reduce((s, f) => s + f.fundPaid, 0)} R; (d) shareholders ${dividendsTotal} R; ${cashLeft} R remains as dust on the dissolved record. ${activeLoans.length} loan(s) assigned to depositor-pool:${corporationId} with setoff applied in-event. No bank was liquidated recursively in this pass — interbank losses stand as propagation lines for the affected banks' own derivations.`,
+    })
+  );
+  pushMovementEntries(plan, ctx, descriptorId, tagged, (entryCityId) =>
+    entryCityId === cityId
+      ? `B-10: ${corporationId}'s estate movements — the waterfall's cash legs and the zeroing of its loan book, insider book, deposit liabilities, and seized-asset aggregate as the claims sweep to the pool (A-B1/A-B2/A-B7 pairs).`
+      : entryCityId === null
+        ? "B-10: the Deposit Insurance Fund's legs — B-13 payouts inside this liquidation only (senior queue first), and the insured aggregate shedding the failed bank's contribution (A-B6)."
+        : `B-10: a payee ledger in ${entryCityId} received its waterfall share of ${corporationId}'s liquidation.`
+  );
+
+  const fundAfter = fund ? plannedDoc(plan, ctx.snapshot, INSURANCE_FUND_PATH) : null;
+  const fundAfterRecord = fundRecordOf(fundAfter);
+  const totalInsuredAfter = fundAfter ? insuredAggregateOf(fundAfter) : 0;
+  const summarySeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + 1;
+  const deficientAfter = fundAfterRecord
+    ? fundDeficient({ fund: fundAfterRecord, insuredLiabilitiesRubars: totalInsuredAfter, atSeq: summarySeq })
+    : false;
+  const deficitAfter = fundAfter ? Math.max(0, fundTargetBalanceRubars(totalInsuredAfter) - fundCashOf(fundAfter)) : 0;
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "liquidate-bank",
+    scope: "bank",
+    cityId,
+    summaryText: `Liquidated ${corporationId} (${trigger} trigger): waterfall ran over claims frozen at seq ${freezeSeq}; ${activeLoans.length} loan(s) assigned to the depositor pool; charter surrendered, company dissolved.${fund ? ` Fund ${deficientAfter ? `derives DEFICIENT after this event (deficit ${deficitAfter} R) — B-14 supplemental assessments arise against surviving banks at their next premium ripenings, computed exactly from each bank's own insured liabilities` : "remains within its target ratio"}.` : ""}`,
+    major: true,
+    classificationExtra: {
+      banking: {
+        bankCorporationId: corporationId,
+        controllerMemberId: ownerId,
+        liquidationId,
+        trigger,
+        failureSeq: freezeSeq,
+      },
+      propagation,
+      dif: {
+        seniorQueuePaidRubars: seniorPaid.reduce((s, p) => s + p.paid, 0),
+        topUpsPaidRubars: [...figures.values()].reduce((s, f) => s + f.fundPaid, 0),
+        queuedShortfallRubars: [...figures.values()].reduce((s, f) => s + f.fundShortfall, 0),
+        deficientAfter,
+        deficitRubars: deficitAfter,
+      },
+    },
+  });
+}
+
+function fundCashOf(fundDoc: Record<string, unknown>): number {
+  return typeof fundDoc.fundCashRubars === "number" ? fundDoc.fundCashRubars : 0;
+}
+
+function insuredAggregateOf(fundDoc: Record<string, unknown>): number {
+  return typeof fundDoc.totalInsuredLiabilitiesRubars === "number"
+    ? fundDoc.totalInsuredLiabilitiesRubars
+    : 0;
+}
+
+function liquidateBankReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [
+    {
+      id: "allMemberAccounts",
+      collectionPath: "sim_member_accounts",
+      filters: [],
+    },
+    { id: "allCities", collectionPath: "sim_cities", filters: [] },
+    { id: "allDeposits", collectionPath: "sim_bank_deposits", filters: [] },
+  ];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(
+      ...premiumQueries(record.corporationId),
+      ...situationKeyQueries(record.cityId),
+      {
+        id: "bankDeposits",
+        collectionPath: "sim_bank_deposits",
+        filters: [{ field: "bankCorporationId", op: "==", value: record.corporationId }],
+      },
+      {
+        id: "bankLoans",
+        collectionPath: "sim_bank_loans",
+        filters: [{ field: "bankCorporationId", op: "==", value: record.corporationId }],
+      },
+      {
+        id: "bankHoldings",
+        collectionPath: "sim_holdings",
+        filters: [{ field: "corporationId", op: "==", value: record.corporationId }],
+      }
+    );
+    const cityIds = new Set<string>([record.cityId]);
+    const targets = (seeds.action as { targetCityIds?: unknown }).targetCityIds;
+    if (Array.isArray(targets)) {
+      for (const t of targets) if (typeof t === "string") cityIds.add(t);
+    }
+    for (const cid of cityIds) {
+      queries.push({
+        id: `cityCorporations_${cid}`,
+        collectionPath: `sim_cities/${cid}/corporations`,
+        filters: [],
+      });
+      paths.push(cityPath(cid), `factions/${cid}`);
+    }
+  }
+  if (typeof record.depositId === "string" && record.depositId) {
+    paths.push(bankDepositPath(record.depositId));
+  }
   return { paths, queries };
 }
 
