@@ -1269,6 +1269,21 @@ async function main() {
     fabric: true,
     fabricRole: "worker",
   });
+  // G-2 (go-live readiness §1.4): the negative claim rows — a token
+  // carrying fabric: true with the fabricRole MISSING, and one with it
+  // MISSPELLED, is not a fabric service at all (isFabricService /
+  // isFabricCommitter read the role verbatim). No user docs are seeded
+  // for these uids: the clauses asserted below are claim-only, so the
+  // denials are attributable to the claim shape alone.
+  const fabricNoRole = env.authenticatedContext("fabricNoRole", {
+    email: "norole@realm.test",
+    fabric: true,
+  });
+  const fabricBadRole = env.authenticatedContext("fabricBadRole", {
+    email: "badrole@realm.test",
+    fabric: true,
+    fabricRole: "commiter",
+  });
 
   // Phase 2: the entry fixture is the v2 form (brief §9.1) — v1 survives
   // only as the genesis carve-out, so a seq-2 fixture must be v2, with the
@@ -1336,6 +1351,17 @@ async function main() {
           method: { kindLabel: "test", methodRef: "log:1" },
           collectionResolutionId: "r1",
         })
+      );
+    }
+    // G-2: the fabric:true-without-a-valid-fabricRole tokens are
+    // denied on BOTH claim-gated paths (committer-only world write;
+    // either-role fabric status write) — they get only what an
+    // ordinary signed-in user gets, which is neither of these.
+    for (const actor of [fabricNoRole, fabricBadRole]) {
+      const fs = actor.firestore();
+      await assertFails(updateDoc(doc(fs, "sim_world", "current"), { lastCommittedSeq: 99 }));
+      await assertFails(
+        setDoc(doc(fs, "sim_fabric_status", "current"), { note: "spoofed status" })
       );
     }
     // The committer succeeds on shape-valid creates.

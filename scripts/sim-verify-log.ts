@@ -14,7 +14,10 @@
 
 import type { Firestore } from "firebase-admin/firestore";
 import { verifyStandingLog, type StandingWorld } from "../lib/sim/verify";
-import { PRODUCTION_BASELINE_REGISTRY } from "../lib/sim/baseline/registry";
+import {
+  PRODUCTION_BASELINE_REGISTRY,
+  projectBaselineStamp,
+} from "../lib/sim/baseline/registry";
 import { getSimDb, requireEmulator } from "./sim-admin";
 
 async function collectStateDocs(db: Firestore): Promise<Map<string, Record<string, unknown>>> {
@@ -64,7 +67,10 @@ async function main() {
     counter,
     world,
     stateDocs,
-    baselineRegistry: PRODUCTION_BASELINE_REGISTRY,
+    // The genesis stamp projection (runbook §3.3): the standing world
+    // doc's Baseline stamp makes the ratified version citable from the
+    // genesis seq; a stamp-less world projects nothing (fail-closed).
+    baselineRegistry: projectBaselineStamp(PRODUCTION_BASELINE_REGISTRY, world),
   };
   const result = verifyStandingLog(input);
   if (result.ok) {
