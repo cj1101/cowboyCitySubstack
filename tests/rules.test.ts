@@ -1961,6 +1961,7 @@ async function main() {
   // denial is the discriminative half of committer-only).
   // ----------------------------------------------------------------------
   {
+    const committerFs = fabricCommitter.firestore();
     const marketSeeds: Array<[string, string, Record<string, unknown>]> = [
       ["sim_market_account", "main", { kind: "market-account", cashRubars: 1000000 }],
       ["sim_market_listings", "corp_seed1", { corporationId: "corp_seed1", status: "listed" }],
