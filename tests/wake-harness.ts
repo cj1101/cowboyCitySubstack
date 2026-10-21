@@ -49,6 +49,15 @@
  *           completing with exactly one output — addressed by doc
  *           id, the record carrying outputId/envelopeTaskId and no
  *           `taskId` field (PR #45 fix round 9's regression pin).
+ *   W27     the fixture-economy trap, chained through the real
+ *           handlers: fixture_adjust on a money field clamps it to
+ *           [0,1000] (500,000 → 1,000), and a later fixture_fund
+ *           against the clamped treasury rejects
+ *           INSUFFICIENT_TREASURY and writes NO pending — while the
+ *           same fund against the standing treasury resolves and
+ *           creates pend_<actionId>_01 (PR #45 fix round 10's
+ *           regression pin; the gate suite's N6 drive → N7 fundB
+ *           starvation).
  *
  * Every composed plan runs the real validatePlan (the committer's
  * §5.6/§6.3 guards incl. F-02 reconciliation) before assertions.
@@ -1783,6 +1792,104 @@ check("W26 an ask-first fire's envelope is claimable in its own wake and complet
   assert.equal(termPlan.entries.length, 1);
   assert.deepEqual(termPlan.entries[0].recordsCreated, [`sim_task_outputs/${taskId}`]);
   assert.equal(termPlan.entries[0].actor.envelopeId, taskId);
+});
+
+section("W27 — the fixture-economy trap: a clamped treasury starves a later fund (PR #45 CI round 10)");
+
+check("W27 fixture_adjust on a money field clamps it to [0,1000]; fixture_fund then rejects INSUFFICIENT_TREASURY writing no pending — the unclamped control funds and creates pend_<actionId>_01", () => {
+  // PR #45 CI round 10: the gate suite's N7 died at "pending B
+  // stands" — pend_<fundB.actionId>_01 never existed. The chain,
+  // proven here through the real handlers: the suite seeded cityB
+  // treasuryRubars 500,000; N6's wake-driving fixture_adjust on
+  // stats.treasuryRubars (delta 1) clamped it to 1,000 (the
+  // FIXTURE-ADJUST handler bounds every stat it touches to
+  // [0,1000]); N7's fixture_fund of 10,000 R then hit the fund
+  // handler's designed guard (amount > treasury →
+  // INSUFFICIENT_TREASURY), the resolution was rejected, and a
+  // rejected resolution writes no pending. CityA was untouched by
+  // any treasury-field adjust, so fundA resolved — the asymmetry
+  // that localised the defect. The suite fix drives N6's wake on
+  // stats.infrastructure instead; this check pins the engine facts
+  // the construction rule rests on.
+  const OWNER_B: SimActor = {
+    type: "member", memberId: "ownerB", npcId: null, onBehalfOfMemberId: null,
+    mandateId: null, mandateVersion: null, envelopeId: null,
+  };
+  const cityBDoc = (treasuryRubars: number): Record<string, unknown> => ({
+    cityId: "cityB",
+    stats: { infrastructure: 80, treasuryRubars },
+    stateVersion: 1,
+  });
+  const memberAction = (
+    req: string,
+    actionType: string,
+    structuredAction: Record<string, unknown>
+  ): SimAction => {
+    const { doc } = buildActionDoc({
+      actorUid: "ownerB",
+      clientRequestId: req,
+      actor: OWNER_B,
+      actionType,
+      structuredAction,
+      targetCityIds: ["cityB"],
+      now: NOW,
+    });
+    return { ...doc, status: "confirmed" };
+  };
+  const fundParams = {
+    cityId: "cityB",
+    fundName: "W27 Fund",
+    fundId: "fundW27",
+    amountRubars: 10_000,
+    mode: "determinate",
+    effectField: "stats.treasuryRubars",
+    effectDelta: 1,
+    disbursementRubars: 10_000,
+  };
+
+  // (1) The drive: fixture_adjust +1 on cityB's money field.
+  const docs = baseDocs();
+  docs.set("sim_cities/cityB", cityBDoc(500_000));
+  const adjustPlan = runActionAt(
+    docs,
+    memberAction("req-w27-adjust", "fixture_adjust", {
+      cityId: "cityB", field: "stats.treasuryRubars", delta: 1,
+    }),
+    NOW
+  );
+  assert.equal(adjustPlan.outcome, "resolved");
+  const clampedCity = planWriteFor(adjustPlan, "sim_cities/cityB")?.afterDoc as Record<string, unknown>;
+  assert.equal(
+    (clampedCity.stats as Record<string, unknown>).treasuryRubars,
+    1000,
+    "the clamp lands the treasury at 1,000 — a seeded 500,000 does not survive a fixture_adjust touch"
+  );
+
+  // (2) The fund against the clamped treasury: rejected, no pending.
+  docs.set("sim_cities/cityB", clampedCity);
+  const fundPlan = runActionAt(docs, memberAction("req-w27-fund", "fixture_fund", fundParams), NOW);
+  assert.equal(fundPlan.outcome, "rejected");
+  assert.equal(fundPlan.rejection?.code, "INSUFFICIENT_TREASURY");
+  assert.equal(
+    fundPlan.pendingCreates.length,
+    0,
+    "a rejected fund creates no pending — the gate suite's vanished pend_<actionId>_01"
+  );
+
+  // (3) Control: the same fund against the standing treasury.
+  const docsControl = baseDocs();
+  docsControl.set("sim_cities/cityB", cityBDoc(500_000));
+  const fundControl = memberAction("req-w27-fund", "fixture_fund", fundParams);
+  const controlPlan = runActionAt(docsControl, fundControl, NOW);
+  assert.equal(controlPlan.outcome, "resolved");
+  assert.ok(
+    controlPlan.pendingCreates.some(
+      (d) => (d as { doc?: { pendingId?: unknown } }).doc?.pendingId === `pend_${fundControl.actionId}_01`
+    ),
+    "the pending is created as pend_<resolutionId>_01 (resolutionId = actionId for an action resolution)"
+  );
+  const debited = planWriteFor(controlPlan, "sim_cities/cityB")?.afterDoc as Record<string, unknown>;
+  assert.equal((debited.stats as Record<string, unknown>).treasuryRubars, 490_000);
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);
