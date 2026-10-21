@@ -1461,3 +1461,99 @@ draft + silence postures, dedupe across wakes, P5-K8), then
 N8's revocation boundary, N9(b) `DEPENDENTS_EXIST` as before.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 10, 2026-10-21.*
+
+---
+
+## CI fix round 11 (PR #45) — N9(b): the suite invented an undo outcome word; the Phase 2 contract's is "refused"
+
+**The stop.** CI round 10 (head `9c53826`): Install + Rules +
+Vercel GREEN; N0–N8 ALL PASS in the venue — N7 conversion ×2
+(draft + silence postures), dedupe across wakes, P5-K8 flag
+survives handling; N8 revocation boundary (snapshot cleared,
+later fire blocked, non-owner setMode refused). N9 stopped at
+`tests/npc-core.test.ts:1375`: strictEqual actual `"refused"`
+vs expected `"failed"`. Log `pr45-simcore-log-r10.txt`.
+
+**The field + sub-case.** N9(b), the cascaded case: an undo op
+targeting the steward's `mandate.set` resolution (authored in
+N2, consumed by N4's fire). The assertion reads
+`sim_undo_operations/{blockedOpId}.status`. The standing record
+itself was complete and exactly as designed — `status:
+"refused"`, `failure.code: "DEPENDENTS_EXIST"`, the
+dependencyReport standing — and the suite's very next assertions
+(the DEPENDENTS_EXIST code, the mandate root still standing,
+the treasury unchanged) were never reached. Nothing took a
+different path: the op was created as `requested`, processed by
+the wake's undo pass after the wake's actions (brief §8.5), and
+terminally refused at the dependency check. Only the outcome
+WORD the suite expected was wrong.
+
+**The vocabulary, settled from the design.** The Phase 2 brief
+§2.5 defines the op's status enum as `"requested" | "checking"
+| "refused" | "executing" | "completed" | "failed"` — both
+words are in the contract, meaning different things — and §8.5
+states the processing rule verbatim: "Blockers ⇒ status
+`refused`, report stands, **nothing else changes**."
+`lib/sim/undo.ts` implements exactly that split:
+
+- **`refused`** — the target STANDS; the request was evaluated
+  against the standing world (source-kind check, authority
+  check, dependency report) and declined on the merits: a
+  precondition for undo is unmet. Nothing was attempted;
+  nothing changed. Codes: `TARGET_NOT_UNDOABLE`,
+  `UNDO_NOT_AUTHORIZED`, `NOT_SUFFIX`, `DEPENDENTS_EXIST`.
+- **`failed`** — the operation cannot be evaluated at all
+  because it names no standing target (no target named, or the
+  target resolution does not stand — already undone or never
+  existed; genesis is named here too). An error of the request,
+  not a judgment on a standing world. Code: `TARGET_NOT_FOUND`
+  only.
+
+The Phase 2 suites that pass against this engine assert the
+same split: `sim-core` asserts `"refused"` for every blocker
+case (suffix, S5/S7 semantic blockers, authority, revalidation —
+~10 sites, incl. "the undo is refused BECAUSE the dependent
+landed first") and `"failed"` only with `TARGET_NOT_FOUND`
+(TC-U11 double-undo; the genesis target).
+
+**Why the cascaded case IS a refusal, semantically.** The
+mandate.set resolution stands in the Log; N4's fire is recorded
+in its dependency report as a semantic dependent; the engine
+declined the undo on the merits, leaving the report standing so
+the requester sees what must be undone first. That is CJ's hard
+limit — "you CANNOT undo a change after it has affected other
+things" — in engine form. It is not a failure: nothing was
+attempted and nothing broke. The suite's own N9 header already
+stated the case correctly ("A resolution whose effects cascaded
+… refuses with DEPENDENTS_EXIST"); the assertion's word
+contradicted the suite's own prose.
+
+**Layer verdict: SUITE (vocabulary).** The engine's word is the
+landed contract everywhere else; the npc-core suite invented
+`"failed"` for this one assertion. No engine code touched, no
+pin needed — the Phase 2 suites are the standing pin for this
+contract, and `undo.ts` writes `DEPENDENTS_EXIST` only on the
+refused branch (line 426), so the suite's code assertion and
+its status assertion now read the same branch. **Suite-wide
+sweep:** `grep '"failed"' tests/npc-core.test.ts` returned
+exactly one hit — line 1375. N10 and N11, which have not yet
+run in the venue, carry no second instance of the invented
+word. The fix corrects the single assertion and adds a comment
+at the site citing the brief's enum + §8.5 rule, so the word
+is not re-invented; the DEPENDENTS_EXIST code assertion and
+the nothing-changed assertions (mandate standing, treasury
+equal) stand exactly as written.
+
+**Local regression (branch tip after this round):**
+`tsc --noEmit` clean · scoped ESLint on the touched file 0
+errors · full pure battery green at landed counts (governance
+59, banking 54, situations 32, wake 27, closeout 29, chains 34,
+cat2 34, cat1 all, defense 12, acq 14, market 27, lore 27;
+npc-core harness 37, authority + envelopes harnesses all-pass)
+· `next build` green. Emulator suites are CI's venue on this
+push; watch items: N9 completes (leaf erasure + the refused
+cascade + `verifyOk()`), then N10 (novel-title NPC end-to-end)
+and N11 (exports over the standing scenario) run for the first
+time.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 11, 2026-10-21.*
