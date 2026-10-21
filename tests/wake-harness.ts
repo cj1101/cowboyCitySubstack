@@ -25,7 +25,10 @@
  *   W20     F-E9: envelope.spawn preview/commit parity after the fix;
  *   W21     WakeScanState: mid-wake-created pendings wait (the
  *           candidate snapshot is wake-start-bound);
- *   W22     the spawn-refusal fallback inside a fire step.
+ *   W22     the spawn-refusal fallback inside a fire step;
+ *   W23     the step read-plan contract: every step kind's seed paths
+ *           carry sim_counters/log (the mandatory snapshot input —
+ *           PR-4 fix round 1's regression pin).
  *
  * Every composed plan runs the real validatePlan (the committer's
  * §5.6/§6.3 guards incl. F-02 reconciliation) before assertions.
@@ -73,6 +76,7 @@ import {
   resolveSituationFollowupStep,
   resolveTriggerStep,
   wakeStepResolutionId,
+  wakeStepSeedPaths,
   type WakePassStep,
 } from "../lib/sim/wakeSteps";
 import { buildTaskEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../lib/envelopes";
@@ -1051,6 +1055,40 @@ check("W22 a fire whose spawn collides degrades to the blocked outcome — entry
   assertPlanValid(plan, snapshot);
   assert.equal(plan.entries.length, 1);
   assert.equal(plan.writes.length, 0, "no transition and no second envelope are written");
+});
+
+check("W23 every step kind's seed paths carry sim_counters/log — the snapshot-assembly contract (fix round 1)", () => {
+  // assembleSnapshot (lib/sim/resolver.ts) refuses any doc map whose
+  // sim_counters/log entry is absent or malformed: the counter is a
+  // mandatory input of every snapshot, and the executor materializes
+  // step snapshots from EXACTLY these seeds. A seed list without the
+  // counter makes the first materialized step of a wake throw
+  // LOG_NOT_INITIALIZED before any resolver runs (CI sim-core, CK7e).
+  const steps: WakePassStep[] = [
+    { kind: "delegation", situationId: "sit_x" },
+    { kind: "trigger", situationId: "sit_x" },
+    { kind: "silence", situationId: "sit_x", npcId: null, mandateId: null, mandateVersion: null },
+    { kind: "attention", pendingId: "pend_x" },
+    {
+      kind: "envelope-terminal",
+      taskId: "task_x",
+      leaseId: "lease_x",
+      outcome: { outcome: "DONE", outputText: "done", summary: "done" },
+    },
+    { kind: "envelope-failure", taskId: "task_x", leaseId: "lease_x", error: { code: "x", message: "x" } },
+    { kind: "situation-followup", situationId: "sit_x", actionId: "act_x" },
+  ];
+  for (const step of steps) {
+    const seeds = wakeStepSeedPaths(step);
+    assert.ok(
+      seeds.includes("sim_counters/log"),
+      `${step.kind} seed paths must include sim_counters/log (got: ${seeds.join(", ")})`
+    );
+    assert.ok(
+      !seeds.includes("sim_counters/head"),
+      `${step.kind} seed paths name sim_counters/head, a doc that does not exist`
+    );
+  }
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);

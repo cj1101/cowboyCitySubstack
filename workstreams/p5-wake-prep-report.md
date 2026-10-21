@@ -355,3 +355,81 @@ production wake path. Live-form gate rows (G1 fabric cycles, G8
 worker claim/lease/crash, G9 committer fences, G12 wake-created
 Situation) close only when that chain executes. P5-D6 is untouched
 by this PR and remains PENDING Koda ratification.
+
+---
+
+## 10. CI fix round 1 (PR #41, Sim core) — Rafe
+
+**Failure.** CI's Sim core job (PR #41, head f512995) failed where the
+required Install job and the Rules job were green: sim-core ran green
+through genesis / fund lifecycle / causality / baseline / stale
+preview / ripening / ceilings / voiding, then crashed at
+tests/sim-core.test.ts:999 inside runWake — SnapshotError
+LOG_NOT_INITIALIZED out of materializeStepSnapshot
+(wakePasses.ts:163 ← commitStep:190 ← runWakePasses:557). Log saved
+at ~/workspace/cowboy-city/pr41-simcore-log.txt.
+
+**Root cause (the dispatch hypothesis, corrected on evidence).** The
+world was NOT uninitialized: line 999 is CK7e's third
+invalid-preparation wake in a fully genesis'd world — headSeq()
+reads sim_counters/log via the Admin SDK immediately before it. The
+defect is the wake-step READ PLAN. wakeStepSeedPaths seeded
+["sim_world/current", "sim_counters/head", …] — and no
+sim_counters/head doc exists anywhere in the system (single grep
+hit: that line). assembleSnapshot (resolver.ts) refuses any doc map
+lacking sim_counters/log, so materializeStepSnapshot's first
+buildSnapshot threw for EVERY step kind, on ANY world, the first
+time any wake actually had a pass candidate. Every other read plan
+in the resolver (collectActionReadPaths, collectRipeningReadPaths)
+carries the counter; the step plan alone did not. CK7e is simply the
+first emulator scenario to produce a candidate: its third failed
+generation attempt flips the pending to needsAttention, the
+attention pass (runWakePasses step 3½) finds it in the same wake,
+and commitStep materializes the conversion step. Nothing earlier in
+the suite — and nothing in the pure wake harness, which drives
+resolveWakePassStep over hand-built fixture snapshots and never
+runs the seed-path materialization — could reach the throw.
+
+**Fix (one line, at the read-plan layer).** wakeStepSeedPaths now
+seeds "sim_counters/log" in place of the phantom "sim_counters/head",
+with the contract stated in a comment at the site. The step snapshot
+then carries the real counter head, so step plans bind the head they
+resolve against and the committer's in-transaction head comparison
+includes the counter — the same treatment action and ripening
+commits have always had. NO try/catch was added and no gate was
+needed: candidate discovery was already correct (attention iterates
+flagged pendings only; delegation/trigger/silence iterate this
+wake's candidates; follow-ups iterate the wake's follow-ups; claim
+steps are reached only after a real claim + worker outcome), so on
+a genuinely uninitialized world every candidate set is empty, no
+step materializes, and the wake stays byte-identical. Conversely, a
+step WITH candidates on a world whose counter is missing is a
+corrupt world, and LOG_NOT_INITIALIZED still throws loudly there —
+deliberately not swallowed.
+
+**Sibling sweep.** (a) Claim planner: planEnvelopeClaims is pure
+over envelope records; envelope-terminal/failure steps share the
+same materializeStepSnapshot path — fixed by the same line.
+(b) Delegated-action pipeline (wakePasses.ts:252) builds its
+snapshot from collectActionReadPaths — already carries the counter;
+unaffected. (c) Attention read-back materialization (line 563) —
+same path, same fix. (d) Terminal refresh: refreshSnapshotAfterWake
+runs only when wakeChangedWorld reports commits (impossible on an
+uninitialized world) and is failure-isolated by construction
+(try/catch; the error is logged, never propagated). (e) Play-core
+never ran in CI (it follows sim-core in the job); it exercises the
+same dispatcher, so the fixed seam is its coverage too — it runs in
+the fix round's CI.
+
+**Regression pin.** Wake harness W23 (new): for all seven step
+kinds, wakeStepSeedPaths must include sim_counters/log and must not
+name sim_counters/head — the seed contract is now asserted in the
+pure battery, at the exact seam that broke.
+
+**Local regression (2026-10-20).** Wake harness 22 → 23 green;
+full pure battery green at landed counts (cat1, defense 12,
+chains 34, cat2 34, acq 14, market 27, lore 27, close-out 29,
+governance 57, situations 32); tsc clean; ESLint clean on touched
+files; next build green. Emulator suites (sim-core incl. CK7e,
+play-core, rules) remain CI's venue — the sandbox emulator blocker
+is unchanged.

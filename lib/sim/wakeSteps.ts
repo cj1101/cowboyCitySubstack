@@ -226,7 +226,16 @@ export function delegatedActionId(input: {
 export const WAKE_RULES_QUERY_ID = "wake-delegation-rules";
 
 export function wakeStepSeedPaths(step: WakePassStep): string[] {
-  const paths = ["sim_world/current", "sim_counters/head"];
+  // The Log counter is a mandatory input of EVERY snapshot:
+  // assembleSnapshot refuses a doc map that lacks sim_counters/log,
+  // and every other read plan in the resolver (action, ripening)
+  // carries it. The step plans bind the head they resolve against,
+  // so the counter rides the seed set from round zero — there is no
+  // sim_counters/head doc anywhere in the system. (PR-4 fix round 1:
+  // seeding the phantom head path instead made the FIRST step of any
+  // wake throw LOG_NOT_INITIALIZED in materializeStepSnapshot —
+  // CI sim-core, CK7e's first needsAttention conversion.)
+  const paths = ["sim_world/current", "sim_counters/log"];
   switch (step.kind) {
     case "delegation":
     case "trigger":
