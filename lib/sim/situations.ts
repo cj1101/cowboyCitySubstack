@@ -62,13 +62,12 @@
 
 import { canonicalJson, sha256HexOfText } from "./canonical";
 import { ripeningFailureClass } from "./rules/pendingRules";
-import { fieldChange, planWrite, ruleEffectDraft } from "./rules/planHelpers";
+import { planWrite, ruleEffectDraft } from "./rules/planHelpers";
 import {
   snapshotDoc,
   type LogEntryDraft,
   type ResolutionPlan,
   type SimActor,
-  type SimChange,
   type SimSnapshot,
 } from "./state";
 
@@ -216,9 +215,21 @@ export function dedupeKeyFor(input: DedupeKeyInput): string {
 /** The deterministic dedupe ID for a single-event source (§6.1): the
  *  same source event, re-fired, lands on the same doc ID — the
  *  structural half of the no-duplicates discipline (the upsert below
- *  is the behavioral half). */
-export function deterministicSituationId(dedupeKey: string): string {
-  return `sit_${dedupeKey.slice(0, 32)}`;
+ *  is the behavioral half). The ID incorporates the source event's
+ *  seq: a SUPERSEDING event for the same key (a Pattern X episode's
+ *  next qualifying event; a source update) is a distinct event and
+ *  must mint a distinct doc, or the supersede would fold into the
+ *  old card's path and the history card would never land. With a
+ *  null source seq the ID falls back to the key alone (degenerate:
+ *  supersede then collides — planSituationUpsert refuses it loudly
+ *  rather than folding silently). */
+export function deterministicSituationId(
+  dedupeKey: string,
+  sourceSeq?: number | null
+): string {
+  return sourceSeq != null
+    ? `sit_${dedupeKey.slice(0, 28)}_${sourceSeq}`
+    : `sit_${dedupeKey.slice(0, 32)}`;
 }
 
 function audienceKeyOf(input: {
@@ -291,7 +302,8 @@ export function buildSituationDoc(input: SituationCreateInput): SimSituation {
     audienceKey: audienceKeyOf(input),
   });
   return {
-    situationId: input.situationId ?? deterministicSituationId(dedupeKey),
+    situationId:
+      input.situationId ?? deterministicSituationId(dedupeKey, input.source.sourceSeq),
     cityId: input.cityId,
     audienceCityId: input.audienceCityId,
     audienceOwnerUidsSnapshot: [...input.audienceOwnerUidsSnapshot],
@@ -381,6 +393,18 @@ export function planSituationUpsert(
       doc: { ...existingOpen, updatedAt: new Date(input.now) },
     };
   }
+  if (fresh.situationId === existingOpen.situationId) {
+    // Same deterministic ID but a different payload: the source
+    // event re-fired with corrected content and no seq to
+    // distinguish the correction (null source seqs). Folding this
+    // into one path would silently rewrite the open card and lose
+    // the superseded history — refuse loudly instead; the producer
+    // must stamp a source seq or an explicit situation id.
+    throw new SituationError(
+      "DEDUPE_SUPERSEDE_COLLISION",
+      "a superseding situation would land on the existing card's deterministic ID — the producer must stamp a source seq (or an explicit situationId) so the superseded card remains in history"
+    );
+  }
   return {
     action: "supersede-and-create",
     doc: fresh,
@@ -395,34 +419,33 @@ export function planSituationUpsert(
 }
 
 /** Fold an upsert decision into a plan (one write per path, F-02
- *  discipline via planWrite). Change fields are target-qualified in
- *  the landed style (`situations/<id>.<field>`). */
+ *  discipline via planWrite). Situation effects are claimed the
+ *  landed way for top-level records — recordsCreated/recordsUpdated
+ *  on the event's entries + the manifest write set — NOT via
+ *  changes[]: validatePlan's F-02 grammar resolves change fields
+ *  only inside the entry city's doc tree, so a change claiming a
+ *  `sim_situations` field would reconcile with no write (the lore
+ *  module's wiki-entry entries are the precedent). The returned id
+ *  lists are exactly what the caller's entry should claim. */
 export function applySituationUpsert(
   plan: ResolutionPlan,
   snapshot: SimSnapshot,
   decision: SituationUpsertDecision
-): { changes: SimChange[] } {
-  const changes: SimChange[] = [];
-  if (decision.action === "ignore") return { changes };
+): { created: string[]; updated: string[]; superseded: string[] } {
+  const out = { created: [] as string[], updated: [] as string[], superseded: [] as string[] };
+  if (decision.action === "ignore") return out;
   if (decision.action === "supersede-and-create") {
     const old = decision.supersededDoc;
     planWrite(plan, snapshot, situationPath(old.situationId), old as unknown as Record<string, unknown>, "state", ["status", "resolvedSeq", "resolvedByResolutionId", "updatedAt"]);
-    changes.push(
-      fieldChange(`situations/${old.situationId}.status`, "open", "superseded",
-        "§6.1 dedupe: a newer source event supersedes the open card for its dedupeKey; the old card remains in history, not actionable")
-    );
+    out.superseded.push(old.situationId);
   }
   const doc = decision.doc;
   const isCreate = decision.action === "create" || decision.action === "supersede-and-create";
   planWrite(plan, snapshot, situationPath(doc.situationId), doc as unknown as Record<string, unknown>, "state",
     isCreate ? ["status", "kind", "source", "dedupeKey"] : ["updatedAt"]);
-  if (isCreate) {
-    changes.push(
-      fieldChange(`situations/${doc.situationId}.status`, null, "open",
-        "§6.1: a producing Resolution Event creates the Situation in its own transaction (Dana §0 principle 5)")
-    );
-  }
-  return { changes };
+  if (isCreate) out.created.push(doc.situationId);
+  else out.updated.push(doc.situationId);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,16 +467,10 @@ function assertActionable(doc: SimSituation, what: string): void {
 
 export interface HandlingTransition {
   doc: SimSituation;
-  changes: SimChange[];
-}
-
-function transitionChanges(
-  doc: SimSituation,
-  fields: { field: string; before: unknown; after: unknown; formula: string }[]
-): SimChange[] {
-  return fields.map((f) =>
-    fieldChange(`situations/${doc.situationId}.${f.field}`, f.before, f.after, f.formula)
-  );
+  /** The top-level fields the transition wrote — the caller's
+   *  planWrite changedFields (see applySituationUpsert's note on
+   *  why situation effects are not entry changes[]). */
+  changedFields: string[];
 }
 
 /** §6.3A — "handle myself": records the owner's decision and links
@@ -483,18 +500,10 @@ export function recordSelfHandling(
     },
     updatedAt: new Date(decision.decidedAt),
   };
-  return {
-    doc: after,
-    changes: transitionChanges(doc, [
-      {
-        field: "handling.mode",
-        before: doc.handling?.mode ?? null,
-        after: "self",
-        formula:
-          "§6.3A: the owner takes the card into the authoritative flow; the situation completes only when that flow's resolution lands (markSituationHandled)",
-      },
-    ]),
-  };
+  // §6.3A: the owner takes the card into the authoritative flow; the
+  // situation completes only when that flow's resolution lands
+  // (markSituationHandled).
+  return { doc: after, changedFields: ["handling", "updatedAt"] };
 }
 
 /** §6.3B — delegate to a character or NPC, owner-directed (the
@@ -552,26 +561,11 @@ export function recordDelegation(
     },
     updatedAt: new Date(decision.decidedAt),
   };
-  return {
-    doc: after,
-    changes: transitionChanges(doc, [
-      {
-        field: "status",
-        before: doc.status,
-        after: status,
-        formula:
-          decision.effectiveMode === "ask-first"
-            ? "§2.4/§6.3B: an ask-first delegate drafts and stops — the card awaits the owner's confirmation"
-            : "§6.3B: the card is with its delegate inside the cited mandate; Tier B mid-handling returns it as an escalation",
-      },
-      {
-        field: "handling.mode",
-        before: doc.handling?.mode ?? null,
-        after: mode,
-        formula: "§6.1 handling record: who holds the card and under what citation",
-      },
-    ]),
-  };
+  // §2.4/§6.3B: an ask-first delegate drafts and stops (the card
+  // awaits the owner's confirmation); an act-for-me delegate holds
+  // the card inside the cited mandate, and Tier B mid-handling
+  // returns it as an escalation (returnSituationToOpen).
+  return { doc: after, changedFields: ["status", "handling", "updatedAt"] };
 }
 
 /** A delegate escalation returns the SAME card to `open` (§6.2/§6.3B):
@@ -614,23 +608,11 @@ export function returnSituationToOpen(
     },
     updatedAt: new Date(opts.decidedAt),
   };
+  // §6.3B/§5.5 + Petra §3.4B: the same card returns to the owner
+  // and the cycle is counted on it, never a silent loop.
   return {
     doc: after,
-    changes: transitionChanges(doc, [
-      {
-        field: "status",
-        before: doc.status,
-        after: "open",
-        formula:
-          "§6.3B/§5.5: a delegate escalation returns the same card to the owner — the NPC takes no further step on the matter until the owner acts",
-      },
-      {
-        field: "delegationCycleCount",
-        before: doc.delegationCycleCount,
-        after: doc.delegationCycleCount + 1,
-        formula: "Petra §3.4B: the delegation cycle is counted on the card, never a silent loop",
-      },
-    ]),
+    changedFields: ["status", "delegationCycleCount", "handling", "updatedAt"],
   };
 }
 
@@ -649,17 +631,11 @@ export function markSituationHandled(
     resolvedByResolutionId: opts.resolvedByResolutionId,
     updatedAt: new Date(opts.decidedAt),
   };
+  // §6.3A (Dana §7 atomicity): the fabric marks the situation
+  // handled in the same transaction that logs the resolution.
   return {
     doc: after,
-    changes: transitionChanges(doc, [
-      {
-        field: "status",
-        before: doc.status,
-        after: "handled",
-        formula:
-          "§6.3A (Dana §7 atomicity): the fabric marks the situation handled in the same transaction that logs the resolution",
-      },
-    ]),
+    changedFields: ["status", "resolvedSeq", "resolvedByResolutionId", "updatedAt"],
   };
 }
 
@@ -879,17 +855,6 @@ export interface AttentionPendingView {
   attentionSituationId?: string | null;
 }
 
-export function attentionSituationIdForPending(pendingId: string): string {
-  return deterministicSituationId(
-    dedupeKeyFor({
-      sourceKind: "system",
-      sourceId: pendingId,
-      situationKind: "system",
-      audienceKey: null,
-    })
-  );
-}
-
 export interface AttentionConversion {
   situation: SimSituation;
   /** The ONLY field the conversion writes on the pending (P5-K8 —
@@ -912,11 +877,9 @@ export function planAttentionConversion(
 ): AttentionConversion | null {
   if (pending.needsAttention !== true) return null;
   if (pending.attentionSituationId != null) return null;
-  const situationId = attentionSituationIdForPending(pending.pendingId);
   const failureCode = pending.lastFailure?.code ?? null;
   const failureClass = failureCode ? ripeningFailureClass(failureCode) : null;
   const situation = buildSituationDoc({
-    situationId,
     cityId: pending.originCityId,
     audienceCityId: pending.originCityId,
     audienceOwnerUidsSnapshot: ctx.originOwnerUids,
@@ -951,7 +914,10 @@ export function planAttentionConversion(
     createdSeq: ctx.createdSeq,
     now: ctx.now,
   });
-  return { situation, pendingPatch: { attentionSituationId: situationId } };
+  // The link stamp is read off the built card — the deterministic ID
+  // has exactly one computation (buildSituationDoc's), so the stamp
+  // can never diverge from the doc it names.
+  return { situation, pendingPatch: { attentionSituationId: situation.situationId } };
 }
 
 /** The first-wake backfill (§6.4.1) as a pure planner: the wake step
@@ -1056,7 +1022,7 @@ export function silenceSummaryText(cityName: string, triggerSeq: number | null):
 export interface SilenceCommit {
   situationAfter: SimSituation;
   entry: LogEntryDraft;
-  changes: SimChange[];
+  changedFields: string[];
 }
 
 export function buildSilenceCommit(input: SilenceCommitInput): SilenceCommit {
@@ -1114,18 +1080,13 @@ export function buildSilenceCommit(input: SilenceCommitInput): SilenceCommit {
     visibility: "public",
     major: false,
   });
+  // §8.1: the non-response is recorded and the situation closes as
+  // silent in the same transaction; no stats change — the entry's
+  // changes are empty by construction (see the draft above).
   return {
     situationAfter,
     entry,
-    changes: transitionChanges(situation, [
-      {
-        field: "status",
-        before: situation.status,
-        after: "silent",
-        formula:
-          "§8.1: the non-response is recorded and the situation closes as silent in the same transaction; no stats change — the entry's changes are empty",
-      },
-    ]),
+    changedFields: ["status", "handling", "resolvedSeq", "resolvedByResolutionId", "updatedAt"],
   };
 }
 
@@ -1144,7 +1105,7 @@ export function applySilenceCommit(
     situationPath(commit.situationAfter.situationId),
     commit.situationAfter as unknown as Record<string, unknown>,
     "state",
-    ["status", "handling", "resolvedSeq", "resolvedByResolutionId", "updatedAt"]
+    commit.changedFields
   );
   plan.entries.push(commit.entry);
   return commit;

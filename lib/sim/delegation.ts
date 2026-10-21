@@ -670,8 +670,7 @@ export function evaluateDelegation(input: {
 
 export function buildRuleFireEntry(
   fire: DelegationFire,
-  situation: SimSituation,
-  changes: LogEntryDraft["changes"]
+  situation: SimSituation
 ): LogEntryDraft {
   return ruleEffectDraft({
     summary: true,
@@ -699,7 +698,11 @@ export function buildRuleFireEntry(
       situationId: situation.situationId,
       situationKind: situation.kind,
     },
-    changes,
+    // The situation transition is a top-level record effect:
+    // claimed via recordsUpdated + the manifest write set, not
+    // changes[] (validatePlan's F-02 grammar is city-tree only —
+    // see situations.ts's applySituationUpsert note).
+    changes: [],
     recordsUpdated: [situationPath(situation.situationId)],
     summaryText:
       `Auto-delegation: rule ${fire.ruleId} (v${fire.ruleVersion}) fired on a ${situation.kind} situation — ` +
@@ -773,9 +776,9 @@ export function applyDelegationFire(
     situationPath(transition.doc.situationId),
     transition.doc as unknown as Record<string, unknown>,
     "state",
-    ["status", "handling", "updatedAt"]
+    transition.changedFields
   );
-  const entry = buildRuleFireEntry(fire, situation, transition.changes);
+  const entry = buildRuleFireEntry(fire, situation);
   plan.entries.push(entry);
   return { situationAfter: transition.doc, entry };
 }
