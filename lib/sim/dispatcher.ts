@@ -52,7 +52,7 @@ import {
 } from "./resolver";
 import { firestoreQueryReader, firestoreReader } from "./readers";
 import { CommitError, commitResolution, type CommitOutcome } from "./committer";
-import { scanRipeness, type ScanSummary } from "./pending";
+import { scanRipeness, WakeScanState, type ScanSummary } from "./pending";
 import { processUndoOperation } from "./undo";
 import { wakeChangedWorld } from "./snapshot";
 import { refreshSnapshotAfterWake } from "./snapshotRefresh";
@@ -221,6 +221,10 @@ export async function runWake(
     scans: [],
   };
   const reader = firestoreReader(deps.committerDb);
+  // P4-K19 (Phase 4 close-out, E1): one scan state per wake — the
+  // evaluation/event budgets and the candidate snapshot are wake-
+  // scoped, shared by every scan pass this wake runs.
+  const wakeScanState = new WakeScanState();
 
   // Confirmed actions first (brief §1.3's wake order: actions commit,
   // each followed by its scan; queued undo operations are picked up
@@ -387,6 +391,7 @@ export async function runWake(
           wakeActionId: action.actionId,
           executedDuringSeq: manifest.lastSeq as number,
           preparedPayloads: opts.preparedPayloads,
+          wakeState: wakeScanState,
         }
       );
       summary.scans.push(scan);

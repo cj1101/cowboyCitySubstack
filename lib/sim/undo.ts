@@ -71,7 +71,13 @@ interface ManifestShape {
     beforeDoc: Record<string, unknown> | null;
     afterDoc: Record<string, unknown> | null;
   }[];
-  counterBefore: { lastSeq: number; lastEntryHash: string; lastResolutionId: string | null };
+  counterBefore: {
+    lastSeq: number;
+    /** P4-K24 tally (Phase 4 close-out, E4); null on pre-E4 manifests. */
+    lastResolvedSeq?: number | null;
+    lastEntryHash: string;
+    lastResolutionId: string | null;
+  };
   planHash: string;
   [key: string]: unknown;
 }
@@ -498,6 +504,14 @@ export async function processUndoOperation(
         tx.set(doc(db, "sim_counters", "log"), {
           ...counterTx,
           lastSeq: target.counterBefore.lastSeq,
+          // E4: the tally rewinds with the head — but only when the
+          // erased manifest recorded it (pre-E4 manifests leave the
+          // standing tally untouched in this fallback path; the
+          // whole-doc snapshot restore above is the normal path and
+          // carries the field exactly).
+          ...(typeof target.counterBefore.lastResolvedSeq === "number"
+            ? { lastResolvedSeq: target.counterBefore.lastResolvedSeq }
+            : {}),
           lastEntryHash: target.counterBefore.lastEntryHash,
           lastResolutionId: target.counterBefore.lastResolutionId,
           updatedAt: new Date(opts.now),

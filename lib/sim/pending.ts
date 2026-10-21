@@ -27,9 +27,21 @@ import {
   PENDING_MAX_ATTEMPTS,
   SCAN_EVALUATE_CAP,
   SCAN_RIPEN_CAP,
+  snapshotDoc,
   type PreparedPayload,
 } from "./state";
-import { evaluatePrecondition, type StructuredPrecondition } from "./rules/pendingRules";
+import {
+  buildRipenessView,
+  evaluateRipeness,
+  resolvedSeqOf,
+  ripeningFailureClass,
+  type RipenessVerdict,
+  type RipenessView,
+  type StructuredPrecondition,
+} from "./rules/pendingRules";
+
+export { evaluateRipeness } from "./rules/pendingRules";
+export type { RipenessVerdict, RipenessView } from "./rules/pendingRules";
 import {
   buildSnapshot,
   collectRipeningReadPaths,
@@ -45,79 +57,10 @@ import { CommitError, commitResolution } from "./committer";
 import type { BaselineRegistry } from "./baseline/registry";
 
 // ---------------------------------------------------------------------------
-// The AGR predicate (Felix N1, §7.3) — pure.
+// The AGR predicate (Felix N1, §7.3) lives in rules/pendingRules.ts
+// (moved at the Phase 4 close-out so the committer's P4-K20 guard can
+// evaluate it without an import cycle) and is re-exported above.
 // ---------------------------------------------------------------------------
-
-export interface RipenessView {
-  currentSeq: number;
-  nowIso: string;
-  /** cityId -> the city's standing activity seq (its doc's lastChangedSeq;
-   * the per-city "something happened here" marker in Phase 2 data). */
-  cityActivitySeq: ReadonlyMap<string, number>;
-  docByPath: (path: string) => Record<string, unknown> | null;
-}
-
-export type RipenessVerdict =
-  | { state: "ripe" }
-  | { state: "waiting"; blockers: string[] }
-  | { state: "void"; reason: string };
-
-export function evaluateRipeness(
-  pending: Record<string, unknown>,
-  view: RipenessView
-): RipenessVerdict {
-  const condition = pending.ripenCondition as Record<string, unknown>;
-  const blockers: string[] = [];
-
-  // (a) realm sequence condition — the stored requiredSeq, never recomputed.
-  const requiredSeq = condition.requiredSeq as number;
-  if (view.currentSeq < requiredSeq) {
-    blockers.push(`Log at seq ${view.currentSeq}, needs ${requiredSeq}`);
-  }
-  // (b) wall-clock floor only — passage of time alone never ripens.
-  const eligibleAt = condition.eligibleAt as
-    | { toDate?: () => Date }
-    | string
-    | Date
-    | null;
-  const eligibleIso =
-    typeof eligibleAt === "string"
-      ? eligibleAt
-      : eligibleAt instanceof Date
-        ? eligibleAt.toISOString()
-        : eligibleAt && typeof eligibleAt.toDate === "function"
-          ? eligibleAt.toDate().toISOString()
-          : null;
-  if (eligibleIso && view.nowIso < eligibleIso) {
-    blockers.push(`wall floor ${eligibleIso} not reached`);
-  }
-  // (c) required action: activity in one of the listed cities SINCE the
-  // pending was created (its createdAtSeq).
-  const cities = (condition.requiresActionInCities as string[] | undefined) ?? [];
-  const createdAtSeq = pending.createdAtSeq as number;
-  if (cities.length > 0) {
-    const acted = cities.some(
-      (cityId) => (view.cityActivitySeq.get(cityId) ?? 0) > createdAtSeq
-    );
-    if (!acted) blockers.push(`no action yet in any of: ${cities.join(", ")}`);
-  }
-  // (d) structured preconditions — a false "void" clause ends the pending
-  // as a logged world outcome, not an error.
-  const preconditions = (condition.preconditions as StructuredPrecondition[] | undefined) ?? [];
-  for (const pc of preconditions) {
-    const result = evaluatePrecondition(pc, view.docByPath(pc.path));
-    if (result === "void") {
-      return {
-        state: "void",
-        reason: `precondition on ${pc.path}${pc.field ? `#${pc.field}` : ""} no longer holds (onFalse: void)`,
-      };
-    }
-    if (result === false) {
-      blockers.push(`precondition unmet: ${pc.path}${pc.field ? `#${pc.field}` : ""}`);
-    }
-  }
-  return blockers.length > 0 ? { state: "waiting", blockers } : { state: "ripe" };
-}
 
 // ---------------------------------------------------------------------------
 // Claims (bookkeeping only — no seq, no Log entry; brief §7.4). The claim
@@ -170,7 +113,18 @@ export async function claimPending(
 export async function releasePendingClaim(
   db: Firestore,
   pendingId: string,
-  opts: { leaseId: string; now: string; failureCode?: string }
+  opts: {
+    leaseId: string;
+    now: string;
+    failureCode?: string;
+    /** P4-K23 (Phase 4 close-out, E3): a deterministic size failure
+     * moves the pending to the named `blocked-oversize` attention
+     * state instead of back to `pending` — and burns NO attempts. The
+     * failure code is still recorded (lastFailure), and
+     * needsAttention is set: a human (or a later surface) owns the
+     * unblock; the scan never retries a blocked pending. */
+    attentionState?: "blocked-oversize";
+  }
 ): Promise<void> {
   await runTransaction(db, async (tx) => {
     const snap = await tx.get(pendingRef(db, pendingId));
@@ -178,13 +132,18 @@ export async function releasePendingClaim(
     const pending = snap.data() as Record<string, unknown>;
     const claim = pending.claim as { leaseId?: string } | null;
     if (pending.status !== "ripening-claimed" || claim?.leaseId !== opts.leaseId) return;
-    const attempts = (pending.attempts as number) + (opts.failureCode ? 1 : 0);
+    const blocked = opts.attentionState === "blocked-oversize";
+    const attempts = (pending.attempts as number) + (opts.failureCode && !blocked ? 1 : 0);
     tx.set(pendingRef(db, pendingId), {
       ...pending,
-      status: "pending",
+      status: blocked ? "blocked-oversize" : "pending",
       claim: null,
       attempts,
-      needsAttention: attempts >= PENDING_MAX_ATTEMPTS ? true : pending.needsAttention,
+      needsAttention: blocked
+        ? true
+        : attempts >= PENDING_MAX_ATTEMPTS
+          ? true
+          : pending.needsAttention,
       ...(opts.failureCode
         ? { lastFailure: { at: new Date(opts.now), code: opts.failureCode } }
         : {}),
@@ -192,6 +151,38 @@ export async function releasePendingClaim(
       updatedAt: new Date(opts.now),
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Wake-scoped scan state (P4-K19, Phase 4 close-out E1). The caps are
+// per WAKE, not per pass: one evaluation budget (25) and one event
+// budget (5) shared across every scan the wake runs, and the
+// candidate set is snapshotted ONCE, at wake start — a pending
+// created mid-wake (a ripening's child) is not eligible until the
+// next wake, which is also the structural form of one-generation-
+// per-wake. The dispatcher owns one instance per wake; a scan called
+// without one behaves as a single-scan wake (today's semantics).
+// ---------------------------------------------------------------------------
+
+export class WakeScanState {
+  /** Evaluations consumed across the wake's scans so far. */
+  evaluatedBudget = 0;
+  /** Ripening/voiding events committed across the wake's scans. */
+  eventBudget = 0;
+  /** The wake-start candidate snapshot; null until the first scan. */
+  candidates: Record<string, unknown>[] | null = null;
+  /** Pendings that reached a terminal scan outcome this wake
+   * (ripened / voided / blocked) — later scans skip them: their
+   * stored docs moved, and re-evaluating a stale copy would be
+   * deciding on a world that no longer exists. */
+  readonly terminal = new Set<string>();
+
+  get evaluationsLeft(): number {
+    return SCAN_EVALUATE_CAP - this.evaluatedBudget;
+  }
+  get eventsLeft(): number {
+    return SCAN_RIPEN_CAP - this.eventBudget;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +208,9 @@ export interface ScanSummary {
   voided: string[];
   failed: { pendingId: string; code: string }[];
   skippedUnprepared: string[];
+  /** P4-K23 (E3): pendings moved to the blocked-oversize attention
+   * state by deterministic size failures in this pass. */
+  blocked: string[];
 }
 
 export async function scanRipeness(
@@ -227,6 +221,10 @@ export async function scanRipeness(
     wakeActionId: string;
     executedDuringSeq: number;
     preparedPayloads?: ReadonlyMap<string, PreparedPayload>;
+    /** The wake's shared scan state (P4-K19). The dispatcher passes
+     * one per wake; omitted, the scan is its own wake (fresh budgets,
+     * fresh candidate snapshot) — the pre-close-out semantics. */
+    wakeState?: WakeScanState;
   }
 ): Promise<ScanSummary> {
   const { committerDb: db } = deps;
@@ -236,52 +234,66 @@ export async function scanRipeness(
     voided: [],
     failed: [],
     skippedUnprepared: [],
+    blocked: [],
   };
+  const state = opts.wakeState ?? new WakeScanState();
 
-  // Candidate snapshot: pending, in creation order (the §10 index order),
-  // plus expired claims (claimable again at this wake, §7.4.1).
-  const pendingSnap = await getDocs(
-    query(
-      collection(db, "sim_pending_consequences"),
-      where("status", "==", "pending"),
-      orderBy("createdAtSeq", "asc"),
-      orderBy("pendingId", "asc"),
-      limit(SCAN_EVALUATE_CAP)
-    )
-  );
-  const claimedSnap = await getDocs(
-    query(
-      collection(db, "sim_pending_consequences"),
-      where("status", "==", "ripening-claimed"),
-      limit(SCAN_EVALUATE_CAP)
-    )
-  );
-  const candidates: Record<string, unknown>[] = [];
-  for (const d of pendingSnap.docs) candidates.push(d.data() as Record<string, unknown>);
-  for (const d of claimedSnap.docs) {
-    const data = d.data() as Record<string, unknown>;
-    const claim = data.claim as { leaseExpiresAt?: { toDate?: () => Date } } | null;
-    const expired =
-      claim?.leaseExpiresAt &&
-      typeof claim.leaseExpiresAt.toDate === "function" &&
-      claim.leaseExpiresAt.toDate().getTime() <= Date.parse(opts.now);
-    if (expired) candidates.push(data);
+  // Candidate snapshot (P4-K19): taken ONCE per wake, at its first
+  // scan — pending, in creation order (the §10 index order), plus
+  // expired claims (claimable again at this wake, §7.4.1). Later
+  // scans in the wake continue over the same set: a pending created
+  // mid-wake is next wake's business (one generation per wake).
+  if (state.candidates === null) {
+    const pendingSnap = await getDocs(
+      query(
+        collection(db, "sim_pending_consequences"),
+        where("status", "==", "pending"),
+        orderBy("createdAtSeq", "asc"),
+        orderBy("pendingId", "asc"),
+        limit(SCAN_EVALUATE_CAP)
+      )
+    );
+    const claimedSnap = await getDocs(
+      query(
+        collection(db, "sim_pending_consequences"),
+        where("status", "==", "ripening-claimed"),
+        limit(SCAN_EVALUATE_CAP)
+      )
+    );
+    const candidates: Record<string, unknown>[] = [];
+    for (const d of pendingSnap.docs) candidates.push(d.data() as Record<string, unknown>);
+    for (const d of claimedSnap.docs) {
+      const data = d.data() as Record<string, unknown>;
+      const claim = data.claim as { leaseExpiresAt?: { toDate?: () => Date } } | null;
+      const expired =
+        claim?.leaseExpiresAt &&
+        typeof claim.leaseExpiresAt.toDate === "function" &&
+        claim.leaseExpiresAt.toDate().getTime() <= Date.parse(opts.now);
+      if (expired) candidates.push(data);
+    }
+    candidates.sort((a, b) => {
+      const bySeq = (a.createdAtSeq as number) - (b.createdAtSeq as number);
+      if (bySeq !== 0) return bySeq;
+      return String(a.pendingId).localeCompare(String(b.pendingId));
+    });
+    state.candidates = candidates.slice(0, SCAN_EVALUATE_CAP);
   }
-  candidates.sort((a, b) => {
-    const bySeq = (a.createdAtSeq as number) - (b.createdAtSeq as number);
-    if (bySeq !== 0) return bySeq;
-    return String(a.pendingId).localeCompare(String(b.pendingId));
-  });
+  const candidates = state.candidates;
 
   // Scan-time world view: counter + city activity + precondition docs.
+  // Scan-time evaluation is SCHEDULING only (P4-K20): it decides which
+  // candidates are worth claiming; the decision is re-made on the
+  // claimed snapshot below, and again in the commit transaction.
+  // Seq currency is the P4-K24 resolved tally (E4), not the Log head.
   const counterSnap = await getDoc(doc(db, "sim_counters", "log"));
   const counter = counterSnap.exists() ? (counterSnap.data() as Record<string, unknown>) : null;
   if (!counter) return summary;
-  let currentSeq = counter.lastSeq as number;
+  let currentSeq = resolvedSeqOf(counter);
 
   const cityActivitySeq = new Map<string, number>();
   const preconditionDocs = new Map<string, Record<string, unknown> | null>();
-  for (const pending of candidates.slice(0, SCAN_EVALUATE_CAP)) {
+  for (const pending of candidates) {
+    if (state.terminal.has(pending.pendingId as string)) continue;
     const condition = pending.ripenCondition as Record<string, unknown>;
     for (const cityId of (condition.requiresActionInCities as string[] | undefined) ?? []) {
       if (!cityActivitySeq.has(cityId)) {
@@ -306,25 +318,15 @@ export async function scanRipeness(
     docByPath: (path) => preconditionDocs.get(path) ?? null,
   };
 
-  let eventsCommitted = 0;
-  for (const candidate of candidates.slice(0, SCAN_EVALUATE_CAP)) {
-    summary.evaluated += 1;
+  for (const candidate of candidates) {
     const pendingId = candidate.pendingId as string;
+    if (state.terminal.has(pendingId)) continue;
+    if (state.evaluationsLeft <= 0) break;
+    state.evaluatedBudget += 1;
+    summary.evaluated += 1;
     const verdict = evaluateRipeness(candidate, view);
     if (verdict.state === "waiting") continue;
-    if (eventsCommitted >= SCAN_RIPEN_CAP) break;
-
-    const spec = candidate.payloadSpec as Record<string, unknown>;
-    if (
-      verdict.state === "ripe" &&
-      spec.mode === "generative" &&
-      !opts.preparedPayloads?.has(pendingId)
-    ) {
-      // Ripeness without a prepared payload: the worker layer has not
-      // produced content yet. Not a failure; the pending simply waits.
-      summary.skippedUnprepared.push(pendingId);
-      continue;
-    }
+    if (state.eventsLeft <= 0) break;
 
     const leaseId = `lease_${opts.cycleId}_${pendingId}`;
     const claimed = await claimPending(db, pendingId, {
@@ -361,39 +363,99 @@ export async function scanRipeness(
               ]),
             ];
       const prepared = opts.preparedPayloads?.get(pendingId);
-      const plan =
-        verdict.state === "void"
+
+      // P4-K20 re-evaluation (Phase 4 close-out, E2): the AGR
+      // predicates are re-run on the CLAIMED snapshot — the world as
+      // it stands now, after every earlier commit in this pass — and
+      // the CLAIMED verdict governs. A flip (ripen <-> void <-> wait)
+      // produces the flipped outcome, never a commit of the stale
+      // scan verdict.
+      let finalVerdict: RipenessVerdict = evaluateRipeness(
+        claimed,
+        buildRipenessView(claimed, {
+          counter: snapshotDoc(snapshot, "sim_counters/log"),
+          nowIso: opts.now,
+          docByPath: (path) => snapshotDoc(snapshot, path),
+          activityFallback: cityActivitySeq,
+        })
+      );
+      if (finalVerdict.state === "waiting") {
+        // Not ripe after all — release without a failure record; the
+        // pending simply waits for a later wake.
+        await releasePendingClaim(db, pendingId, { leaseId, now: opts.now });
+        continue;
+      }
+      const unpreparedGenerative = (v: RipenessVerdict): boolean =>
+        v.state === "ripe" &&
+        (claimed.payloadSpec as Record<string, unknown>).mode === "generative" &&
+        !prepared;
+      if (unpreparedGenerative(finalVerdict)) {
+        // Ripeness without a prepared payload: the worker layer has
+        // not produced content yet. Not a failure; release and wait.
+        await releasePendingClaim(db, pendingId, { leaseId, now: opts.now });
+        summary.skippedUnprepared.push(pendingId);
+        continue;
+      }
+
+      // Drive the commit for the standing verdict; a committer-side
+      // verdict flip (the world moved between materialization and
+      // the commit transaction) re-drives ONCE with the flipped
+      // verdict, still inside this pass and this claim.
+      let outcome: Awaited<ReturnType<typeof commitResolution>> | null = null;
+      for (let drive = 0; drive < 2; drive += 1) {
+        const isVoid = finalVerdict.state === "void";
+        const plan = isVoid
           ? resolveVoiding(snapshot, claimed, {
               baselineRegistry: deps.baselineRegistry,
-              voidReason: verdict.reason,
+              voidReason: (finalVerdict as { reason: string }).reason,
             })
           : resolveRipening(snapshot, claimed, {
               baselineRegistry: deps.baselineRegistry,
               prepared,
             });
-      const outcome = await commitResolution(
-        { db, baselineRegistry: deps.baselineRegistry },
-        {
-          resolutionId:
-            verdict.state === "void" ? `void_${pendingId}` : `ripen_${pendingId}`,
-          sourceKind: verdict.state === "void" ? "pending-voiding" : "pending-ripening",
-          now: opts.now,
-          plan,
-          expectedHeads: snapshot.heads,
-          snapshotPaths,
-          queryRecords: snapshot.queries,
-          pending: claimed,
-          claimLeaseId: leaseId,
-          prepared,
-          preparedInputHash: prepared?.inputHash ?? null,
-          wakeActionId: opts.wakeActionId,
-          executedDuringSeq: opts.executedDuringSeq,
-          voidReason: verdict.state === "void" ? verdict.reason : undefined,
+        outcome = await commitResolution(
+          { db, baselineRegistry: deps.baselineRegistry },
+          {
+            resolutionId: isVoid ? `void_${pendingId}` : `ripen_${pendingId}`,
+            sourceKind: isVoid ? "pending-voiding" : "pending-ripening",
+            now: opts.now,
+            plan,
+            expectedHeads: snapshot.heads,
+            snapshotPaths,
+            queryRecords: snapshot.queries,
+            pending: claimed,
+            claimLeaseId: leaseId,
+            prepared,
+            preparedInputHash: prepared?.inputHash ?? null,
+            wakeActionId: opts.wakeActionId,
+            executedDuringSeq: opts.executedDuringSeq,
+            voidReason: isVoid ? (finalVerdict as { reason: string }).reason : undefined,
+          }
+        );
+        if (outcome.status !== "verdict-flip") break;
+        const flipped = outcome.verdict;
+        if (flipped.state === "waiting" || drive === 1) {
+          // Flip to wait (or a second flip): release and let the
+          // next wake re-decide. Nothing was written by either drive.
+          await releasePendingClaim(db, pendingId, { leaseId, now: opts.now });
+          outcome = null;
+          break;
         }
-      );
+        if (unpreparedGenerative(flipped)) {
+          await releasePendingClaim(db, pendingId, { leaseId, now: opts.now });
+          summary.skippedUnprepared.push(pendingId);
+          outcome = null;
+          break;
+        }
+        finalVerdict = flipped;
+        outcome = null; // re-drive with the flipped verdict
+      }
+      if (!outcome) continue;
+
       if (outcome.status === "committed" || outcome.status === "already-committed") {
-        eventsCommitted += 1;
-        if (verdict.state === "void") summary.voided.push(pendingId);
+        state.eventBudget += 1;
+        state.terminal.add(pendingId);
+        if (finalVerdict.state === "void") summary.voided.push(pendingId);
         else summary.ripened.push(pendingId);
         if (outcome.status === "committed") {
           currentSeq = outcome.manifest.lastSeq as number;
@@ -407,12 +469,26 @@ export async function scanRipeness(
     } catch (error) {
       const code =
         error instanceof CommitError ? error.code : "RIPENING_PREPARATION";
-      await releasePendingClaim(db, pendingId, {
-        leaseId,
-        now: opts.now,
-        failureCode: code,
-      });
-      summary.failed.push({ pendingId, code });
+      // P4-K23 taxonomy (E3): deterministic size failures block the
+      // pending by name and burn no attempts; everything else is the
+      // attempts/retry class, as before.
+      if (ripeningFailureClass(code) === "size-block") {
+        await releasePendingClaim(db, pendingId, {
+          leaseId,
+          now: opts.now,
+          failureCode: code,
+          attentionState: "blocked-oversize",
+        });
+        state.terminal.add(pendingId);
+        summary.blocked.push(pendingId);
+      } else {
+        await releasePendingClaim(db, pendingId, {
+          leaseId,
+          now: opts.now,
+          failureCode: code,
+        });
+        summary.failed.push({ pendingId, code });
+      }
     }
   }
   return summary;

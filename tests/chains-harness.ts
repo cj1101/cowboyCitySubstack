@@ -8,25 +8,28 @@
  * the committer transaction) are simulated by a miniature committer
  * whose stamping mirrors committer.ts (entry seqs in plan order;
  * pending originSeq/createdAtSeq from the creating event's summary
- * seq; requiredSeq = originSeq + minSeqAdvance; eligibleAt = created
- * + minWallElapsedHours; city lastChangedSeq = the event's summary
- * seq).
+ * seq; requiredSeq = CREATION seq + minSeqAdvance (E1 anchoring);
+ * eligibleAt = created + minWallElapsedHours; city lastChangedSeq =
+ * the event's summary seq; the counter's lastResolvedSeq tally (E4)
+ * advances with every commit — the mirror commits resolved plans
+ * only, so its tally equals its head).
  *
- * The scan simulator mirrors scanRipeness's decision structure
- * exactly: candidates snapshotted at pass start in (createdAtSeq,
- * pendingId) order, pass-start RipenessView (counter + per-city
- * activity + precondition docs read ONCE), evaluate cap 25, event
- * cap 5, generative-without-prepared = skipped (not failed),
+ * The scan simulator mirrors scanRipeness's decision structure:
+ * candidates snapshotted at pass start in (createdAtSeq, pendingId)
+ * order, pass-start RipenessView (counter + per-city activity +
+ * precondition docs read ONCE), evaluate cap 25, event cap 5,
+ * generative-without-prepared = skipped (not failed),
  * per-candidate resolution against a FRESH snapshot, failures caught
  * and recorded with the attempt counter the claim-release path keeps.
  *
  * ONE deliberate deviation, flagged wherever it matters: the pass
- * takes a `guard` option implementing P4-K20's adopted-but-unlanded
- * committer/scan contract (AGR predicates re-evaluated against the
- * claimed snapshot before resolving). The F-05 section runs the same
- * pass with the guard OFF (landed behavior) and ON (the contract) so
- * the gap is executable evidence, not prose. Everything else is
- * landed behavior only.
+ * takes a `guard` option modeling P4-K20's re-evaluation — landed in
+ * the engine at the Phase 4 close-out (E2: claimed-snapshot
+ * re-evaluation in scanRipeness + the in-transaction guard in
+ * commitResolution). The F-05 section runs the same pass with the
+ * guard OFF (the pre-close-out scan) and ON (the landed contract) so
+ * both behaviors stay executable evidence, not prose. Everything
+ * else is landed behavior only.
  *
  * Descriptors are registered in-process exactly as the Build Lead's
  * assembly will: the registry's inline R-32 keeps its fixture kinds
@@ -70,7 +73,7 @@ import {
   verifyIndexSumAgainstCity,
   type GrowthAuditEntry,
 } from "../lib/sim/rules/growth";
-import { buildPendingDraft } from "../lib/sim/rules/pendingRules";
+import { buildPendingDraft, resolvedSeqOf, ripeningFailureClass } from "../lib/sim/rules/pendingRules";
 import { deriveDelay } from "../lib/sim/rules/arithmetic";
 import {
   PENDING_FANOUT_CAP,
@@ -132,7 +135,7 @@ const SEED_SEQ = 100;
 
 function newWorld(): World {
   const docs = new Map<string, Record<string, unknown>>();
-  docs.set("sim_counters/log", { lastSeq: SEED_SEQ, lastEntryHash: "seed" });
+  docs.set("sim_counters/log", { lastSeq: SEED_SEQ, lastResolvedSeq: SEED_SEQ, lastEntryHash: "seed" });
   docs.set("sim_world/current", { lastCommittedSeq: SEED_SEQ });
   return { docs, seq: SEED_SEQ, log: [] };
 }
@@ -181,7 +184,11 @@ function commitPlan(w: World, plan: ResolutionPlan, nowIso: string, resolutionId
     doc.createdAt = nowIso;
     doc.updatedAt = nowIso;
     const rc = { ...(doc.ripenCondition as Record<string, unknown>) };
-    rc.requiredSeq = originSeq + (rc.minSeqAdvance as number);
+    // E1 anchoring mirror (Phase 4 close-out): requiredSeq anchors to
+    // the CREATION seq (this summary's seq), not the chain origin —
+    // identical for generation-1 pendings, where originSeq IS the
+    // creation seq.
+    rc.requiredSeq = summarySeq + (rc.minSeqAdvance as number);
     rc.eligibleAt = new Date(
       Date.parse(nowIso) + (rc.minWallElapsedHours as number) * 3_600_000
     ).toISOString();
@@ -203,7 +210,9 @@ function commitPlan(w: World, plan: ResolutionPlan, nowIso: string, resolutionId
     w.docs.set(path, next);
   }
   w.seq = summarySeq;
-  w.docs.set("sim_counters/log", { lastSeq: w.seq, lastEntryHash: "harness" });
+  // E4 tally mirror: the mini-committer only commits resolved plans,
+  // so its resolved tally advances with every commit (== its head).
+  w.docs.set("sim_counters/log", { lastSeq: w.seq, lastResolvedSeq: w.seq, lastEntryHash: "harness" });
   w.docs.set("sim_world/current", { lastCommittedSeq: w.seq });
   w.log.push(...entries);
   return entries;
@@ -340,7 +349,10 @@ function runScanPass(
     frozenActivity.set(cityId, typeof city?.lastChangedSeq === "number" ? (city.lastChangedSeq as number) : 0);
   }
   const view: RipenessView = {
-    currentSeq: w.seq,
+    // E4: seq currency is the resolved tally, read off the counter —
+    // in this mirror tally == head (resolved-only commits), but the
+    // read goes through the same rule the engine uses.
+    currentSeq: resolvedSeqOf(w.docs.get("sim_counters/log") ?? null),
     nowIso,
     cityActivitySeq: frozenActivity,
     docByPath: (path) => frozen.get(path) ?? null,
@@ -360,10 +372,12 @@ function runScanPass(
     const pendingNow = w.docs.get(`sim_pending_consequences/${pendingId}`) ?? candidate;
     let finalVerdict: RipenessVerdict = verdict;
     if (opts.guard) {
-      // P4-K20 (adopted, unlanded): re-evaluate the AGR predicates
-      // against the claimed (fresh) snapshot before resolving.
+      // P4-K20 (landed as E2 at the close-out): re-evaluate the AGR
+      // predicates against the claimed (fresh) snapshot before
+      // resolving. The engine additionally re-checks inside the
+      // commit transaction; this mirror models the scan-side half.
       const freshView: RipenessView = {
-        currentSeq: w.seq,
+        currentSeq: resolvedSeqOf(w.docs.get("sim_counters/log") ?? null),
         nowIso,
         cityActivitySeq: liveActivity(w, activityCities),
         docByPath: (path) => w.docs.get(path) ?? null,
@@ -582,6 +596,9 @@ function runCanonical(): CanonicalRun {
       inputHash: "prepared-aetheric-001",
       generatedContent: {
         creditRubars: 1_150_000,
+        // E5 (Phase 4 close-out): the generation contract carries the
+        // disbursement figure; the fund books it at ripening.
+        disbursementRubars: 1_150_000,
         summaryText: INVENTION_TEXT,
         seed: "seed-aetheric-1",
         childBriefs: [],
@@ -628,10 +645,10 @@ function runCanonical(): CanonicalRun {
     assert.deepEqual(r34.changes, [], "information-only: no mechanical effect rides the finding");
   });
 
-  check("known gap E5 (evidence): generative ripening does not book the fund disbursement", () => {
+  check("E5 closed (close-out): generative ripening books the fund disbursement", () => {
     const fund = w.docs.get(fundPath("cascadia", "aetheric-innovation-fund"))!;
-    assert.equal(fund.disbursedRubars, 0, "landed applyRipeningEffect books fundPath only in determinate mode — specced as E5 in the prep report");
-    assert.equal(fund.remainingRubars, 2_000_000);
+    assert.equal(fund.disbursedRubars, 1_150_000, "the prepared disbursement figure books at ripening, as in determinate mode");
+    assert.equal(fund.remainingRubars, 850_000, "2,000,000 fund - 1,150,000 disbursed");
   });
 
   return { w, pendingId: realPendingId, originSeq, planHashes, ripeningEntries };
@@ -678,7 +695,7 @@ check("citySparse: identical shape, different derivation; zero propagation artif
   }), hoursLater(T0, 90));
   const pendingId = pending.pendingId as string;
   const prepared = new Map<string, PreparedPayload>([
-    [pendingId, { inputHash: "prepared-sparse-001", generatedContent: { creditRubars: 42_000, summaryText: "A hand-cranked seed drill, built in a barn.", seed: "s", childBriefs: [] } }],
+    [pendingId, { inputHash: "prepared-sparse-001", generatedContent: { creditRubars: 42_000, disbursementRubars: 42_000, summaryText: "A hand-cranked seed drill, built in a barn.", seed: "s", childBriefs: [] } }],
   ]);
   const pass = runScanPass(w, hoursLater(T0, 90), { prepared, guard: true });
   assert.deepEqual(pass.ripened, [pendingId]);
@@ -799,10 +816,13 @@ check("dissolve returns unspent Rubars; the breakthrough voids at its next evalu
 // ---------------------------------------------------------------------------
 // F-05 / P4-K20 — the one-pass case: two pendings, one fund. The
 // first ripening exhausts the fund; the second pending's precondition
-// dies INSIDE the same pass. Landed scan semantics evaluate verdicts
-// against pass-start docs and resolveRipening never re-checks — the
-// hazard is reproduced with the guard OFF and closed with it ON
-// (the guard is the adopted P4-K20 contract, specced as E2).
+// dies INSIDE the same pass. Pre-close-out scan semantics evaluated
+// verdicts against pass-start docs and resolveRipening never
+// re-checked: the second pending ripened off the exhausted fund.
+// The close-out lands the guard in the engine (E2): scanRipeness
+// re-evaluates on the claimed snapshot, and the committer re-checks
+// in-transaction. The mini scan below models the CLAIMED-snapshot
+// re-evaluation (guard flag) and its pre-close-out absence.
 // ---------------------------------------------------------------------------
 
 function insertPending(
@@ -819,7 +839,10 @@ function insertPending(
   out.createdAt = nowIso;
   out.updatedAt = nowIso;
   const rc = { ...(out.ripenCondition as Record<string, unknown>) };
-  rc.requiredSeq = originSeq + (rc.minSeqAdvance as number);
+  // E1 anchoring mirror: creation-anchored, as in the committer
+  // (identical here — this factory is always called with
+  // originSeq == createdAtSeq).
+  rc.requiredSeq = createdAtSeq + (rc.minSeqAdvance as number);
   rc.eligibleAt = hoursLater(nowIso, rc.minWallElapsedHours as number);
   out.ripenCondition = rc;
   w.docs.set(`sim_pending_consequences/${out.pendingId as string}`, out);
@@ -897,25 +920,32 @@ function buildSharedFundWorld(): { w: World; breakId: string; exhaustId: string 
 }
 
 section("F-05 / P4-K20 — one pass, two pendings, one fund");
-check("guard OFF (landed semantics): the stale verdict ripens off an exhausted fund — hazard reproduced", () => {
+check("guard OFF (no re-evaluation): E5's fund validation stops the money, but as the WRONG outcome — a burned attempt, not a voiding", () => {
   const { w, breakId, exhaustId } = buildSharedFundWorld();
   const prepared = new Map<string, PreparedPayload>([
-    [breakId, { inputHash: "prepared-shared", generatedContent: { creditRubars: 250_000, summaryText: "An invention the fund can no longer pay for.", seed: "s", childBriefs: [] } }],
+    [breakId, { inputHash: "prepared-shared", generatedContent: { creditRubars: 250_000, disbursementRubars: 250_000, summaryText: "An invention the fund can no longer pay for.", seed: "s", childBriefs: [] } }],
   ]);
   const treasuryBefore = cityStats(w, "cityE").treasuryRubars as number;
   const pass = runScanPass(w, hoursLater(T0, 200), { prepared, guard: false });
-  assert.deepEqual(pass.ripened, [exhaustId, breakId], "both ripen under pass-start verdicts");
+  assert.deepEqual(pass.ripened, [exhaustId], "only the determinate payout ripens");
   const fund = w.docs.get(fundPath("cityE", "shared-fund"))!;
   assert.equal(fund.remainingRubars, 0, "the first ripening exhausted the fund mid-pass");
   assert.equal(
-    cityStats(w, "cityE").treasuryRubars, treasuryBefore + 250_000,
-    "HAZARD: the second ripening still credited 250,000 R against the exhausted fund"
+    cityStats(w, "cityE").treasuryRubars, treasuryBefore,
+    "the stale ripening cannot credit: its disbursement exceeds the exhausted fund (E5 validation, fresh per-candidate snapshot)"
   );
+  assert.deepEqual(
+    pass.failed, [{ pendingId: breakId, code: "RIPENING_PREPARATION" }],
+    "but without the guard the world records a generation FAILURE — the pending stays pending and burns an attempt, where the truth is a voiding"
+  );
+  const doc = pendingDoc(w, breakId)!;
+  assert.equal(doc.status, "pending");
+  assert.equal(doc.attempts, 1);
 });
-check("guard ON (P4-K20 contract): the second pending VOIDS in the same pass — never ripens", () => {
+check("guard ON (P4-K20 contract, landed as E2): the second pending VOIDS in the same pass — never ripens", () => {
   const { w, breakId, exhaustId } = buildSharedFundWorld();
   const prepared = new Map<string, PreparedPayload>([
-    [breakId, { inputHash: "prepared-shared", generatedContent: { creditRubars: 250_000, summaryText: "An invention the fund can no longer pay for.", seed: "s", childBriefs: [] } }],
+    [breakId, { inputHash: "prepared-shared", generatedContent: { creditRubars: 250_000, disbursementRubars: 250_000, summaryText: "An invention the fund can no longer pay for.", seed: "s", childBriefs: [] } }],
   ]);
   const treasuryBefore = cityStats(w, "cityE").treasuryRubars as number;
   const pass = runScanPass(w, hoursLater(T0, 200), { prepared, guard: true });
@@ -987,7 +1017,7 @@ check("out-of-bounds preparations fail silently; in-bounds ripens; 6 child brief
     prepared: new Map([[pendingId, {
       inputHash: "p-ok",
       generatedContent: {
-        creditRubars: 50_000, summaryText: "A modest, real invention.", seed: "s",
+        creditRubars: 50_000, disbursementRubars: 50_000, summaryText: "A modest, real invention.", seed: "s",
         childBriefs: [childBrief(1), childBrief(2), childBrief(3), childBrief(4), childBrief(5), childBrief(6)],
       },
     }]]),
@@ -1000,13 +1030,15 @@ check("out-of-bounds preparations fail silently; in-bounds ripens; 6 child brief
   assert.ok(children.every((c) => c.originSeq === originSeq), "children inherit the chain origin seq");
   const capEntry = w.log.find((e) => (e.classification as Record<string, unknown> | null)?.capReached === true);
   assert.ok(capEntry, "the trimmed fan-out is on the record as a cap entry (F-12 posture)");
-  // E3 evidence (child requiredSeq anchoring, specced in the report):
+  // E1 landed (close-out): child requiredSeq anchors to the child's
+  // CREATION seq (P4-K19) — originSeq remains pure attribution (the
+  // assertion above: children still inherit the chain origin seq).
   const child = children[0];
   const rc = child.ripenCondition as Record<string, unknown>;
-  assert.equal(rc.requiredSeq, originSeq + (rc.minSeqAdvance as number),
-    "child delay anchors to the CHAIN ORIGIN seq, not its creation seq (P4-K19's anchoring fix is unlanded)");
-  assert.ok((rc.requiredSeq as number) <= (child.createdAtSeq as number),
-    "so a child can be seq-ripe the moment it exists — only its wall floor delays it");
+  assert.equal(rc.requiredSeq, (child.createdAtSeq as number) + (rc.minSeqAdvance as number),
+    "child delay anchors to its CREATION seq (P4-K19, landed as E1)");
+  assert.ok((rc.requiredSeq as number) > (child.createdAtSeq as number),
+    "so a generation-2 child can no longer be seq-ripe the moment it exists");
 });
 
 check("generation cap: a generation-3 ripening schedules NO children, cap on the record", () => {
@@ -1230,17 +1262,18 @@ check("authority, kind list, mode, shortfall, effect, duplicates", () => {
 // F-12 taxonomy evidence (P4-K23): what is landed vs what is specced
 // ---------------------------------------------------------------------------
 
-section("F-12 taxonomy — landed rows vs the blocked-oversize gap (E4)");
-check("deterministic write-set rejection exists for resolutions; blocked-oversize is NOT in the pending path", () => {
+section("F-12 taxonomy — the blocked-oversize row, landed at the close-out (E3)");
+check("deterministic write-set rejection exists for resolutions; blocked-oversize IS in the pending path (E3)", () => {
   const committer = readFileSync(new URL("../lib/sim/committer.ts", import.meta.url), "utf8");
   assert.ok(committer.includes("WRITE_SET_TOO_LARGE"), "landed: deterministic oversize rejection for resolution plans");
   assert.ok(committer.includes("MANIFEST_TOO_LARGE"), "landed: deterministic manifest rejection");
-  const pendingPath =
-    readFileSync(new URL("../lib/sim/pending.ts", import.meta.url), "utf8") +
-    readFileSync(new URL("../lib/sim/resolver.ts", import.meta.url), "utf8") +
-    committer;
-  assert.ok(!pendingPath.includes("blocked-oversize"),
-    "GAP (E4): no blocked-oversize pending state — an oversize ripening still burns attempts toward needsAttention");
+  const pendingSrc = readFileSync(new URL("../lib/sim/pending.ts", import.meta.url), "utf8");
+  assert.ok(pendingSrc.includes("blocked-oversize"),
+    "landed (E3): the pending path carries the blocked-oversize attention state");
+  assert.ok(pendingSrc.includes("attentionState"), "the release path routes size failures to it");
+  assert.equal(ripeningFailureClass("WRITE_SET_TOO_LARGE"), "size-block");
+  assert.equal(ripeningFailureClass("MANIFEST_TOO_LARGE"), "size-block");
+  assert.equal(ripeningFailureClass("RIPENING_PREPARATION"), "attempts");
   const dispatcher = readFileSync(new URL("../lib/sim/dispatcher.ts", import.meta.url), "utf8");
   assert.ok(dispatcher.includes("scanRipeness"), "the scan is dispatcher-wired (one pass per committed action)");
 });
