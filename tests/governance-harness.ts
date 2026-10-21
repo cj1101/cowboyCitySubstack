@@ -676,7 +676,10 @@ check("silence: silent mode resolves as the §8 silence entry shape", () => {
   assert.equal(classification.silence, true);
   assert.equal(classification.producingMode, "silent");
   const trigger = classification.trigger as Record<string, unknown>;
-  assert.equal(trigger.sourceKind, "log-event");
+  // PR #45 CI round 8: the §3.2 entry vocabulary (kind, not the
+  // pre-fix sourceKind mirror shape the verifier read as
+  // triggerless).
+  assert.equal(trigger.kind, "log-event");
   assert.equal(trigger.sourceId, "evt-1");
   assert.equal(trigger.sourceSeq, 0);
 });

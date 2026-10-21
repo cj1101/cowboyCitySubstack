@@ -34,6 +34,13 @@
  *           trigger citation — the stage resolves the built action;
  *           the same action unstamped rejects NO_TRIGGER_ROOT
  *           (PR #45 fix round 6's regression pin).
+ *   W25     §3.2 trigger citations on EVERY NPC-actor entry: the
+ *           fire entry, every entry of a delegated resolution, the
+ *           silence commit, the envelope outcome entry, and a
+ *           ripening under an NPC origin actor — asserted at the
+ *           producers and through the real standing verifier
+ *           (no NPC_TRACE_* findings; a stripped citation flags)
+ *           (PR #45 fix round 8's regression pin).
  *
  * Every composed plan runs the real validatePlan (the committer's
  * §5.6/§6.3 guards incl. F-02 reconciliation) before assertions.
@@ -47,6 +54,7 @@ import {
   collectActionReadPlan,
   digestQueryResults,
   resolveAction,
+  resolveRipening,
   snapshotFromDocs,
   validatePlan,
 } from "../lib/sim/resolver";
@@ -54,8 +62,10 @@ import { WakeScanState } from "../lib/sim/pending";
 import { buildFixtureBaselineRegistry } from "../lib/sim/baseline/fixtures";
 import { buildActionDoc } from "../lib/sim/intake";
 import { buildLogEntry, headHashOf } from "../lib/sim/log";
-import { summaryDraft } from "../lib/sim/rules/planHelpers";
+import { ruleEffectDraft, summaryDraft } from "../lib/sim/rules/planHelpers";
+import { verifyStandingLog } from "../lib/sim/verify";
 import type {
+  LogEntryDraft,
   ResolutionPlan,
   SimAction,
   SimActor,
@@ -63,6 +73,7 @@ import type {
   SnapshotQueryRecord,
 } from "../lib/sim/state";
 import {
+  buildSilenceCommit,
   buildSituationDoc,
   silencePlanWritesOnlySituation,
   type SimSituation,
@@ -1266,6 +1277,375 @@ check("W24 the executor's delegated-action construction carries the §3.2 situat
     "no fire entry is composed for the blocked rule"
   );
   assert.equal(planWriteFor(blockedFire.plan, `sim_situations/${sitF.situationId}`), undefined, "the card is not transitioned");
+});
+
+// ---------------------------------------------------------------------------
+section("W25 — §3.2 trigger citations on every NPC-actor entry (PR #45 CI round 8)");
+
+check("W25 every NPC-actor producer stamps classification.trigger — the standing verifier finds no NPC_TRACE_* over the produced entries; stripping a citation flags it", () => {
+  // PR #45 CI round 8: N4's verifyOk returned exactly two findings —
+  // NPC_TRACE_TRIGGER_MISSING at seq 13 (the delegation FIRE entry:
+  // buildRuleFireEntry's classification carried no trigger) and
+  // seq 14 (the delegated action's rule-effect DETAIL entry:
+  // stampMandateCitation stamped the summary only, and the
+  // verifier's traceability reads classification.trigger on EVERY
+  // NPC-actor entry). The full producer sweep indicted the whole
+  // class: the silence commit's {sourceKind, …} trigger shape (and
+  // its mirror in the stage's silence verdict), the envelope
+  // outcome entry (no trigger), attention conversions carrying an
+  // NPC origin actor, ripening/voiding entries under an NPC origin
+  // actor, the stage's reject plan, and the committer's
+  // WRITE_SET_TOO_LARGE fallback. This check drives the real
+  // producers for the entry-writing fixes and runs their standing
+  // entries through the REAL verifier.
+  const docs = baseDocs();
+  standingNpc(docs, {
+    version: {
+      structuredScope: {
+        triggerKinds: ["situation"],
+        allowedActionTypes: ["fixture_adjust"],
+        namedRecordIds: [],
+        counterpartyCityIds: null,
+      },
+    },
+  });
+  docs.set("sim_cities/cityA", {
+    cityId: "cityA",
+    stats: { infrastructure: 50, spirit: 50, treasuryRubars: 1_000_000 },
+    stateVersion: 1,
+  });
+  // The card's creating event is seq 2 in the assembled world below.
+  const sit = makeSituation({
+    kind: "proposal",
+    sourceSeq: 2,
+    detail: {
+      delegatedAction: {
+        actionType: "fixture_adjust",
+        structuredAction: { cityId: "cityA", field: "stats.infrastructure", delta: 5 },
+        targetCityIds: ["cityA"],
+      },
+    },
+  });
+  putSituation(docs, sit);
+  const snapshot = snapshotOf(docs);
+
+  // (1) The delegation fire entry (buildRuleFireEntry).
+  const step: WakePassStep = { kind: "delegation", situationId: sit.situationId };
+  const fired = evaluateDelegationStep(snapshot, sit.situationId, {
+    resolutionId: wakeStepResolutionId(step, CYCLE), cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(fired.evaluation?.outcome, "fire");
+  const fireEntry = fired.plan.entries.find(
+    (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+  );
+  assert.ok(fireEntry, "the fire entry stands in the plan");
+  assert.deepEqual((fireEntry.classification as Record<string, unknown>).trigger, {
+    kind: "situation", sourceId: sit.situationId, sourceSeq: 2, deliberation: null,
+  }, "the fire entry carries the §3.2 situation citation");
+
+  // (2) The delegated action's resolution — EVERY entry stamped,
+  // not only the summary (the seq-14 half of the conviction).
+  const npc = npcFromDoc(docs.get("sim_npcs/npc1") ?? null);
+  assert.ok(npc, "the standing steward parses");
+  const spec = readSituationActionSpec(sit);
+  assert.ok(spec, "the card carries a readable delegated spec");
+  const action = buildDelegatedActionDoc({
+    situationId: sit.situationId,
+    situationCreatedSeq: sit.createdSeq,
+    ownerUid: "ownerA",
+    npc,
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    spec,
+    audienceCityId: "cityA",
+    via: "rule1",
+    cycleId: CYCLE,
+    nowIso: NOW,
+  });
+  const actionPlan = runActionAt(docs, action, NOW);
+  assert.equal(actionPlan.outcome, "resolved");
+  assert.equal(actionPlan.entries.length, 2, "fixture_adjust writes a detail entry + a summary");
+  for (const entry of actionPlan.entries) {
+    const classification = entry.classification as Record<string, unknown>;
+    assert.deepEqual(classification?.trigger, {
+      kind: "situation", sourceId: sit.situationId, sourceSeq: 2, deliberation: null,
+    }, "every entry of the resolution carries the stage's verified trigger");
+    assert.deepEqual(classification?.mandate, {
+      mandateId: "mandate1", mandateVersion: 1, mode: "act-for-me",
+    }, "every entry of the resolution carries the stage's verified mandate citation");
+  }
+
+  // (3) The silence commit (buildSilenceCommit) — entry-vocab
+  // trigger, rooted at the seq its own summary text cites.
+  const sitSilence = makeSituation({ kind: "question", sourceSeq: 2 });
+  const silence = buildSilenceCommit({
+    situation: sitSilence,
+    producingMode: "npc-silent-mode",
+    ownerUid: "ownerA",
+    npcId: "npc1",
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    cityName: "Fixture City A",
+    resolvedSeq: 10,
+    resolvedByResolutionId: "wake_silence_w25",
+    now: NOW,
+  });
+  assert.equal(silence.entry.actor.type, "npc");
+  assert.deepEqual((silence.entry.classification as Record<string, unknown>).trigger, {
+    kind: "situation", sourceId: sitSilence.situationId, sourceSeq: 2, deliberation: null,
+  });
+
+  // (4) The envelope outcome entry (via the real terminal step).
+  const env = runningEnvelope({ taskId: "env_w25", createdSeq: 2 });
+  const envPlan = resolveEnvelopeTerminalStep(
+    snapshotOf(terminalWorld(env)),
+    { kind: "envelope-terminal", taskId: env.taskId, leaseId: LEASE, outcome: DONE_OUTCOME },
+    { resolutionId: "wake_envterm_w25" }
+  );
+  assert.equal(envPlan.entries.length, 1);
+  const outcomeEntry = envPlan.entries[0];
+  assert.equal(outcomeEntry.actor.type, "npc");
+  assert.equal(outcomeEntry.actor.envelopeId, "env_w25");
+  assert.deepEqual((outcomeEntry.classification as Record<string, unknown>).trigger, {
+    kind: "envelope", sourceId: "env_w25", sourceSeq: 2, deliberation: null,
+  });
+
+  // (5) A ripening whose origin actor is the NPC (resolveRipening):
+  // every entry the R-33 path writes cites the origin event.
+  const ripeningPending = {
+    pendingId: "pend_w25",
+    kind: "delayed-stat-effect",
+    originResolutionId: action.actionId,
+    originActionId: action.actionId,
+    originActor: {
+      type: "npc", memberId: null, npcId: "npc1", onBehalfOfMemberId: "ownerA",
+      mandateId: "mandate1", mandateVersion: 1, envelopeId: null,
+    },
+    originCityId: "cityA",
+    originSummaryText: "delegated adjustment ripens",
+    targetCityId: "cityA",
+    originSeq: 9,
+    generation: 0,
+    chainId: "pend_w25",
+    chainRootPendingId: "pend_w25",
+    payloadSpec: {
+      mode: "determinate",
+      effect: { type: "stat-delta", cityId: "cityA", field: "stats.spirit", delta: 3 },
+    },
+    audienceUids: ["ownerA"],
+  };
+  docs.set("sim_pending_consequences/pend_w25", ripeningPending);
+  const ripeningPlan = resolveRipening(snapshotOf(docs), ripeningPending, { baselineRegistry: registry });
+  assert.equal(ripeningPlan.entries.length, 2, "the R-33 detail entry + the summary");
+  for (const entry of ripeningPlan.entries) {
+    assert.equal(entry.actor.type, "npc");
+    assert.deepEqual((entry.classification as Record<string, unknown> | null)?.trigger, {
+      kind: "log-event", sourceId: "pend_w25", sourceSeq: 9, deliberation: null,
+    }, "ripening entries under an NPC origin actor cite the origin event");
+  }
+
+  // (6) The stage's silence verdict plan: same entry vocabulary.
+  const docsS = baseDocs();
+  standingNpc(docsS, {
+    npc: { permissionMode: "silent" },
+    version: {
+      permissionMode: "silent",
+      structuredScope: {
+        triggerKinds: ["situation"],
+        allowedActionTypes: ["fixture_adjust"],
+        namedRecordIds: [],
+        counterpartyCityIds: null,
+      },
+    },
+  });
+  putSituation(docsS, sit);
+  const npcS = npcFromDoc(docsS.get("sim_npcs/npc1") ?? null);
+  assert.ok(npcS);
+  const silentAction = buildDelegatedActionDoc({
+    situationId: sit.situationId,
+    situationCreatedSeq: sit.createdSeq,
+    ownerUid: "ownerA",
+    npc: npcS,
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    spec,
+    audienceCityId: "cityA",
+    via: "rule1",
+    cycleId: CYCLE,
+    nowIso: NOW,
+  });
+  const silencePlan = runActionAt(docsS, silentAction, NOW);
+  assert.equal(silencePlan.entries.length, 1);
+  const silenceVerdictClassification = silencePlan.entries[0].classification as Record<string, unknown>;
+  assert.equal(silenceVerdictClassification?.silence, true, "the silent mode dispositions to silence");
+  assert.deepEqual(silenceVerdictClassification?.trigger, {
+    kind: "situation", sourceId: sit.situationId, sourceSeq: 2, deliberation: null,
+  });
+
+  // (7) The stage's reject plan: the citation keys ride the
+  // rejection too (parity with the sibling verdict plans). The
+  // unstamped action is round 6's falsifiability shape — its
+  // citation is the defaulted one, the honest record of a
+  // triggerless attempt.
+  const unstamped: SimAction = {
+    ...action,
+    structuredAction: { ...(action.structuredAction as Record<string, unknown>) },
+  };
+  delete (unstamped.structuredAction as Record<string, unknown>).trigger;
+  const rejectPlan = runActionAt(docs, unstamped, NOW);
+  assert.equal(rejectPlan.rejection?.code, "NO_TRIGGER_ROOT");
+  const rejectClassification = rejectPlan.entries[0].classification as Record<string, unknown>;
+  assert.equal(rejectClassification?.mandateId, "mandate1");
+  assert.equal(rejectClassification?.mandateVersion, 1);
+  assert.deepEqual(rejectClassification?.trigger, {
+    kind: "log-event", sourceId: null, sourceSeq: null, deliberation: null,
+  });
+
+  // (8) An attention conversion whose pending's origin actor is
+  // the NPC: the conversion entry cites the pending's origin event.
+  const docsA = baseDocs();
+  docsA.set("sim_pending_consequences/pend-attn-w25", {
+    pendingId: "pend-attn-w25",
+    kind: "innovation-ripening",
+    status: "failed",
+    originCityId: "cityA",
+    originActor: {
+      type: "npc", memberId: null, npcId: "npc1", onBehalfOfMemberId: "ownerA",
+      mandateId: "mandate1", mandateVersion: 1, envelopeId: null,
+    },
+    originSeq: 9,
+    originResolutionId: action.actionId,
+    attempts: 3,
+    needsAttention: true,
+    lastFailure: { code: "GENERATION_FAILED", message: "the generator refused" },
+    attentionSituationId: null,
+    audienceUids: ["ownerA"],
+  });
+  const attnPlan = resolveAttentionStep(snapshotOf(docsA), "pend-attn-w25", { resolutionId: "wake_attention_w25" });
+  assert.equal(attnPlan.entries.length, 1);
+  assert.equal(attnPlan.entries[0].actor.type, "npc");
+  assert.deepEqual((attnPlan.entries[0].classification as Record<string, unknown>).trigger, {
+    kind: "log-event", sourceId: "pend-attn-w25", sourceSeq: 9, deliberation: null,
+  });
+
+  // Assemble the produced entries into a standing world and run the
+  // REAL verifier: genesis + member seed entries at the seqs the
+  // citations name (the card's creating event stands at 2; the
+  // delegated summary stands at 9 as the ripening's origin), then
+  // the produced entries in production order. The assertion is the
+  // §3.2 family — the synthetic assembly's empty manifest write
+  // sets are not the bijection's subject here; the emulator
+  // suite's verifyOk runs the full verifier over committed worlds.
+  const built: Record<string, unknown>[] = [];
+  const manifests = new Map<string, Record<string, unknown>>();
+  let prevHash = "0".repeat(64);
+  const pushBuilt = (
+    draft: LogEntryDraft,
+    seq: number,
+    resolutionId: string,
+    entryIndexWithinResolution = 0
+  ): void => {
+    const entry = buildLogEntry(draft, {
+      seq,
+      resolutionSeq: seq - entryIndexWithinResolution,
+      resolutionId,
+      entryIndexWithinResolution,
+      resolvedAt: NOW,
+      rulesVersion: "sim-rules-0.5.0-phase5",
+      prevHash,
+      wakeActionId: null,
+      executedDuringSeq: null,
+    }) as unknown as Record<string, unknown>;
+    prevHash = entry.entryHash as string;
+    built.push(entry);
+    manifests.set(resolutionId, { writeSet: [], lastSeq: seq });
+  };
+  pushBuilt(
+    {
+      ...ruleEffectDraft({
+        actor: {
+          type: "system", memberId: null, npcId: null, onBehalfOfMemberId: null,
+          mandateId: null, mandateVersion: null, envelopeId: null,
+        } as SimActor,
+        summaryText: "genesis",
+      }),
+      kind: "genesis",
+      summary: true,
+    } as LogEntryDraft,
+    1,
+    "genesis"
+  );
+  for (const seq of [2, 3, 4, 5, 6]) {
+    pushBuilt(
+      summaryDraft({ actor: OWNER, cityId: "cityA", cityIds: ["cityA"], summaryText: `seed entry ${seq}` }),
+      seq,
+      `w25-seed-${seq}`
+    );
+  }
+  pushBuilt(fireEntry, 7, wakeStepResolutionId(step, CYCLE));
+  actionPlan.entries.forEach((draft, i) => pushBuilt(draft, 8 + i, action.actionId, i));
+  pushBuilt(silence.entry, 10, "wake_silence_w25");
+  pushBuilt(outcomeEntry, 11, "wake_envterm_w25");
+  ripeningPlan.entries.forEach((draft, i) => pushBuilt(draft, 12 + i, "ripen_pend_w25", i));
+  const lastSeq = 13;
+
+  const stateDocs = new Map<string, Record<string, unknown>>();
+  stateDocs.set("sim_npcs/npc1", docs.get("sim_npcs/npc1") as Record<string, unknown>);
+  stateDocs.set("sim_mandates/mandate1", docs.get("sim_mandates/mandate1") as Record<string, unknown>);
+  stateDocs.set(
+    "sim_mandates/mandate1/versions/1",
+    docs.get("sim_mandates/mandate1/versions/1") as Record<string, unknown>
+  );
+  stateDocs.set(
+    "sim_task_envelopes/env_w25",
+    planWriteFor(envPlan, "sim_task_envelopes/env_w25")?.afterDoc as Record<string, unknown>
+  );
+  stateDocs.set(
+    "sim_task_outputs/env_w25",
+    planWriteFor(envPlan, "sim_task_outputs/env_w25")?.afterDoc as Record<string, unknown>
+  );
+  const world = {
+    entries: built,
+    manifests,
+    counter: { lastSeq, lastEntryHash: prevHash },
+    world: { lastCommittedSeq: lastSeq },
+    stateDocs,
+    baselineRegistry: registry,
+  };
+  const result = verifyStandingLog(world);
+  assert.deepEqual(
+    result.findings.filter((f) => f.code.startsWith("NPC_TRACE")),
+    [],
+    "no NPC_TRACE_* findings over the produced entries"
+  );
+
+  // Falsifiability: strip the fire entry's citation → the verifier
+  // flags the round-8 finding at the fire entry's seq; strip the
+  // delegated DETAIL entry's → flagged at its seq.
+  const stripAt = (seq: number) => ({
+    ...world,
+    entries: built.map((e) =>
+      e.seq === seq
+        ? {
+            ...e,
+            classification: {
+              ...(e.classification as Record<string, unknown>),
+              trigger: undefined,
+            },
+          }
+        : e
+    ),
+  });
+  const tamperedFire = verifyStandingLog(stripAt(7) as never);
+  assert.ok(
+    tamperedFire.findings.some((f) => f.code === "NPC_TRACE_TRIGGER_MISSING" && f.seq === 7),
+    "a triggerless fire entry is flagged at its seq"
+  );
+  const tamperedDetail = verifyStandingLog(stripAt(8) as never);
+  assert.ok(
+    tamperedDetail.findings.some((f) => f.code === "NPC_TRACE_TRIGGER_MISSING" && f.seq === 8),
+    "a triggerless detail entry is flagged at its seq"
+  );
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);
