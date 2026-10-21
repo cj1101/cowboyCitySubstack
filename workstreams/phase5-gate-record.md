@@ -85,7 +85,7 @@ green locally at assembly (see §7) and run in CI on this PR.
 | **P5-G6** Envelopes | **CLOSED (built form)** | npc-core N5: fire-spawned envelope claimed in the same wake (the worker observes it RUNNING at claim time), exactly one output record, card rests `awaiting_owner`. N6: owner-direct spawn stands QUEUED; a worker-less wake defers (`deferredNoWorker: 1`, claims nothing); duplicate spawn refuses `ENVELOPE_ALREADY_EXISTS`; cancel-before-claim is terminal-without-output (`cancelled_before_claim`, `outputId: null` — F-E8's disposition) and never resurrects under a later worker wake. NEED-INFO/FAILED output forms and wrong-thread/double-complete refusals: envelopes harness E-series (pure venue). |
 | **P5-G7** Delegation rules | **CLOSED (built form)** | npc-core N3: `delegationRule.set` writes root + version; the standing root's `ruleHash` equals `computeRuleHash` over the same field set (parity in the emulator venue; PR-3 confirmed the same digest against Vera's vectors). N4: the fire entry cites rule id + version (`classification.delegationFire`, `delegationRuleId`, `delegationRuleVersion`) and the card's handling record cites both. Specificity/priority/wait ordering, caps deferral (a capped fire writes nothing), hash-collision and foreign-NPC refusals: situations-harness + governance-harness legs. |
 | **P5-G8** Revocation races | **CLOSED (built form)** | npc-core N8, in the emulator venue: `mandate.revoke` clears the NPC snapshot in the same resolution; a later matching card is **blocked** at the boundary (`delegation.blocked`, the §7.3 evaluation entry stands, the card rests open, treasury unchanged) — never silently re-authorized. Claim/execution-time revalidation bite, the ripening-reach fact (`revocationReaches("ripening") === false`, recorded at PR-4), and the envelope survival asymmetry (Vera flag 3): wake-harness + authority-harness legs. Live form (production worker claim/lease/crash) closes only when the §1 chain executes. |
-| **P5-G9** Rules lattice | **CLOSED WITH ONE NAMED OPEN ITEM (A-7)** | The PR-1 rules matrix (owner-pending writes allowed pre-effectiveness; committer-only effectiveness flips; effective versions + task outputs deletable by **no** identity; non-owner and fabric-**worker** writes to authoritative collections refused; the §9.6 audience fences) stands merged and green since #38. npc-core N9 adds the dispatcher-venue undo legs: a leaf governance resolution undoes totally (entries + manifest + source action erased, doc restored); a cascaded resolution (`mandate.set` consumed by N4's fire) refuses `DEPENDENTS_EXIST`. **OPEN ITEM: the D6-dependent deletion-inside-restore assertion remains HELD OUT** — see §6. G9 closes with that one item named open; it does not silently ride the §9.8 default. Live form (production committer fences) closes only when the §1 chain executes. |
+| **P5-G9** Rules lattice | **CLOSED WITH ONE NAMED OPEN ITEM (A-7)** | The PR-1 rules matrix (owner-pending writes allowed pre-effectiveness; committer-only effectiveness flips; effective versions + task outputs deletable by **no** identity; non-owner and fabric-**worker** writes to authoritative collections refused; the §9.6 audience fences) stands merged and green since #38. npc-core N9 adds the dispatcher-venue undo legs: a leaf governance resolution undoes totally (entries + manifest + source action erased, doc restored); a cascaded resolution (`mandate.set` consumed by N4's fire) refuses — status `refused`; the standing dependencyReport names the fire as an S3 semantic dependent and names the first structural successor; the one-word summary code is `NOT_SUFFIX` under the Phase 2 structural precedence (adjudicated at fix round 12 below: brief §8.2/§8.3 + P2-K3 put the dependency proof in the report, not the code). **OPEN ITEM: the D6-dependent deletion-inside-restore assertion remains HELD OUT** — see §6. G9 closes with that one item named open; it does not silently ride the §9.8 default. Live form (production committer fences) closes only when the §1 chain executes. |
 | **P5-G10** Visibility + audit | **CLOSED (built form)** | PR evidence of record: PR-5 (#42) — queue reads scoped per owner, Log badging, §11.4 export touchpoints. npc-core N11: the §11.4 pure builders (`buildSituationsWorkbook`, `buildNpcRegisterWorkbook`) over bundles mapped from the scenario's **standing** state — in-scope builds stand with exactly the scenario's records; a foreign requester fails closed (throws; no partial file). Banking §7.5 builders: banking-harness legs (PR-6). The A-7-adjacent audit-export interaction (P2-K9 follow-up) is a carried note, §4. |
 | **P5-G11** Situations lifecycle | **CLOSED (built form; A-5 PR-evidence half code-evidenced, human capture outstanding)** | CI half (state machine): npc-core walks open → handled (N4 follow-up), open → delegated → awaiting_owner (N5), open → silent (N7), awaiting_owner → handled via the F3 decline payload with its §6.1 outcome verb (N7), blocked-at-boundary rests open (N8); dedupe — the conversion's stamp means repeated wakes never mint a second card (N7); terminal states never exit (asserted by the silence/handled cards' stability across later wakes + the module's `SITUATION_TERMINAL` fences in the situations harness); no notification exists for any non-`major` situation (N7 count assertion). A-5 half: §5.2. |
 | **P5-G12** needsAttention conversion | **CLOSED (built form)** | npc-core N7, the countersign's fixture form: two **real** fixture-fund pendings patched to the pre-Phase-5 state (3 attempts, flag set, no Situation) convert exactly once on the first wake; the pendings remain `pending` throughout; handling the converted Situation does **not** clear the flag (P5-K8). The failure-path half (attempts 1–2 create nothing, the flag sets at 3, conversion follows) is sim-core CK7e's, green since PR #41 (its converted card is also what PR-4's fix rounds pinned). Backfill/dedupe idempotence: wake-harness W12. Live form (a wake-created Situation in production) closes only when the §1 chain executes. |
@@ -1557,3 +1557,178 @@ and N11 (exports over the standing scenario) run for the first
 time.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 11, 2026-10-21.*
+
+---
+
+## CI fix round 12 (PR #45) — N9(b): refusal-code precedence adjudicated — NOT_SUFFIX vs DEPENDENTS_EXIST; the dependency proof lives in the report
+
+**The stop.** CI round 11 (head `12c7b41`): Install + Rules +
+Vercel GREEN; N0–N8 pass; N9's status assertion (round 11's
+fix) passes, and the failure moved to
+`tests/npc-core.test.ts:1383`: the blocked op's `failure.code`
+is **`"NOT_SUFFIX"`**, the suite expected
+**`"DEPENDENTS_EXIST"`**. Log `pr45-simcore-log-r11.txt`.
+
+**Correction to the round-11 note, first.** The round-11 note
+states the standing record carried `failure.code:
+"DEPENDENTS_EXIST"`. No venue run had observed that code at
+the time: CI round 10 died at the *status* assertion, which
+precedes the code read, so the round-11 note asserted the code
+from the engine's branch shape rather than from evidence.
+CI round 11 is the first observation, and it disproves the
+claim. The record is corrected here; the round-11 vocabulary
+verdict itself (refused ≠ failed) stands and is not affected.
+
+**Check order as built** (`lib/sim/undo.ts`,
+`processUndoOperation`). The op moves `requested → checking`;
+then, in order: no target named / target not standing /
+genesis ⇒ `failed` + `TARGET_NOT_FOUND`; non-`action`
+source-kind ⇒ `refused` + `TARGET_NOT_UNDOABLE`;
+`buildDependencyReport` computes BOTH grounds over the
+standing world (structural: `counter.lastSeq !==
+target.lastSeq`, naming the resolution at `target.lastSeq + 1`;
+semantic: closure over later manifests whose
+`dependencyRefKeys` intersect the target's `outputRefKeys`
+frontier, classified S1–S7, plus the S6 pending-state checks
+and the untracked-change cross-check); authority failure ⇒
+`refused` + `UNDO_NOT_AUTHORIZED`; then ONE refused branch
+for both grounds:
+
+```ts
+code: report.structuralSuccessor ? "NOT_SUFFIX" : "DEPENDENTS_EXIST"
+```
+
+(line 426 — the only occurrence of either string in the repo
+or the design corpus). So when both grounds hold, the summary
+code names the structural one. The dependency scan itself is
+NOT short-circuited: the report standing on the op carries
+the successor AND every semantic blocker, whichever code is
+summarized.
+
+**The brief's governing text** (Phase 2 implementation
+brief; `phase2-decisions.md`). The brief prescribes **no
+failure.code vocabulary at all** — §2.5's shape leaves it an
+open string (`"code": "…"`). What it prescribes is a *named
+refusal*:
+
+- §8.2, structural class (presented first): "The target must
+  be the current chain suffix… A non-suffix target is refused
+  with the **first structural successor named**
+  (`structuralSuccessor` in §2.5…)". **P2-K3 (ADOPTED)**:
+  "Undo unwinds the Log LIFO by whole Resolution Event (brief
+  §8.2). A non-suffix target is refused with the first
+  structural successor named."
+- §8.2, semantic class: "The dependency graph (§8.3) over the
+  target must contain no dependent outside the resolution
+  itself. Each of these independently blocks, and the refusal
+  **names them by ID** (TC-U02)" — S1 expressly includes "an
+  NPC/delegated action triggered by it"; S3 is "another
+  member's (or their NPC's) logged action taken in response
+  to it".
+- §8.3, closing paragraph — the paragraph that settles this
+  round: "Under the suffix rule, S1/S3 closures are expected
+  empty in the common case (**a true dependent would itself be
+  a later resolution — i.e. a structural successor**). The
+  semantic graph still earns its keep: it catches the
+  non-resolution dependents (S4 publications, S6 pending
+  references, S7 externalizations, untracked drift) that a
+  pure seq check would miss, and **it produces the *named*
+  refusal TC-U02 requires instead of a bare 'not the
+  latest'**."
+- §8.4 step 3: "Blockers ⇒ status `refused`, report stands,
+  **nothing else changes**. The requester sees exactly what
+  must be undone or resolved first."
+
+**Dependency definition, and DEPENDENTS_EXIST's
+reachability.** Under §8.3 the dependency ground is defined
+over the closure + pending-state + cross-check — i.e. over
+the REPORT, not over the code. A resolution-dependent (the
+fire) is a structural successor *by the brief's own
+definition*, so for the N9(b) shape the two grounds coincide
+and the report is where both are proven. `DEPENDENTS_EXIST`
+surfaces only in the complementary case — the target IS the
+tail (no structural successor) yet semantic blockers stand:
+in the landed graph those are the blockers with no later
+manifest behind them (the untracked-change cross-check; any
+future non-resolution dependent that moves a target-created
+pending's standing fields without a manifest). It is a real
+branch, honestly reachable — but it is not, and under the
+brief cannot be, the code for a resolution-cascade.
+
+**TC-U evidence** (the passing venue of record,
+`tests/sim-core.test.ts` CK8). The battery asserts
+`failure.code` for **no** blocker case except
+`UNDO_NOT_AUTHORIZED` (TC-U06 — authority is checked before
+both grounds). TC-U03 (pure suffix, no dependents) proves
+`status: "refused"` + `dependencyReport.structuralSuccessor`
+naming the successor. TC-U04's semantic cases — S6 (pending +
+check-in reference), S3 (another member's citing resolution),
+S4 (verification relying on a publication) — are ALL
+non-suffix targets with later dependents standing, the S3
+case structurally identical to N9(b); each proves `status:
+"refused"` + `dependencyReport.semanticBlockers` naming the
+dependent by `refKey`. That is the venue-proven construction
+for a dependency refusal, and N9(b) now follows it exactly.
+
+**Verdict: SUITE at fault; the engine matches the brief.**
+The suite invented the expectation that a cascaded target's
+summary code names the semantic ground — the same failure
+mode as round 11's invented `"failed"`, one level down. The
+engine's precedence (structural summary first, both grounds
+always computed and reported) is the brief's §8.2/P2-K3
+posture implemented literally, and no design text assigns
+the code differently.
+
+**The restructured scenario** (`tests/npc-core.test.ts`
+N9(b); commit `b89f41a`). NOT a bare code swap — swapping the
+expected code to `NOT_SUFFIX` alone would have silently
+retired the gate's dependency-limit proof, since `NOT_SUFFIX`
+fires with zero dependents (TC-U03). N9(b) now asserts, in
+order: `status: "refused"` (unchanged); `failure.code:
+"NOT_SUFFIX"` with the precedence and its brief basis
+commented at the site; `dependencyReport.structuralSuccessor`
+naming a standing resolution at `target.lastSeq + 1`;
+`dependencyReport.semanticBlockers` containing `{kind:
+"S3", refKey: "resolution:<fireActionId>"}` — the fire named
+as the semantic dependent, TC-U04's assertion idiom — and
+the nothing-changed assertions (mandate root standing,
+treasury equal) + `verifyOk()`, unchanged. This is strictly
+stronger than the retired assertion: `DEPENDENTS_EXIST`
+alone would not have named the fire either; the report does.
+The S3 expectation is deterministic from the landed ref-key
+grammar, traced by reading: the delegated action's manifest
+`dependencyRefKeys` carry the input-head key
+`record-version:sim_mandates/mand-steward-1/versions/1@<stateVersion>`
+(the authority stage reads the standing version doc), which
+intersects the mandate.set's `outputRefKeys` frontier;
+classification eliminates to S3 (no S7 discovery form on the
+fire's entries, no target-created pending, `sourceKind:
+"action"`, no structure/publication/intel keys in its
+dependency keys, and its entry actor — the NPC — differs from
+the target's member actor). The G9 evidence row in §3 of
+this record is corrected to the same adjudicated wording.
+The A-7/P5-D6 holdout is untouched: no D6-dependent assertion
+was added, altered, or ridden.
+
+**Pin.** The restructured N9(b) assertions are the pin, in
+the gate's venue of record (A-1: `tests/npc-core.test.ts`
+inside the Sim core job). The engine side needs no new pin:
+TC-U03/TC-U04/TC-U06 already pin the report-based proof and
+the one code the battery reads, and they pass unchanged. No
+pure-venue pin for `undo.ts` exists or is possible — it is
+Firestore-bound; the emulator suites are its only venue, as
+throughout Phases 2–5.
+
+**Local regression** (branch tip after this round): `tsc
+--noEmit` clean · scoped ESLint on the touched test file 0
+errors · full pure battery green at landed counts
+(governance 59, banking 54, situations 32, wake 27, closeout
+29, chains 34, cat2 34, cat1 all, defense 12, acq 14, market
+27, lore 27; npc-core harness 37; authority + envelopes
+harnesses all-pass) · `next build` green. Emulator suites are
+CI's venue on the push; watch items: N9 completes (leaf
+erasure + the named-refusal cascade + `verifyOk()`), then
+N10 (novel-title NPC) and N11 (exports) run for the first
+time.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 12, 2026-10-21.*
