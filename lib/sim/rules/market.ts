@@ -2635,3 +2635,366 @@ function placeOrderHandler(ctx: HandlerContext): ResolutionPlan {
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// M-04 (transfer path) — a zero-price member-to-member transfer of
+// shares, confirmed as its own action so the ledger and Log stay
+// complete (§1.6 step 8: there are no off-Log transfers). Fees are
+// zero — and the fee line is still stated in the entry (§5.3). The
+// execution path of M-04 composes inside M-03/M-09 events
+// (settleMemberExecutions); this handler is the transfer path only.
+// ---------------------------------------------------------------------------
+
+function transferSharesHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-04";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId) {
+    return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "M-04: a transfer is a named member's act.");
+  }
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  const toMemberId = stringField(ctx.action, "toMemberId");
+  const quantity = positiveAmount(ctx.action, "quantityShares");
+  if (!corporationId || !homeCityId || !toMemberId || quantity === null) {
+    return rejectedPlan(descriptorId, "malformed-transfer", [descriptorId], "M-04: transfer_shares requires corporationId, homeCityId, toMemberId and a positive quantityShares.");
+  }
+  if (toMemberId === actorId) {
+    return rejectedPlan(descriptorId, "self-transfer", [descriptorId], "M-04: a transfer to oneself moves nothing and is not an event.");
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const { listing } = gate;
+  const sellerHolding = readHolding(ctx.snapshot, actorId, corporationId);
+  if (freeShares(sellerHolding) < quantity) {
+    return rejectedPlan(descriptorId, "insufficient-free-shares", [descriptorId], `M-04: ${actorId} holds ${freeShares(sellerHolding)} free shares of ${corporationId}; only free shares can be transferred (§5.4).`);
+  }
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const now = new Date(ctx.snapshot.now);
+  const acc: ChangeAcc = new Map();
+  mutateHolding(plan, ctx.snapshot, acc, {
+    memberId: actorId,
+    corporationId,
+    homeCityId,
+    deltaQuantity: -quantity,
+    deltaCommitted: 0,
+    deltaCostBasis: 0,
+    create: false,
+    seq,
+    resolutionId: ctx.resolutionId,
+    now,
+    formula: "M-04 transfer: the transferor delivers free shares at a zero price",
+  });
+  mutateHolding(plan, ctx.snapshot, acc, {
+    memberId: toMemberId,
+    corporationId,
+    homeCityId,
+    deltaQuantity: quantity,
+    deltaCommitted: 0,
+    deltaCostBasis: 0,
+    create: true,
+    seq,
+    resolutionId: ctx.resolutionId,
+    now,
+    formula: "M-04 transfer: the recipient's holding gains the shares; a zero-price acquisition adds zero cost basis (§5.4)",
+  });
+  let publicDelta = 0;
+  if (toMemberId !== listing.ownerMemberId) publicDelta += quantity;
+  if (actorId !== listing.ownerMemberId) publicDelta -= quantity;
+  if (publicDelta !== 0) {
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "publicHeldShares", entryCityId: null,
+      field: listingField(corporationId, "publicHeldShares"),
+      value: listing.publicHeldShares + publicDelta,
+      formula: "M-04 transfer: shares moving between founder and public hands re-count the public float",
+    });
+  }
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      changes: accFlush(acc, null),
+      recordsUpdated: [
+        holdingPath(actorId, corporationId),
+        holdingPath(toMemberId, corporationId),
+        listingPath(corporationId),
+      ],
+      summaryText: `M-04 transfer: ${actorId} transferred ${quantity} shares of ${corporationId} to ${toMemberId} at a zero price — value 0 R; buyer fee 0 R; seller fee 0 R (the fee line stands in every trade entry even at zero, §5.3). No price prints: the listing's last-trade and official prices do not move on a transfer. Trading status stands ${listing.tradingStatus} — a transfer is an ownership record, not an execution, and a halt does not freeze gifts.`,
+    })
+  );
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "transfer-shares",
+    scope: "market",
+    cityId: homeCityId,
+    summaryText: `Transferred ${quantity} shares of ${corporationId} from ${actorId} to ${toMemberId} at a zero price (fees 0 R).`,
+    extraClassification: { marketTransfer: { fromMemberId: actorId, toMemberId, quantityShares: quantity, priceRubars: 0 } },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-05 — cancel / expire an order. Cancellation is free and instant;
+// the anti-manipulation control is transparency (§1.5). Expiry is the
+// sweep (above), evaluated by every book-touching event.
+// ---------------------------------------------------------------------------
+
+function cancelOrderHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-05";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId) {
+    return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "M-05: a cancel is the order owner's act.");
+  }
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  if (!corporationId || !homeCityId) {
+    return rejectedPlan(descriptorId, "malformed-cancel", [descriptorId], "M-05: cancel_order requires corporationId and homeCityId.");
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const orderId = stringField(ctx.action, "orderId");
+  const allForListing = sa(ctx.action).allForListing === true;
+  if (!orderId && !allForListing) {
+    return rejectedPlan(descriptorId, "malformed-cancel", [descriptorId], "M-05: cancel_order names an orderId, or allForListing: true to cancel all of the actor's resting orders on the listing (§1.5).");
+  }
+  if (orderId) {
+    const targetDoc = snapshotDoc(ctx.snapshot, orderPath(orderId));
+    if (!targetDoc) {
+      return rejectedPlan(descriptorId, "order-not-found", [descriptorId], `M-05: no order record ${orderId} stands.`);
+    }
+    const target = targetDoc as unknown as MarketOrderRecord;
+    if (target.corporationId !== corporationId) {
+      return rejectedPlan(descriptorId, "order-not-found", [descriptorId], `M-05: order ${orderId} belongs to ${target.corporationId}, not ${corporationId}.`);
+    }
+    if (target.memberId !== actorId) {
+      return rejectedPlan(descriptorId, "not-order-owner", [descriptorId], `M-05: order ${orderId} belongs to ${target.memberId} — a member cancels only their own orders.`);
+    }
+  }
+
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const now = new Date(ctx.snapshot.now);
+  const acc: ChangeAcc = new Map();
+  const expired = expirySweep({
+    plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+    seq, resolutionId: ctx.resolutionId, now,
+  });
+  if (expired.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: accFlush(acc, null),
+        recordsUpdated: expired.map((o) => orderPath(o.orderId)),
+        summaryText: `M-05 expiry evaluated in this event: ${expired.map((o) => o.orderId).join(", ")} — status expired; committed shares released.`,
+      })
+    );
+  }
+
+  // Targets after the sweep (an order the sweep just expired is done —
+  // the cancel's intent is achieved and the plan says so).
+  const targets: MarketOrderRecord[] = [];
+  if (orderId) {
+    const planned = plannedDoc(plan, ctx.snapshot, orderPath(orderId));
+    const order = planned ? (planned as unknown as MarketOrderRecord) : null;
+    if (order && order.status === "resting") {
+      targets.push(order);
+    } else if (order && expired.some((o) => o.orderId === orderId)) {
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: null,
+          cityIds: [],
+          ruleIds: [descriptorId],
+          changes: [],
+          summaryText: `M-05: order ${orderId} expired in this event's sweep before the cancel landed — it no longer rests, which is what the cancel asked for.`,
+        })
+      );
+      pruneRecordClaims(plan);
+      return finishPlan(plan, ctx, {
+        ruleId: descriptorId,
+        verb: "cancel-order",
+        scope: "market",
+        cityId: homeCityId,
+        summaryText: `Order ${orderId} expired at this event's evaluation; the cancel is satisfied by the expiry.`,
+        extraClassification: { marketCancel: { orderId, disposition: "expired-in-event" } },
+      });
+    } else {
+      return rejectedPlan(descriptorId, "order-not-resting", [descriptorId], `M-05: order ${orderId} stands "${order?.status ?? "unknown"}" — only a resting order can be cancelled.`);
+    }
+  } else {
+    for (const { doc } of bookDocs(ctx.snapshot)) {
+      const planned = plannedDoc(plan, ctx.snapshot, orderPath(String(doc.orderId))) ?? doc;
+      const order = planned as unknown as MarketOrderRecord;
+      if (order.status === "resting" && order.memberId === actorId && order.corporationId === corporationId) {
+        targets.push(order);
+      }
+    }
+    if (targets.length === 0) {
+      return rejectedPlan(descriptorId, "no-resting-orders", [descriptorId], `M-05: ${actorId} has no resting orders on ${corporationId} to cancel.`);
+    }
+  }
+
+  const listing = plannedListing(plan, ctx.snapshot, corporationId) ?? gate.listing;
+  for (const order of targets) {
+    patchOrder(plan, ctx.snapshot, acc, order.orderId, {
+      status: "cancelled",
+      cancelReason: "owner-cancel",
+    }, "M-05: owner cancel — free and instant (§1.5)");
+    if (order.side === "sell" && order.quantityShares > 0) {
+      mutateHolding(plan, ctx.snapshot, acc, {
+        memberId: order.memberId,
+        corporationId,
+        homeCityId,
+        deltaQuantity: 0,
+        deltaCommitted: -order.quantityShares,
+        deltaCostBasis: 0,
+        create: false,
+        seq,
+        resolutionId: ctx.resolutionId,
+        now,
+        formula: "M-05: cancellation releases the order's committed shares",
+      });
+      if (order.kind === "float-offer") {
+        const current = plannedListing(plan, ctx.snapshot, corporationId);
+        if (current) {
+          setField(plan, ctx.snapshot, acc, {
+            path: listingPath(corporationId), docField: "committedFloatShares", entryCityId: null,
+            field: listingField(corporationId, "committedFloatShares"),
+            value: current.committedFloatShares - order.quantityShares,
+            formula: "M-05: cancelling the float offer releases the committed float (equivalent to an M-02 recall)",
+          });
+        }
+      }
+    }
+  }
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      changes: accFlush(acc, null),
+      recordsUpdated: [
+        ...targets.map((o) => orderPath(o.orderId)),
+        holdingPath(actorId, corporationId),
+        listingPath(corporationId),
+      ],
+      summaryText: `M-05 cancel: ${targets.map((o) => `${o.orderId} (${o.side} ${o.quantityShares} at ${o.limitPriceRubars} R${o.kind === "float-offer" ? ", the float offer" : ""})`).join("; ")} — cancelled by the owner; committed shares released. The listing's trading status stands ${listing.tradingStatus} — cancellation is lawful in any status.`,
+    })
+  );
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "cancel-order",
+    scope: "market",
+    cityId: homeCityId,
+    summaryText: `Cancelled ${targets.length} resting order(s) on ${corporationId}: ${targets.map((o) => o.orderId).join(", ")}.`,
+    extraClassification: { marketCancel: { orderIds: targets.map((o) => o.orderId), disposition: "owner-cancel" } },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-07 — suspend / resume a listing (owner). Suspension is a choice,
+// never a penalty (§1.8); resumption re-evaluates the coded halt
+// condition — a halt whose condition still holds never resumes.
+// ---------------------------------------------------------------------------
+
+function suspendResumeHandler(mode: "suspend" | "resume") {
+  return (ctx: HandlerContext): ResolutionPlan => {
+    const descriptorId = "M-07";
+    const npc = rejectNpc(ctx, descriptorId);
+    if (npc) return npc;
+    const corporationId = stringField(ctx.action, "corporationId");
+    const homeCityId = stringField(ctx.action, "homeCityId");
+    if (!corporationId || !homeCityId) {
+      return rejectedPlan(descriptorId, "malformed-action", [descriptorId], "M-07: the action requires corporationId and homeCityId.");
+    }
+    const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+    if (isPlan(gate)) return gate;
+    const ownerGate = requireOwner(ctx, descriptorId, gate.corp, corporationId);
+    if (isPlan(ownerGate)) return ownerGate;
+    const { corp, listing } = gate;
+    const reason = stringField(ctx.action, "reason") ?? "";
+    const plan = emptyPlan(descriptorId);
+    const acc: ChangeAcc = new Map();
+
+    if (mode === "suspend") {
+      if (listing.tradingStatus === "suspended") {
+        return rejectedPlan(descriptorId, "already-suspended", [descriptorId], `M-07: ${corporationId} is already suspended.`);
+      }
+      setField(plan, ctx.snapshot, acc, {
+        path: listingPath(corporationId), docField: "tradingStatus", entryCityId: null,
+        field: listingField(corporationId, "tradingStatus"), value: "suspended",
+        formula: "M-07: owner-confirmed suspension — the company goes deliberately dormant (§1.8)",
+      });
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: null,
+          cityIds: [],
+          ruleIds: [descriptorId],
+          changes: accFlush(acc, null),
+          recordsUpdated: [listingPath(corporationId)],
+          summaryText: `M-07 suspend: ${corporationId} is suspended by its owner (was ${listing.tradingStatus}). Owner's stated reason: ${reason === "" ? "(none stated)" : `"${reason}"`}. Shares remain held; resting orders persist, unexecutable; new orders reject as listing-suspended. Suspension changes no price.`,
+        })
+      );
+      pruneRecordClaims(plan);
+      return finishPlan(plan, ctx, {
+        ruleId: descriptorId,
+        verb: "suspend-listing",
+        scope: "company",
+        cityId: homeCityId,
+        summaryText: `Suspended trading in ${corporationId} (owner's act, M-07).`,
+        extraClassification: { listingStatus: { transition: `${listing.tradingStatus}->suspended`, reason } },
+      });
+    }
+
+    // resume
+    if (listing.tradingStatus !== "suspended" && listing.tradingStatus !== "halted") {
+      return rejectedPlan(descriptorId, "not-suspended", [descriptorId], `M-07: ${corporationId} stands "${listing.tradingStatus}" — there is no suspension or halt to resume from.`);
+    }
+    const { inputs } = assembleCodedInputs(plan, ctx.snapshot, corp, homeCityId);
+    if (inputs.downtimeFlag) {
+      return rejectedPlan(descriptorId, "halt-condition-holds", [descriptorId], `M-07: ${corporationId} cannot resume — the coded downtime condition still holds (it has linked structures and none is functioning, §1.8). No unhalt exists for a halt whose condition stands; resumption lands in the event that clears it (a repair), or here once one has.`);
+    }
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "tradingStatus", entryCityId: null,
+      field: listingField(corporationId, "tradingStatus"), value: "open",
+      formula: "M-07: owner resume with the coded halt condition verified clear",
+    });
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "haltReason", entryCityId: null,
+      field: listingField(corporationId, "haltReason"), value: null,
+      formula: "M-07: halt cause cleared",
+    });
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: accFlush(acc, null),
+        recordsUpdated: [listingPath(corporationId)],
+        summaryText: `M-07 resume: ${corporationId} trades again (was ${listing.tradingStatus}${listing.haltReason ? `, halt cause ${listing.haltReason}` : ""}). The coded downtime condition was re-evaluated in this event and does not hold. Owner's stated reason: ${reason === "" ? "(none stated)" : `"${reason}"`}.`,
+      })
+    );
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: "resume-listing",
+      scope: "company",
+      cityId: homeCityId,
+      summaryText: `Resumed trading in ${corporationId} (owner's act, M-07; halt condition verified clear).`,
+      extraClassification: { listingStatus: { transition: `${listing.tradingStatus}->open`, reason } },
+    });
+  };
+}
