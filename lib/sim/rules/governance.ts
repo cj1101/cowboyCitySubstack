@@ -1,15 +1,17 @@
 /**
  * Phase 5 governance — registration + engine core (Phase 5 train
- * PR-1 substrate; PR-2 engine core; assembly plan W1/W2, brief §3.3,
- * decisions P5-K6).
+ * PR-1 substrate; PR-2 engine core; PR-3 situations assembly;
+ * assembly plan W1/W2/W3, brief §3.3, decisions P5-K6).
  *
- * PR-2 state: `npc.create` (activation composition), `npc.edit`,
- * `npc.retire`, `npc.setMode`, `mandate.set`, `mandate.revoke`,
- * `delegationRule.set`, `envelope.spawn`, and `envelope.cancel` are
- * LIVE handlers composed over the ahead-built modules (`lib/npcs`,
- * `lib/envelopes`, `lib/authority` for the Tier B authoring fence).
- * The `situation.*` kinds keep their PR-1 deferral handlers naming
- * PR-3 — registered, logged, never silent (R-29 idiom).
+ * PR-3 state: all twelve §3.3 kinds are LIVE handlers. `npc.create`
+ * (activation composition), `npc.edit`, `npc.retire`, `npc.setMode`,
+ * `mandate.set`, `mandate.revoke`, `delegationRule.set`,
+ * `envelope.spawn`, and `envelope.cancel` compose over the
+ * ahead-built modules (`lib/npcs`, `lib/envelopes`, `lib/authority`
+ * for the Tier B authoring fence); `situation.handle`,
+ * `situation.delegate`, and `situation.silence` compose over Vera's
+ * W3 modules (`lib/sim/situations`, `lib/sim/delegation`) behind the
+ * §9.6 audience gate. No deferral handlers remain.
  *
  * Adapter discipline (PR-1's, carried): BUILDER_EPOCH is handed to the
  * module builders; plans stay clock-free — CREATE writes null
@@ -82,6 +84,16 @@ import {
   type EnvelopeSpawnSource,
   type TaskEnvelopeRecord,
 } from "../../envelopes";
+import {
+  SituationError,
+  buildSilenceCommit,
+  recordDelegation,
+  recordSelfHandling,
+  situationPath,
+  type HandlingTransition,
+  type SimSituation,
+} from "../situations";
+import { resolveDelegationAuthority } from "../delegation";
 
 const sa = (action: SimAction): Record<string, unknown> =>
   (action.structuredAction ?? {}) as Record<string, unknown>;
@@ -134,6 +146,9 @@ function asVersion(doc: Record<string, unknown>): SimMandateVersion {
 function asTeam(doc: Record<string, unknown> | null): SimTeam | null {
   return doc as unknown as SimTeam | null;
 }
+function asSituation(doc: Record<string, unknown>): SimSituation {
+  return doc as unknown as SimSituation;
+}
 
 /** The city's NPC records materialized by the roster query. */
 function rosterNpcs(snapshot: SimSnapshot): SimNpc[] {
@@ -157,6 +172,9 @@ function moduleRejection(
   }
   if (error instanceof EnvelopeValidationError) {
     return rejectedPlan(descriptorId, "ENVELOPE_INVALID", [descriptorId], `${verb} refused: ${error.message}`);
+  }
+  if (error instanceof SituationError) {
+    return rejectedPlan(descriptorId, error.code, [descriptorId], `${verb} refused: ${error.message}`);
   }
   return null;
 }
@@ -229,6 +247,84 @@ function requireMember(ctx: HandlerContext, descriptorId: string): ResolutionPla
     );
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// The audience gate for the three situation decisions (brief §6.3,
+// PR-3): the actor must be a member AND the situation's audience —
+// its named recipient, or a current owner of its audience city. This
+// is the resolver-side twin of the §9.6 rules fence (the member write
+// there is the same audience writing the same `handling` fields);
+// everyone else's decision attempt refuses AUTHORITY_REVOKED.
+// ---------------------------------------------------------------------------
+
+type SituationGate =
+  | { ok: true; situationDoc: Record<string, unknown>; situation: SimSituation }
+  | { ok: false; plan: ResolutionPlan };
+
+function requireSituationAudience(
+  ctx: HandlerContext,
+  descriptorId: string,
+  situationId: string
+): SituationGate {
+  const notMember = requireMember(ctx, descriptorId);
+  if (notMember) return { ok: false, plan: notMember };
+  const actor = ctx.action.actor;
+  const situationDoc = snapshotDoc(ctx.snapshot, situationPath(situationId));
+  if (!situationDoc) {
+    return {
+      ok: false,
+      plan: rejectedPlan(
+        descriptorId,
+        "SITUATION_NOT_FOUND",
+        [descriptorId],
+        `No situation record stands at ${situationPath(situationId)}.`
+      ),
+    };
+  }
+  const situation = asSituation(situationDoc);
+  if (situation.recipientUid !== null && situation.recipientUid === actor.memberId) {
+    return { ok: true, situationDoc, situation };
+  }
+  const cityId = situation.audienceCityId ?? situation.cityId;
+  if (cityId) {
+    const faction = snapshotDoc(ctx.snapshot, `factions/${cityId}`);
+    const owners = faction?.ownerUids;
+    if (Array.isArray(owners) && owners.includes(actor.memberId)) {
+      return { ok: true, situationDoc, situation };
+    }
+  }
+  return {
+    ok: false,
+    plan: rejectedPlan(
+      descriptorId,
+      "AUTHORITY_REVOKED",
+      [descriptorId],
+      `Authority revoked for ${actor.memberId} over situation ${situationId}: the handling decision belongs to its audience — the named recipient or a current owner of its audience city (§9.6).`
+    ),
+  };
+}
+
+/** Fold a Vera handling transition into a plan: the situation doc is
+ * the only write (recordClass "state", the module's changedFields).
+ * The module's `handling.decidedAt` is NULLED in the stored doc —
+ * plans are clock-free and the committer stamps only top-level
+ * timestamps in-transaction, so a builder Date would be written
+ * verbatim as a false instant; the decision's ordering truth is this
+ * resolution's Log seq. The module types decidedAt as `unknown`
+ * precisely to leave the stored form to the caller. */
+function writeSituationTransition(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  transition: HandlingTransition
+): void {
+  const doc: Record<string, unknown> = {
+    ...(transition.doc as unknown as Record<string, unknown>),
+    handling: transition.doc.handling
+      ? { ...transition.doc.handling, decidedAt: null }
+      : transition.doc.handling,
+  };
+  planWrite(plan, ctx.snapshot, situationPath(transition.doc.situationId), doc, "state", transition.changedFields);
 }
 
 // ---------------------------------------------------------------------------
@@ -357,43 +453,40 @@ function envelopeReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   return { paths };
 }
 
-// ---------------------------------------------------------------------------
-// Deferral handlers (R-29 idiom) — retained for the situation.* kinds.
-// ---------------------------------------------------------------------------
-
-function deferralHandler(
-  descriptorId: string,
-  kind: string,
-  landing: { step: string; label: string }
-): (ctx: HandlerContext) => ResolutionPlan {
-  return (ctx: HandlerContext): ResolutionPlan => {
-    const plan = emptyPlan(descriptorId);
-    plan.entries.push(
-      summaryDraft({
-        actor: ctx.action.actor,
-        actionId: ctx.action.actionId,
-        actionText: ctx.action.actionText,
-        cityId: ctx.action.targetCityIds[0] ?? null,
-        cityIds: ctx.action.targetCityIds,
-        ruleIds: [descriptorId],
-        classification: {
-          verb: kind,
-          scope: "governance",
-          ruleIds: [descriptorId],
-          unruled: false,
-          narrativeOnly: true,
-          deferral: landing.step,
-        },
-        summaryText:
-          `${kind} is REGISTERED but its engine lands with ${landing.label}: ` +
-          `the Phase 5 substrate (PR-1) registers the governance surface and its rules/index fences only, ` +
-          `so this action resolves narrative-only by design — no record is written, no state changes. ` +
-          `Stated in the open, never silently (the R-29 discipline).`,
-      })
-    );
-    actorCitations(plan, ctx.citations, ctx.resolutionId);
-    return plan;
-  };
+function situationReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const params = sa(seeds.action);
+  const paths: string[] = [];
+  const situationId = str(params.situationId);
+  if (situationId) paths.push(situationPath(situationId));
+  const npcId = str(params.npcId);
+  if (npcId) paths.push(`sim_npcs/${npcId}`);
+  const taskId = str(params.taskId);
+  if (taskId) paths.push(`sim_task_envelopes/${taskId}`);
+  const citedMandateId = str(params.mandateId);
+  if (citedMandateId) paths.push(`sim_mandates/${citedMandateId}`);
+  // Two-phase (F-01): the audience faction derives from the STORED
+  // situation doc; mandate version paths derive from the STORED
+  // roots — the cited mandate, or the handler NPC's standing mandate
+  // (the owner-directed delegation's narrower-of reads the version
+  // actually in force, never an actor nomination).
+  for (const [path, doc] of seeds.seedDocs) {
+    if (!doc) continue;
+    if (path.startsWith("sim_situations/")) {
+      const cityId = str(doc.audienceCityId) ?? str(doc.cityId);
+      if (cityId) paths.push(`factions/${cityId}`);
+    }
+    if (path.startsWith("sim_npcs/")) {
+      const npcCityId = str(doc.cityId);
+      if (npcCityId) paths.push(`factions/${npcCityId}`);
+      const standingMandateId = str(doc.currentMandateId);
+      if (standingMandateId) paths.push(`sim_mandates/${standingMandateId}`);
+    }
+    if (path.startsWith("sim_mandates/") && !path.includes("/versions/")) {
+      const currentVersion = num(doc.currentVersion);
+      if (currentVersion !== null) paths.push(`${path}/versions/${currentVersion}`);
+    }
+  }
+  return { paths };
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,10 +1591,238 @@ function envelopeCancelHandler(ctx: HandlerContext): ResolutionPlan {
 }
 
 // ---------------------------------------------------------------------------
-// The governance descriptors (registered in registry.ts by the Lead).
+// situation.handle / situation.delegate / situation.silence — the
+// three owner decisions on a Situation card (brief §6.3), composed
+// over Vera's W3 modules (PR-3 assembly). All three sit behind the
+// §9.6 audience gate above. The transitions are the module's; this
+// layer supplies the stored docs, the narrower-of inputs, and the
+// plan. markSituationHandled is deliberately NOT an action kind: it
+// fires inside the handling flow's own resolution (§6.3A atomicity),
+// and returnSituationToOpen belongs to the wake/escalation path
+// (PR-4) — neither is an owner decision on the card.
 // ---------------------------------------------------------------------------
 
-const SITUATIONS = { step: "phase-5-situations", label: "Situations + delegation (PR-3)" };
+function situationEntryCity(situation: SimSituation): { cityId: string | null; cityIds: string[] } {
+  const cityId = situation.audienceCityId ?? situation.cityId;
+  return { cityId, cityIds: cityId ? [cityId] : [] };
+}
+
+function situationHandleHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "situation.handle";
+  const params = sa(ctx.action);
+  const situationId = str(params.situationId);
+  if (!situationId) {
+    return rejectedPlan(descriptorId, "SITUATION_ID_REQUIRED", [descriptorId], "situation.handle requires structuredAction.situationId.");
+  }
+  const gate = requireSituationAudience(ctx, descriptorId, situationId);
+  if (!gate.ok) return gate.plan;
+  const actor = ctx.action.actor;
+  try {
+    // §6.3A: the decision is recorded; the card stays open and is
+    // marked handled only by the flow's own resolution.
+    const transition = recordSelfHandling(gate.situation, {
+      decidedByUid: actor.memberId as string,
+      decidedAt: BUILDER_EPOCH.toISOString(),
+      decisionNote: str(params.decisionNote),
+    });
+    const plan = emptyPlan(descriptorId);
+    writeSituationTransition(plan, ctx, transition);
+    nullStamps(plan);
+    const { cityId, cityIds } = situationEntryCity(gate.situation);
+    plan.entries.push(
+      summaryDraft({
+        actor: ctx.action.actor,
+        actionId: ctx.action.actionId,
+        actionText: ctx.action.actionText,
+        cityId,
+        cityIds,
+        ruleIds: [descriptorId],
+        classification: { verb: "situation.handle", scope: "city", ruleIds: [descriptorId], unruled: false },
+        recordsUpdated: [situationPath(situationId)],
+        summaryText: `Situation ${situationId} (${gate.situation.kind}) taken in hand by its owner: the decision is recorded on the card, which stays open until the handling flow's own resolution marks it handled (§6.3A).`,
+      })
+    );
+    actorCitations(plan, ctx.citations, ctx.resolutionId);
+    return plan;
+  } catch (error) {
+    const rejection = moduleRejection(descriptorId, error, "situation.handle");
+    if (rejection) return rejection;
+    throw error;
+  }
+}
+
+function situationDelegateHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "situation.handle";
+  const params = sa(ctx.action);
+  const situationId = str(params.situationId);
+  if (!situationId) {
+    return rejectedPlan(descriptorId, "SITUATION_ID_REQUIRED", [descriptorId], "situation.delegate requires structuredAction.situationId.");
+  }
+  const gate = requireSituationAudience(ctx, descriptorId, situationId);
+  if (!gate.ok) return gate.plan;
+  const actor = ctx.action.actor;
+  const npcId = str(params.npcId);
+  if (!npcId) {
+    return rejectedPlan(descriptorId, "NPC_ID_REQUIRED", [descriptorId], "situation.delegate requires structuredAction.npcId — the §6.3B handler pick.");
+  }
+  const npcGate = requireNpcGovernance(ctx, descriptorId, npcId);
+  if (!npcGate.ok) return npcGate.plan;
+  const npc = npcGate.npc;
+  if (npc.status !== "active") {
+    return rejectedPlan(descriptorId, "NPC_NOT_ACTIVE", [descriptorId], `NPC ${npcId} is ${npc.status} — only an active NPC can be delegated to (§6.3B handler pick).`);
+  }
+  const audienceCityId = gate.situation.audienceCityId ?? gate.situation.cityId;
+  if (audienceCityId && npc.cityId !== audienceCityId) {
+    return rejectedPlan(descriptorId, "DELEGATION_NPC_CITY_MISMATCH", [descriptorId], `Handler NPC ${npcId} serves ${npc.cityId}, not the situation's city ${audienceCityId} — the handler pick is a member of the card's own team (§6.3B).`);
+  }
+  // The mandate in force for the narrower-of: the mandate the action
+  // cites, else the NPC's standing mandate. Its CURRENT version doc
+  // is the authority input — never an actor-nominated version.
+  const mandateId = str(params.mandateId) ?? npc.currentMandateId ?? null;
+  let mandateVersion: SimMandateVersion | null = null;
+  let mandateVersionNumber: number | null = null;
+  if (mandateId) {
+    const rootPath = `sim_mandates/${mandateId}`;
+    const rootDoc = snapshotDoc(ctx.snapshot, rootPath);
+    if (!rootDoc) {
+      return rejectedPlan(descriptorId, "MANDATE_NOT_FOUND", [descriptorId], `No mandate root stands at ${rootPath}.`);
+    }
+    const root = asRoot(rootDoc);
+    if (root.npcId !== npcId) {
+      return rejectedPlan(descriptorId, "MANDATE_NPC_MISMATCH", [descriptorId], `Mandate ${mandateId} belongs to NPC ${root.npcId}, not the handler pick ${npcId}.`);
+    }
+    if (root.revokedSeq !== null) {
+      return rejectedPlan(descriptorId, "MANDATE_REVOKED", [descriptorId], `Mandate ${mandateId} was revoked at seq ${root.revokedSeq} — it cannot carry a delegation.`);
+    }
+    if (root.currentVersion !== null) {
+      const versionDoc = snapshotDoc(ctx.snapshot, `${rootPath}/versions/${root.currentVersion}`);
+      if (!versionDoc) {
+        return rejectedPlan(descriptorId, "MANDATE_VERSION_NOT_FOUND", [descriptorId], `The current version doc ${rootPath}/versions/${root.currentVersion} does not stand.`);
+      }
+      mandateVersion = asVersion(versionDoc);
+      mandateVersionNumber = root.currentVersion;
+    }
+  }
+  // A one-off envelope citation (§6.3B): the envelope must stand and
+  // be the deciding member's own task.
+  const taskId = str(params.taskId);
+  if (taskId) {
+    const envDoc = snapshotDoc(ctx.snapshot, `sim_task_envelopes/${taskId}`);
+    if (!envDoc) {
+      return rejectedPlan(descriptorId, "ENVELOPE_NOT_FOUND", [descriptorId], `No task envelope stands at sim_task_envelopes/${taskId}.`);
+    }
+    if (envDoc.requestingMemberId !== actor.memberId) {
+      return rejectedPlan(descriptorId, "ENVELOPE_NOT_OWNED", [descriptorId], `Task envelope ${taskId} belongs to ${String(envDoc.requestingMemberId)} — a delegation may cite only the decider's own envelope.`);
+    }
+  }
+  // Narrower-of (rule, mandate) with no rule in play: the owner's
+  // instruction is the act, and the effective mode is the narrowest
+  // of the NPC's standing mode and its mandate's mode (the module's
+  // resolveDelegationAuthority — the same arithmetic the evaluator
+  // and the wake pass use).
+  const authority = resolveDelegationAuthority({
+    npcMode: npc.permissionMode,
+    mandateVersion,
+    ruleMode: null,
+    ruleCaps: null,
+  });
+  try {
+    const transition = recordDelegation(gate.situation, {
+      decidedByUid: actor.memberId as string,
+      decidedAt: BUILDER_EPOCH.toISOString(),
+      npcId,
+      mandateId,
+      mandateVersion: mandateVersionNumber,
+      effectiveMode: authority.effectiveMode,
+      taskId,
+      actionId: null,
+      decisionNote: str(params.decisionNote),
+    });
+    const plan = emptyPlan(descriptorId);
+    writeSituationTransition(plan, ctx, transition);
+    nullStamps(plan);
+    const { cityId, cityIds } = situationEntryCity(gate.situation);
+    plan.entries.push(
+      summaryDraft({
+        actor: ctx.action.actor,
+        actionId: ctx.action.actionId,
+        actionText: ctx.action.actionText,
+        cityId,
+        cityIds,
+        ruleIds: [descriptorId],
+        classification: {
+          verb: "situation.delegate",
+          scope: "city",
+          ruleIds: [descriptorId],
+          unruled: false,
+          effectiveMode: authority.effectiveMode,
+          modeBinding: authority.modeBinding,
+        },
+        recordsUpdated: [situationPath(situationId)],
+        summaryText:
+          `Situation ${situationId} (${gate.situation.kind}) delegated to NPC ${npcId}` +
+          (mandateId ? ` under mandate ${mandateId} v${mandateVersionNumber ?? "?"}` : " under its standing mode") +
+          `: effective mode ${authority.effectiveMode} (narrower-of, binding: ${authority.modeBinding}); the card is ${transition.doc.status}.`,
+      })
+    );
+    actorCitations(plan, ctx.citations, ctx.resolutionId);
+    return plan;
+  } catch (error) {
+    const rejection = moduleRejection(descriptorId, error, "situation.delegate");
+    if (rejection) return rejection;
+    throw error;
+  }
+}
+
+function situationSilenceHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "situation.handle";
+  const params = sa(ctx.action);
+  const situationId = str(params.situationId);
+  if (!situationId) {
+    return rejectedPlan(descriptorId, "SITUATION_ID_REQUIRED", [descriptorId], "situation.silence requires structuredAction.situationId.");
+  }
+  const gate = requireSituationAudience(ctx, descriptorId, situationId);
+  if (!gate.ok) return gate.plan;
+  const actor = ctx.action.actor;
+  const { cityId } = situationEntryCity(gate.situation);
+  const faction = cityId ? snapshotDoc(ctx.snapshot, `factions/${cityId}`) : null;
+  const cityName = str(faction?.name) ?? cityId ?? "the city";
+  try {
+    // §8.1: the owner's explicit stay-silent IS the non-response
+    // commit — one entry (the module's, which is this resolution's
+    // summary), the situation write, no other state moves. The
+    // entry's resolvedSeq is this event's own summary seq.
+    const commit = buildSilenceCommit({
+      situation: gate.situation,
+      producingMode: "owner-explicit",
+      ownerUid: actor.memberId as string,
+      cityName,
+      resolvedSeq: summarySeqFor(ctx),
+      resolvedByResolutionId: ctx.resolutionId,
+      now: BUILDER_EPOCH.toISOString(),
+    });
+    const plan = emptyPlan(descriptorId);
+    const doc: Record<string, unknown> = {
+      ...(commit.situationAfter as unknown as Record<string, unknown>),
+      handling: commit.situationAfter.handling
+        ? { ...commit.situationAfter.handling, decidedAt: null }
+        : commit.situationAfter.handling,
+    };
+    planWrite(plan, ctx.snapshot, situationPath(situationId), doc, "state", commit.changedFields);
+    plan.entries.push(commit.entry);
+    nullStamps(plan);
+    actorCitations(plan, ctx.citations, ctx.resolutionId);
+    return plan;
+  } catch (error) {
+    const rejection = moduleRejection(descriptorId, error, "situation.silence");
+    if (rejection) return rejection;
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The governance descriptors (registered in registry.ts by the Lead).
+// ---------------------------------------------------------------------------
 
 export const GOVERNANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "npc.create": {
@@ -1548,7 +1869,7 @@ export const GOVERNANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     },
     readPlan: delegationRuleReadPlan,
     summary:
-      "Auto-delegation rule authoring (brief §7): versioned rules over sim_delegation_rules — root mirrors the current version's payload + status/effectiveSeq; disable is a new version with enabled=false (root status disabled). ruleHash is Vera's computeRuleHash field set, copied exactly (PR-3 confirms parity). Resolver-side fences: the handler NPC must be the author's own and serve the rule's city; alwaysWait requires wait-for-owner. Evaluation lands with Situations + delegation (PR-3).",
+      "Auto-delegation rule authoring (brief §7): versioned rules over sim_delegation_rules — root mirrors the current version's payload + status/effectiveSeq; disable is a new version with enabled=false (root status disabled). ruleHash is Vera's computeRuleHash field set, copied exactly (parity confirmed at PR-3 assembly against her module + harness vector). Resolver-side fences: the handler NPC must be the author's own and serve the rule's city; alwaysWait requires wait-for-owner. The evaluation module lands at PR-3 (lib/sim/delegation); the wake pass consuming it lands at PR-4.",
   },
   "situation.handle": {
     id: "situation.handle",
@@ -1558,12 +1879,13 @@ export const GOVERNANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     defaultBaselineSections: [],
     mayCreatePendings: false,
     handlers: {
-      "situation.handle": deferralHandler("situation.handle", "situation.handle", SITUATIONS),
-      "situation.delegate": deferralHandler("situation.handle", "situation.delegate", SITUATIONS),
-      "situation.silence": deferralHandler("situation.handle", "situation.silence", SITUATIONS),
+      "situation.handle": situationHandleHandler,
+      "situation.delegate": situationDelegateHandler,
+      "situation.silence": situationSilenceHandler,
     },
+    readPlan: situationReadPlan,
     summary:
-      "The three owner decisions on a Situation card (brief §6.3): handle it myself, delegate it, or stay silent (the §8 non-response commit). Registered at the substrate with stated deferrals — the handling flow lands with Situations + delegation (PR-3); the §9.6 decision-field fence is live from PR-1.",
+      "The three owner decisions on a Situation card (brief §6.3), live at PR-3 over Vera's W3 modules (lib/sim/situations + lib/sim/delegation) behind the §9.6 audience gate (recipient or audience-city owner; the §9.6 decision-field fence is live from PR-1): situation.handle records the self-handling decision — the card stays open until the handling flow's own resolution marks it handled; situation.delegate records the §6.3B delegation with the narrower-of effective mode computed from the NPC's standing mode and its mandate's current version (a silent effective mode refuses via the module's DELEGATE_TO_SILENT_NPC); situation.silence is the owner's explicit §8 non-response commit — one entry, the situation write, no state moves. Module SituationError codes pass through as rejection codes.",
   },
   "envelope.spawn": {
     id: "envelope.spawn",

@@ -17,8 +17,16 @@
  *       (NPC_ALREADY_EXISTS), numeric personality (the module's
  *       NUMERIC_PERSONALITY code, passed through), NPC actor
  *       (ACTOR_NOT_MEMBER: governance is an owner act).
- *   G4  The eleven deferred kinds resolve narrative-only with the
- *       deferral stated in the entry (R-29 idiom) and zero writes.
+ *   G4  No deferrals remain (PR-3): the situation.* kinds are live —
+ *       a situation action against a missing situation refuses by
+ *       name instead of resolving narrative-only.
+ *   G11 Situation decisions (PR-3): the §9.6 audience gate, the
+ *       §6.3A self-handling record, §6.3B delegation with the
+ *       narrower-of effective mode (module arithmetic), the silent
+ *       refusal, the §8 owner-explicit silence commit (one write,
+ *       approved phrasing, changes []), and ruleHash parity between
+ *       Vera's computeRuleHash and the governance copy over her
+ *       harness S4e payload (the pinned digest).
  *   G5  P5-K13 canonical half — buildLogEntry stores characterId only
  *       when it carries a value (absent ≡ null): a null-key actor
  *       stores byte-identically to a no-key actor and hashes the same;
@@ -57,6 +65,8 @@ import {
 } from "../lib/npcs";
 import { buildTaskOutput, envelopeTaskId } from "../lib/envelopes";
 import { computeDelegationRuleHash } from "../lib/sim/rules/governance";
+import { computeRuleHash } from "../lib/sim/delegation";
+import { silencePlanWritesOnlySituation } from "../lib/sim/situations";
 import { verifyStandingLog } from "../lib/sim/verify";
 import { ruleEffectDraft } from "../lib/sim/rules/planHelpers";
 import type { ResolutionPlan, SimAction, SimActor } from "../lib/sim/state";
@@ -367,28 +377,16 @@ check("an NPC actor cannot perform governance (stage refuses first, PR-2)", () =
 });
 
 // ---------------------------------------------------------------------------
-section("G4 — the remaining deferrals state themselves (R-29 idiom)");
-check("each deferred kind resolves narrative-only, zero writes, deferral named", () => {
-  // PR-2: the eight engine-core kinds are LIVE (sections G7–G9); only
-  // the situation.* kinds still defer, naming PR-3.
-  const deferred: Record<string, string> = {
-    "situation.handle": "phase-5-situations",
-    "situation.delegate": "phase-5-situations",
-    "situation.silence": "phase-5-situations",
-  };
-  for (const [kind, step] of Object.entries(deferred)) {
-    const action = memberAction(OWNER, "ownerA", kind, { cityId: "cityA" }, `req-defer-${kind}`);
+section("G4 — no deferrals remain (PR-3: the situation.* kinds are live)");
+check("a situation action against a missing situation refuses by name — no narrative-only deferral", () => {
+  // PR-1/PR-2: the situation.* kinds carried R-29 deferral handlers
+  // naming PR-3. PR-3 replaced them with live handlers over Vera's
+  // W3 modules (G11 proves the behavior); the deferral set is EMPTY.
+  for (const kind of ["situation.handle", "situation.delegate", "situation.silence"]) {
+    const action = memberAction(OWNER, "ownerA", kind, { situationId: "sit-missing" }, `req-nodefer-${kind}`);
     const plan = runAction(worldDocs(), action, NOW_A);
-    assert.equal(plan.outcome, "resolved", kind);
-    assert.equal(plan.writes.length, 0, kind);
-    assert.equal(plan.entries.length, 1, kind);
-    const entry = plan.entries[0];
-    const classification = entry.classification as Record<string, unknown>;
-    assert.equal(classification.narrativeOnly, true, kind);
-    assert.equal(classification.deferral, step, kind);
-    assert.equal(classification.unruled, false, `${kind} is ruled — registered, deferred`);
-    assert.ok(entry.summaryText.includes("REGISTERED"), `${kind} states the deferral`);
-    assert.ok(entry.summaryText.includes("never silently"), `${kind} names the discipline`);
+    assert.equal(plan.outcome, "rejected", kind);
+    assert.equal(plan.rejection?.code, "SITUATION_NOT_FOUND", kind);
   }
 });
 
@@ -1097,6 +1095,179 @@ check("characterId on an NPC actor is flagged (P5-K13); absent key never is", ()
   // the specific code is present.
   const result = verifyStandingLog(tampered as never);
   assert.ok(result.findings.some((f) => f.code === "CHARACTER_ID_ON_NON_MEMBER"));
+});
+
+section("G11 — situation decisions (PR-3): audience gate, §6.3 decisions, §8 silence, hash parity");
+function situationDocFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    situationId: "sit-1", cityId: "cityA", audienceCityId: "cityA",
+    audienceOwnerUidsSnapshot: ["ownerA"], recipientUid: null,
+    kind: "question", status: "open", severity: "routine",
+    title: "A question for Fixture City A", summary: "Fixture situation.",
+    detail: null,
+    source: { kind: "manual-action", sourceId: "evt-1", sourceSeq: 1, sourceResolutionId: "res-0" },
+    dedupeKey: "dedupe-fixture-1",
+    createdSeq: 1, createdAt: null, updatedAt: null,
+    handling: null, delegationCycleCount: 0,
+    resolvedSeq: null, resolvedByResolutionId: null,
+    ...overrides,
+  };
+}
+const OWNER_B: SimActor = { ...OWNER, memberId: "ownerB" };
+function situationDocs(overrides: Record<string, unknown> = {}): Map<string, Record<string, unknown> | null> {
+  const docs = worldDocs();
+  docs.set("sim_situations/sit-1", situationDocFixture(overrides));
+  return docs;
+}
+
+check("ruleHash parity: Vera's computeRuleHash == the governance copy == the pinned S4e digest", () => {
+  const payload = {
+    ruleId: "rule-9", ownerUid: "uid-owner-cascadia", cityId: "cascadia", version: 1, priority: 5,
+    match: { situationKinds: ["question"], sourceKinds: [], cityIds: null, counterpartyCityIds: null, minRubars: null, maxRubars: null, tags: [] },
+    handler: { npcId: "npc-steward", mode: "ask-first", mandateId: null },
+    caps: {}, alwaysWait: false, enabled: true,
+  };
+  const expected = "0b37d446b087f88be09adbb5cb193cae6c666eff775011ee6fc790725c434520";
+  assert.equal(computeRuleHash(payload as never), expected, "her module's own function, her S4e payload");
+  assert.equal(computeDelegationRuleHash(payload as never), expected, "the governance copy (PR-2)");
+  assert.equal(computeRuleHash({ ...payload, version: 2 } as never), computeDelegationRuleHash({ ...payload, version: 2 } as never), "parity holds off-vector too");
+});
+
+check("situation.handle records the §6.3A self-handling decision; the card stays open", () => {
+  const action = memberAction(OWNER, "ownerA", "situation.handle", {
+    situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-handle-1");
+  const plan = runAction(situationDocs(), action, NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  assert.equal(plan.writes.length, 1);
+  const after = plan.writes[0].afterDoc as Record<string, unknown>;
+  assert.equal(plan.writes[0].path, "sim_situations/sit-1");
+  assert.equal(after.status, "open", "§6.3A: handled is marked by the flow's own resolution, not the decision");
+  const handling = after.handling as Record<string, unknown>;
+  assert.equal(handling.mode, "self");
+  assert.equal(handling.decidedByUid, "ownerA");
+  assert.equal(handling.decidedAt, null, "clock-free adapter: decidedAt is nulled; the Log seq is the ordering truth");
+  assert.equal(after.updatedAt, null, "nulled for the committer's in-transaction stamp");
+  const entry = plan.entries[plan.entries.length - 1];
+  assert.deepEqual(entry.recordsUpdated, ["sim_situations/sit-1"]);
+  assert.deepEqual(entry.changes, [], "top-level record effects never ride changes[] (F-02 grammar)");
+});
+
+check("the §9.6 audience gate: a non-audience member's decision refuses AUTHORITY_REVOKED", () => {
+  const action = memberAction(OWNER_B, "ownerB", "situation.handle", {
+    situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-handle-2");
+  const plan = runAction(situationDocs(), action, NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
+});
+
+check("a terminal situation refuses with the module's SITUATION_TERMINAL code, passed through", () => {
+  const action = memberAction(OWNER, "ownerA", "situation.handle", {
+    situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-handle-3");
+  const plan = runAction(situationDocs({ status: "handled", resolvedSeq: 9 }), action, NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "SITUATION_TERMINAL");
+});
+
+function delegateDocs(npcMode: string, mandateMode: string | null): Map<string, Record<string, unknown> | null> {
+  const docs = situationDocs();
+  docs.set("sim_npcs/charA1", npcDocFixture({
+    permissionMode: npcMode,
+    currentMandateId: mandateMode ? "mand-1" : null,
+    currentMandateVersion: mandateMode ? 1 : null,
+  }));
+  if (mandateMode) {
+    docs.set("sim_mandates/mand-1", mandateRootFixture());
+    docs.set("sim_mandates/mand-1/versions/1", mandateVersionFixture(mandateMode));
+  }
+  return docs;
+}
+function delegateAction(requestId: string, extra: Record<string, unknown> = {}): SimAction {
+  return memberAction(OWNER, "ownerA", "situation.delegate", {
+    situationId: "sit-1", npcId: "charA1",
+    citations: { recordPaths: ["sim_situations/sit-1", "sim_mandates/mand-1"] },
+    ...extra,
+  }, requestId);
+}
+
+check("situation.delegate (act-for-me under a standing mandate) records the delegation on the card", () => {
+  const plan = runAction(delegateDocs("act-for-me", "act-for-me"), delegateAction("req-sit-del-1"), NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  const after = plan.writes.find((w) => w.path === "sim_situations/sit-1")?.afterDoc as Record<string, unknown>;
+  assert.equal(after.status, "delegated");
+  const handling = after.handling as Record<string, unknown>;
+  assert.equal(handling.mode, "delegated");
+  assert.equal(handling.npcId, "charA1");
+  assert.equal(handling.mandateId, "mand-1");
+  assert.equal(handling.mandateVersion, 1, "the version in force, read from the stored root — never actor-nominated");
+  const entry = plan.entries[plan.entries.length - 1];
+  assert.equal((entry.classification as Record<string, unknown>).effectiveMode, "act-for-me");
+});
+
+check("narrower-of: an ask-first mandate narrows an act-for-me NPC — the card awaits the owner", () => {
+  const plan = runAction(delegateDocs("act-for-me", "ask-first"), delegateAction("req-sit-del-2"), NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  const after = plan.writes.find((w) => w.path === "sim_situations/sit-1")?.afterDoc as Record<string, unknown>;
+  assert.equal(after.status, "awaiting_owner");
+  const entry = plan.entries[plan.entries.length - 1];
+  const classification = entry.classification as Record<string, unknown>;
+  assert.equal(classification.effectiveMode, "ask-first");
+  assert.equal(classification.modeBinding, "mandate");
+});
+
+check("delegating to a silent-mode handler refuses with the module's DELEGATE_TO_SILENT_NPC", () => {
+  const plan = runAction(delegateDocs("silent", null), delegateAction("req-sit-del-3"), NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "DELEGATE_TO_SILENT_NPC");
+});
+
+check("delegating to another owner's NPC refuses at the governance gate", () => {
+  const docs = situationDocs();
+  docs.set("sim_npcs/npc-b1", npcDocFixture({ npcId: "npc-b1", characterId: "charB1", cityId: "cityB", ownerUid: "ownerB" }));
+  const action = memberAction(OWNER, "ownerA", "situation.delegate", {
+    situationId: "sit-1", npcId: "npc-b1", citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-del-4");
+  const plan = runAction(docs, action, NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
+});
+
+check("a one-off envelope citation is recorded — and only the decider's own envelope may be cited", () => {
+  const docs = delegateDocs("act-for-me", null);
+  docs.set("sim_task_envelopes/task-1", { taskId: "task-1", requestingMemberId: "ownerA", npcId: "charA1", status: "QUEUED" });
+  const plan = runAction(docs, delegateAction("req-sit-del-5", { taskId: "task-1" }), NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  const after = plan.writes.find((w) => w.path === "sim_situations/sit-1")?.afterDoc as Record<string, unknown>;
+  assert.equal((after.handling as Record<string, unknown>).taskId, "task-1");
+  const docs2 = delegateDocs("act-for-me", null);
+  docs2.set("sim_task_envelopes/task-2", { taskId: "task-2", requestingMemberId: "ownerB", npcId: "charA1", status: "QUEUED" });
+  const plan2 = runAction(docs2, delegateAction("req-sit-del-6", { taskId: "task-2" }), NOW_A);
+  assert.equal(plan2.outcome, "rejected");
+  assert.equal(plan2.rejection?.code, "ENVELOPE_NOT_OWNED");
+});
+
+check("situation.silence commits the §8 non-response: one write, approved phrasing, changes []", () => {
+  const action = memberAction(OWNER, "ownerA", "situation.silence", {
+    situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-sil-1");
+  const plan = runAction(situationDocs(), action, NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  assert.equal(silencePlanWritesOnlySituation(plan, "sit-1"), true, "§8.1(3): the situation doc is the plan's only write");
+  const after = plan.writes[0].afterDoc as Record<string, unknown>;
+  assert.equal(after.status, "silent");
+  assert.equal(after.resolvedSeq, 1, "the silence entry's own summary seq (counter head 0 + 1 entry)");
+  const handling = after.handling as Record<string, unknown>;
+  assert.equal(handling.mode, "silent");
+  assert.equal(handling.decidedAt, null);
+  const entry = plan.entries[plan.entries.length - 1];
+  assert.equal(entry.summary, true);
+  assert.equal(entry.summaryText, "No response — Fixture City A's leader didn't say anything (seq 1)");
+  assert.deepEqual(entry.changes, []);
+  const classification = entry.classification as Record<string, unknown>;
+  assert.equal(classification.producingMode, "owner-explicit");
+  assert.equal(classification.situationId, "sit-1");
 });
 
 console.log(`\ngovernance harness: ${checks} checks passed`);
