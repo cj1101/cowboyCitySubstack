@@ -20,11 +20,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  PlanValidationError,
   collectActionReadPaths,
   finalizePlan,
   snapshotFromDocs,
   validatePlan,
 } from "../lib/sim/resolver";
+import { CommitError, deriveChronicleBadging } from "../lib/sim/committer";
+import { ruleEffectDraft, summaryDraft } from "../lib/sim/rules/planHelpers";
+import { emptyPlan } from "../lib/sim/state";
 import { buildFixtureBaselineRegistry } from "../lib/sim/baseline/fixtures";
 import { RULE_DESCRIPTORS, type HandlerContext, type RuleDescriptor } from "../lib/sim/rules/registry";
 import {
@@ -790,6 +794,120 @@ check("no direct-to-Sheets creation path in the Phase 4 export additions (TC-X11
     assert.ok(!source.includes("spreadsheets"), `${file}: no Sheets API surface`);
     assert.ok(!source.includes("createSpreadsheet"), `${file}: no sheet creation`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Lead assembly section (Phase 4 step 11 assembly): the §4 badging
+// wiring, exercised against the shipped code — validatePlan's §5.6
+// admission and the committer's own derivation (imported, not copied).
+// The transaction application rides the same finalWrites path as every
+// committer write; the emulator suites remain CI's venue.
+// ---------------------------------------------------------------------------
+
+function chroniclePlan(
+  outputs: { kind: "note" | "chronicle" | "situation" | "outbox"; text: string }[],
+  cityId: string | null
+): ResolutionPlan {
+  const actor = memberActor(OWNER_A);
+  const plan = emptyPlan("R-11");
+  plan.entries.push(
+    ruleEffectDraft({
+      actor,
+      cityId,
+      cityIds: cityId ? [cityId] : [],
+      ruleIds: ["R-11"],
+      summaryText: "harness effect entry",
+    }),
+    summaryDraft({
+      actor,
+      cityId,
+      cityIds: cityId ? [cityId] : [],
+      ruleIds: ["R-11"],
+      summaryText: "harness summary entry",
+    })
+  );
+  plan.narrativeOutputs = outputs;
+  return plan;
+}
+
+const validateOpts = {
+  baselineRegistry: fixtureRegistry,
+  covertEntriesAllowed: false,
+};
+
+check("assembly §5.6: a chronicle output is admitted by validatePlan", () => {
+  const plan = chroniclePlan([{ kind: "chronicle", text: "The telling." }], "cityA");
+  validatePlan(plan, validateOpts);
+});
+
+check("assembly §5.6: an empty chronicle output fails validation", () => {
+  const plan = chroniclePlan([{ kind: "chronicle", text: "   " }], "cityA");
+  assert.throws(() => validatePlan(plan, validateOpts), PlanValidationError);
+});
+
+check("assembly §5.6: situation and outbox outputs still fail validation", () => {
+  for (const kind of ["situation", "outbox"] as const) {
+    const plan = chroniclePlan([{ kind, text: "not yet" }], "cityA");
+    assert.throws(() => validatePlan(plan, validateOpts), PlanValidationError);
+  }
+});
+
+check("assembly §4(b): the committer derivation badges a resolved chronicle plan", () => {
+  const plan = chroniclePlan(
+    [{ kind: "chronicle", text: "The First Telling\n\nBody of the telling." }],
+    "cityA"
+  );
+  const badging = deriveChronicleBadging(plan, "res_harness");
+  assert.ok(badging);
+  assert.equal(badging.draftId, "chronicle_res_harness");
+  assert.equal(badging.draftId, chronicleDraftIdForResolution("res_harness"));
+  assert.equal(badging.path, "drafts/chronicle_res_harness");
+  assert.equal(badging.doc.badge, "sim");
+  assert.equal(badging.doc.source, "sim-chronicle");
+  assert.equal(badging.doc.sourceResolutionId, "res_harness");
+  assert.equal(badging.doc.sourceCityId, "cityA");
+  assert.deepEqual(badging.doc.sourceRuleIds, ["R-11"]);
+  assert.equal(badging.doc.title, "The First Telling");
+  assert.equal(badging.doc.factionId, "cityA");
+  assert.ok(isSimChronicleDraft(badging.doc));
+  // Deterministic: the same plan derives the identical badge.
+  assert.deepEqual(deriveChronicleBadging(plan, "res_harness"), badging);
+});
+
+check("assembly §4(b): several outputs join into the one draft; title = first non-empty line, capped at 120", () => {
+  const longLine = "L".repeat(200);
+  const plan = chroniclePlan(
+    [
+      { kind: "note", text: "a note is not badged" },
+      { kind: "chronicle", text: `\n\n${longLine}\nrest` },
+      { kind: "chronicle", text: "the second telling" },
+    ],
+    "cityA"
+  );
+  const badging = deriveChronicleBadging(plan, "res_join");
+  assert.ok(badging);
+  assert.equal((badging.doc.title as string).length, 120);
+  assert.ok((badging.doc.body as string).includes("the second telling"));
+  assert.ok(!(badging.doc.body as string).includes("a note is not badged"));
+});
+
+check("assembly §4(b): unbadgeable fails closed; rejected and note-only plans badge nothing", () => {
+  const noCity = chroniclePlan([{ kind: "chronicle", text: "orphan" }], null);
+  assert.throws(
+    () => deriveChronicleBadging(noCity, "res_orphan"),
+    (error: unknown) => error instanceof CommitError && error.code === "CHRONICLE_UNBADGEABLE"
+  );
+  const rejected = chroniclePlan([{ kind: "chronicle", text: "never happened" }], "cityA");
+  rejected.outcome = "rejected";
+  assert.equal(deriveChronicleBadging(rejected, "res_rejected"), null);
+  const noteOnly = chroniclePlan([{ kind: "note", text: "just a note" }], "cityA");
+  assert.equal(deriveChronicleBadging(noteOnly, "res_note"), null);
+});
+
+check("assembly §4(b): the plan hash binds narrativeOutputs (preview parity)", () => {
+  const a = finalizePlan(chroniclePlan([{ kind: "chronicle", text: "telling A" }], "cityA"));
+  const b = finalizePlan(chroniclePlan([{ kind: "chronicle", text: "telling B" }], "cityA"));
+  assert.notEqual(a.planHash, b.planHash);
 });
 
 console.log(`\nlore-harness: ${checks} checks passed`);
