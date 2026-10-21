@@ -83,9 +83,16 @@ export function bankDepositPath(depositId: string): string {
   return `sim_bank_deposits/${depositId}`;
 }
 
-/** The doc path a tracked ref resolves to (null for the Market Account,
- * whose record the Market module owns and Phase 4 finance never
- * writes). */
+/** The Market Account's record: the singleton doc of finance §1.1's
+ * `sim_market_account` collection. The Market module (Phase 4 step 7)
+ * owns the record's shape and its founding act (M-00); this const is
+ * its path, landed here because the ledger grammar lives here. */
+export const MARKET_ACCOUNT_PATH = "sim_market_account/main";
+
+/** The doc path a tracked ref resolves to. The Market Account resolved
+ * to null until step 7 landed its record (finance never wrote it);
+ * with the record standing at MARKET_ACCOUNT_PATH, market refs
+ * resolve like every other tracked ledger. */
 export function ledgerDocPath(ref: TrackedLedgerRef): string | null {
   switch (ref.kind) {
     case "personal":
@@ -95,7 +102,7 @@ export function ledgerDocPath(ref: TrackedLedgerRef): string | null {
     case "company":
       return `sim_cities/${ref.cityId}/corporations/${ref.corporationId}`;
     case "market":
-      return null;
+      return MARKET_ACCOUNT_PATH;
   }
 }
 

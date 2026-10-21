@@ -138,20 +138,30 @@ function changeDelta(change: ConservationChangeView): number {
   return num(change.after) - num(change.before);
 }
 
-const MINT_RULES = new Set(["F-01"]); // finance §3.3 closed list (Phase 4 slice; the Market Account seed joins when the Market module lands its founding act)
+const MINT_RULES = new Set(["F-01", "M-00"]); // finance §3.3 closed list (Phase 4 slice; M-00 = the Market Account seed, joined when the Market module landed its founding act in step 7)
 const BURN_RULES = new Set<string>(); // no burn exists in v1 (§3.3)
 
 // ---------------------------------------------------------------------------
 // Ledger identification.
 // ---------------------------------------------------------------------------
 
-type CashLedgerKind = "personal" | "treasury" | "company";
+type CashLedgerKind = "personal" | "treasury" | "company" | "market";
 
 function cashDeltaOfWrite(write: ConservationWriteView): {
   kind: CashLedgerKind;
   key: string;
   delta: number;
 } | null {
+  if (write.path === "sim_market_account/main") {
+    // The Market Account (finance §1.1 account class 4): §3.1's
+    // generalized invariant names it inside Σ Δtracked; recognized
+    // here when the Market module landed its record (step 7).
+    return {
+      kind: "market",
+      key: write.path,
+      delta: docNum(write.afterDoc, "cashRubars") - docNum(write.beforeDoc, "cashRubars"),
+    };
+  }
   const account = /^sim_member_accounts\/([^/]+)$/.exec(write.path);
   if (account) {
     return {
@@ -197,6 +207,13 @@ function resolveChangeTarget(
   const deposit = /^bankDeposits\/([^/.]+)\.(.+)$/.exec(change.field);
   if (deposit) {
     return { path: `sim_bank_deposits/${deposit[1]}`, docField: deposit[2] };
+  }
+  if (change.field === "marketAccount.cashRubars") {
+    // The Market Account's change spelling (accounts.ts grammar) —
+    // a top-level doc like the personal accounts, riding null-city
+    // entries; mapped so fee legs enter the paired-posting sum and
+    // the Log/writeSet bijection instead of passing unseen.
+    return { path: "sim_market_account/main", docField: "cashRubars" };
   }
   if (entry.cityId) {
     const corp = /^corporations\/([^/.]+)\.(.+)$/.exec(change.field);
