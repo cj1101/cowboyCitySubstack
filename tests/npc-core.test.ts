@@ -719,10 +719,28 @@ async function main() {
       npcId: "charA2",
       cycleId: `cycle-${cycle}`,
     });
-    const touch = await submitConfirmWake(ownerA, "ownerA", "situation.handle", {
-      situationId: fireSituationId,
-      decisionNote: "Take it in hand — and let the standing rule do its work.",
-    });
+    // Production submission form (SituationCard -> lib/situations/
+    // client submitSituationHandle): a situation decision carries the
+    // card's city (audienceCityId ?? cityId) in targetCityIds. That
+    // is what puts the LIVE faction doc among the resolver's base-path
+    // seeds — the §9.6 audience gate reads current owners from it,
+    // and the situation doc itself only enters the read plan via the
+    // descriptor hook, so it can never seed its own faction. A
+    // city-less submission lawfully refuses AUTHORITY_REVOKED (the
+    // gate-record PR #45 fix round 2 probe: the plan then contains
+    // no factions/ path at all). Every situation.handle submission
+    // in this suite uses this form.
+    const fireCityId = card.audienceCityId ?? card.cityId;
+    const touch = await submitConfirmWake(
+      ownerA,
+      "ownerA",
+      "situation.handle",
+      {
+        situationId: fireSituationId,
+        decisionNote: "Take it in hand — and let the standing rule do its work.",
+      },
+      { targetCityIds: fireCityId ? [fireCityId] : [] }
+    );
     assert.equal(await actionStatus(touch.actionId), "resolved");
     const passes = touch.summary.passes;
     assert.ok(passes, "the wake ran its passes");
@@ -832,13 +850,15 @@ async function main() {
     );
     askTaskId = envelopeTaskId("ownerA", stepResolutionId);
     const treasuryBefore = await treasury("cityA");
+    const askCityId = card.audienceCityId ?? card.cityId;
     const touch = await submitConfirmWake(
       ownerA,
       "ownerA",
       "situation.handle",
       { situationId: askSituationId, decisionNote: "In hand." },
-      { worker: true }
+      { worker: true, targetCityIds: askCityId ? [askCityId] : [] }
     );
+    assert.equal(await actionStatus(touch.actionId), "resolved");
     const passes = touch.summary.passes;
     assert.ok(passes);
     assert.ok(
@@ -1132,11 +1152,20 @@ async function main() {
     // owner declines the awaiting draft (the F3/G12 payload shape) —
     // the card completes as handled-by-declining; the pending is
     // untouched by any of it.
-    const decline = await submitConfirmWake(ownerA, "ownerA", "situation.handle", {
-      situationId: cardAId,
-      outcome: "declined",
-      decisionNote: "Declined at the gate fixture; the pending is its own affair.",
-    });
+    const cardADoc = await adminDoc(`sim_situations/${cardAId}`);
+    const cardACityId =
+      (cardADoc?.audienceCityId as string | null) ?? (cardADoc?.cityId as string | null);
+    const decline = await submitConfirmWake(
+      ownerA,
+      "ownerA",
+      "situation.handle",
+      {
+        situationId: cardAId,
+        outcome: "declined",
+        decisionNote: "Declined at the gate fixture; the pending is its own affair.",
+      },
+      { targetCityIds: cardACityId ? [cardACityId] : [] }
+    );
     assert.equal(await actionStatus(decline.actionId), "resolved");
     assert.equal((await adminDoc(`sim_situations/${cardAId}`))?.status, "handled");
     const declineEntries = await entriesOf(decline.actionId);
@@ -1200,9 +1229,19 @@ async function main() {
     });
     await adminDb.doc(`sim_situations/${card.situationId}`).set(card);
     const treasuryBefore = await treasury("cityA");
-    const touch = await submitConfirmWake(ownerA, "ownerA", "situation.handle", {
-      situationId: card.situationId,
-    });
+    const blockedCityId = card.audienceCityId ?? card.cityId;
+    const touch = await submitConfirmWake(
+      ownerA,
+      "ownerA",
+      "situation.handle",
+      { situationId: card.situationId },
+      { targetCityIds: blockedCityId ? [blockedCityId] : [] }
+    );
+    assert.equal(
+      await actionStatus(touch.actionId),
+      "resolved",
+      "the trigger touch itself commits — its manifest is what makes the card a delegation-pass candidate"
+    );
     assert.ok(
       touch.summary.passes?.delegation.blocked.includes(card.situationId),
       "the fire is blocked: the handler's authority changed (revoked) since the rule was written"

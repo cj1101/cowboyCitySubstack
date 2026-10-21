@@ -1226,6 +1226,24 @@ check("the §9.6 audience gate: a non-audience member's decision refuses AUTHORI
   assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
 });
 
+check("the §9.6 gate's faction leg is seed-fed (F-01): even the audience owner's decision refuses when the action names no city and cites nothing — the faction doc never materializes (the production client always names the card's city in targetCityIds)", () => {
+  const { doc } = buildActionDoc({
+    actorUid: "ownerA",
+    clientRequestId: "req-sit-handle-nocity",
+    actor: OWNER,
+    actionType: "situation.handle",
+    actionText: null,
+    structuredAction: { situationId: "sit-1" },
+    targetCityIds: [],
+    now: NOW_A,
+  });
+  const action = { ...doc, status: "confirmed" } as SimAction;
+  const plan = runAction(situationDocs(), action, NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
+  assert.equal(plan.writes.length, 0);
+});
+
 check("a terminal situation refuses with the module's SITUATION_TERMINAL code, passed through", () => {
   const action = memberAction(OWNER, "ownerA", "situation.handle", {
     situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },

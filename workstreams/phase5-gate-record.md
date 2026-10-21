@@ -384,3 +384,131 @@ case to watch on re-run is N2 passing and the suite proceeding
 through N3–N11 for the first time.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 1, 2026-10-21.*
+
+---
+
+## CI fix round 2 (PR #45) — N4: the trigger touch rejected AUTHORITY_REVOKED; the suite's submission form, not the engine
+
+**Round-2 result:** Install + Rules + Vercel green; Sim core advanced
+(sim-core + play-core pass; npc-core N0/N1/**N2**/N3 all ok — the
+round-1 dialect fix and the ruleHash parity proof both landed in the
+emulator venue). N4 failed at `tests/npc-core.test.ts:726`:
+`actionStatus(touch.actionId)` was `rejected`, expected `resolved`.
+One correction to the round's framing: line 726 asserts the owner's
+**own `situation.handle` touch**, not the delegated action — the touch
+was rejected at resolution, so the fire it exists to trigger never
+became a candidate. The delegated-action machinery downstream was
+never reached and is not indicted.
+
+**Rejection code + stage (pinned by a pure probe, not by a DIAG
+round):** `AUTHORITY_REVOKED`, returned by `requireSituationAudience`
+(the §9.6 audience gate, `lib/sim/rules/governance.ts`) inside
+`situationHandleHandler` — the resolver handler stage, before any
+authority-stage or commit machinery. The probe replicated the suite's
+exact inputs through the harness materialization discipline (base
+paths as seeds → `collectActionReadPlan` → `snapshotFromDocs` →
+`resolveAction`), with the card built by the module's own
+`buildSituationDoc` from N4's seed inputs and the faction doc exactly
+as the suite seeds it:
+
+- **As submitted (targetCityIds `[]`):** the read plan is
+  `sim_world/current, sim_counters/log, sim_actions/{id},
+  sim_situations/{id}` — **no `factions/` path at all** → rejected
+  `AUTHORITY_REVOKED`. The card's `recipientUid` is `null`, so the
+  gate's first leg cannot pass; its second leg reads the LIVE faction
+  doc (`factions/{audienceCityId}.ownerUids` — current owners, the
+  design's deliberate choice over the card's owner snapshot), and
+  that doc is not in the snapshot.
+- **Production form (targetCityIds `["cityA"]`, all else
+  identical):** resolved, exactly one write — the situation doc
+  (the §6.3A decision record).
+
+**Why the plan cannot contain the faction in the submitted form —
+the F-01 seed contract:** the dispatcher reads the BASE paths first
+(`snapshotForAction`: `buildSnapshot(reader, collectActionReadPaths)`
+as seeds), then calls the descriptor hook ONCE with those seeds.
+`situationReadPlan`'s two-phase loop derives `factions/{cityId}` from
+a STORED situation doc *among the seeds* — but the situation doc
+enters the plan only via that same hook's first phase (from
+`params.situationId`), so it is never a seed unless the action itself
+makes it one: via `targetCityIds` (each named city contributes
+`factions/{cityId}` as a base path) or via `citations.recordPaths`
+(the doc as a base path, after which the loop fires). The resolver
+never fetches an undeclared doc mid-resolution; a city-less,
+citation-less decision action leaves the gate's faction leg unseeded
+and the refusal is the fail-closed posture working as designed.
+
+**Why every other venue passed — the discriminating comparison:**
+- *Production client* (`lib/situations/client.ts`,
+  `SituationCard.tsx:89/130`): `submitSituationHandle(uid, {…,
+  cityId})` with `cityId = situation.audienceCityId ??
+  situation.cityId`, submitted as `targetCityIds: [cityId]`. The
+  suite's N4 card would carry `["cityA"]` through the real surface.
+- *Governance harness* (the one pure venue that runs
+  `situation.handle` through the real read-plan path): its
+  `memberAction` hardcodes `targetCityIds: ["cityA"]` AND cites the
+  situation in `recordPaths` — both lawful routes supplied.
+- *Wake harness* delegation checks: they drive the wake PASS step
+  resolvers over hand-built snapshots whose fixture map contains the
+  faction doc by construction; the pass machinery never routes the
+  *trigger* through `collectActionReadPlan` — the trigger as a member
+  action is exactly the leg only the suite exercises end-to-end.
+- `situation.handle` is the only governance family whose params
+  carry no `cityId` (the city lives on the stored card): npc.create /
+  mandate.set / delegationRule.set / envelope.* / fixture kinds all
+  name a city in params, which `collectActionReadPaths` turns into
+  the `factions/{cityId}` base path — which is why N1–N3 passed and
+  N4 is the first failure of this class.
+
+**Verdict: FIXTURE authoring (candidate 1) — the suite submitted
+the decision in a form no real caller uses.** The engine, the gate,
+the read plan, and the handler all behave as designed and as
+exercised by the production client and both harnesses. No engine
+code changed; the gate was not widened; the suite was not taught to
+expect the rejection — it now submits the decision the way the
+surface does.
+
+**Fix (suite layer only):** all FOUR `situation.handle` submissions
+in the suite now carry `targetCityIds` with the card's city derived
+exactly as the client derives it (`audienceCityId ?? cityId`):
+- **N4** (the fire touch) — from the seeded `card`; the derivation +
+  the seed-contract reason are commented at the site.
+- **N5** (the ask-first touch) — **same defect, affected**: its
+  touch would have rejected identically and no fire/envelope/claim
+  could have occurred. Fixed identically, and the touch's `resolved`
+  status is now asserted (it previously went unasserted, so the
+  defect would have surfaced one assertion later, misattributed to
+  the pass).
+- **N7** (the decline of the conversion card) — **same defect,
+  affected**: the conversion producer mints its card with
+  `recipientUid: null`, `audienceCityId = originCityId` (verified in
+  `lib/sim/situations.ts`'s conversion), so the decline's asserted
+  `resolved` depended on the same unseeded faction leg. The city is
+  derived from the standing card doc.
+- **N8** (the revocation-boundary touch) — **same defect,
+  affected**, and the least visible: the touch's own status was
+  never asserted, but the blocked-fire assertions presuppose its
+  committed manifest (the delegation pass's candidates come from the
+  wake's manifests). Fixed identically; the touch's `resolved`
+  status is now asserted with the reason stated.
+
+**Durable pin (pure venue):** the governance harness gains one check
+(58 → **59**): an audience owner's `situation.handle` naming no city
+and citing nothing refuses `AUTHORITY_REVOKED` with zero writes —
+the seed contract itself, pinned where the read-plan path runs
+purely, so the form-A refusal is proven intentional in every CI run
+rather than rediscovered per-venue. The fixed N4/N5/N7/N8 submissions
+are the emulator-venue tripwires for the production form.
+
+**Local regression (fix branch tip):** `tsc --noEmit` clean; scoped
+ESLint on the two touched test files clean; `next build` green; pure
+battery green at landed counts (governance **59** incl. the new pin,
+situations 32, wake 23, banking 54, closeout 29, chains 34, cat2 34,
+cat1 all, defense 12, acq 14, market 27, lore 27). The npc-core suite
+remains CI's venue (the sandbox emulator still cannot boot); the
+case to watch on re-run is N4 completing the fire end-to-end and the
+suite proceeding through N5–N11 for the first time (the round-1
+report's watch items N5 same-wake claim parity and N9(b)
+DEPENDENTS_EXIST remain ahead of it).
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 2, 2026-10-21.*
