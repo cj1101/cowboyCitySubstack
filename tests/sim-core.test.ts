@@ -261,6 +261,17 @@ async function main() {
     await addCollection("sim_publications");
     await addCollection("sim_intel_records");
     await addCollection("sim_character_extensions");
+    // Phase 5 (PR #41 fix round 2): stateDocs must cover every
+    // collection this venue's resolutions can write, or the
+    // bijection reads a manifested write as STATE_MISSING. The wake
+    // passes write sim_situations (attention conversions, silence
+    // commits, follow-ups) — CK7e's converted pending is the first
+    // sim-core situation. sim_task_envelopes / sim_task_outputs join
+    // this list in the same change that first makes a scenario here
+    // write them; no sim-core scenario builds the NPCs, rules, or
+    // envelopes those writes need (their standing-state venue is
+    // tests/npc-core.test.ts).
+    await addCollection("sim_situations");
     return {
       entries,
       manifests,

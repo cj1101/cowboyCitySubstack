@@ -2180,6 +2180,83 @@ async function main() {
   }
   console.log("ok sim confirmation clause fix + create tightening (P2-G9c)");
 
+  // ---- PR-4: the wake-pass fabric create for delegated actions.
+  // The committer may mint a delegated action (NPC actor, source
+  // "wake-pass", born 'confirmed', no preview/confirmation/resolution
+  // fields); every neighboring shape is refused — a member minting an
+  // NPC-actor action, the worker identity minting anything, the
+  // committer minting a member-actor action or a differently-sourced
+  // or differently-born one.
+  {
+    const passActionBase = {
+      schemaVersion: 2,
+      clientRequestId: "dlg-pass-1",
+      idempotencyKey: "dlg-pass-1",
+      source: "wake-pass",
+      actor: {
+        type: "npc",
+        memberId: null,
+        npcId: "npc1",
+        onBehalfOfMemberId: "ownerA",
+        mandateId: "mandate1",
+        mandateVersion: 1,
+        envelopeId: null,
+      },
+      actionType: "fixture_adjust",
+      actionText: null,
+      structuredAction: { cityId: "cityA", field: "stats.treasuryRubars", delta: 1 },
+      targetCityIds: ["cityA"],
+      threadRef: { kind: "situation", id: "sit-pass-1" },
+      audienceUids: ["ownerA"],
+      preview: null,
+      previewPlanHash: null,
+      confirmation: null,
+      claim: null,
+      lastAttempt: null,
+      status: "confirmed",
+      resolutionId: null,
+      firstLogSeq: null,
+      lastLogSeq: null,
+      failure: null,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    };
+    await assertSucceeds(
+      setDoc(doc(fabricCommitter.firestore(), "sim_actions", "actPassOk"), passActionBase)
+    );
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_actions", "actPassByMember"), passActionBase)
+    );
+    await assertFails(
+      setDoc(doc(fabricWorker.firestore(), "sim_actions", "actPassByWorker"), passActionBase)
+    );
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "sim_actions", "actPassMemberActor"), {
+        ...passActionBase,
+        actor: { ...passActionBase.actor, type: "member", memberId: "ownerA", npcId: null },
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "sim_actions", "actPassWrongSource"), {
+        ...passActionBase,
+        source: "web",
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "sim_actions", "actPassBornReceived"), {
+        ...passActionBase,
+        status: "received",
+      })
+    );
+    await assertFails(
+      setDoc(doc(fabricCommitter.firestore(), "sim_actions", "actPassWithPreview"), {
+        ...passActionBase,
+        preview: { previewHash: "self-authored" },
+      })
+    );
+  }
+  console.log("ok sim_actions wake-pass fabric create fence (PR-4)");
+
   // ---- P2-G9d: §9.5 pendings — audience-scoped reads, committer-only writes.
   {
     const pendingDoc = {

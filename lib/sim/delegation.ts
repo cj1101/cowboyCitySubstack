@@ -511,6 +511,12 @@ function readActionSpec(situation: SimSituation): DelegatedActionSpec | null {
   };
 }
 
+/** PR-4 seam (Lead assembly): the wake's standing-team trigger pass
+ *  reads the same defensively-parsed action spec the evaluator does
+ *  (F8: malformed = absent). Exported under a situational name; the
+ *  function itself is unchanged. */
+export const readSituationActionSpec = readActionSpec;
+
 export function evaluateDelegation(input: {
   situation: SimSituation;
   /** The CURRENT audience owner's rules (any status/enabled — the

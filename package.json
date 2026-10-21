@@ -11,7 +11,7 @@
     "migrate": "tsx scripts/migrate-legacy-data.ts",
     "emulators": "firebase emulators:start --only auth,firestore,storage --project cowboycityrealm",
     "test:rules": "firebase emulators:exec --only firestore,storage --project cowboycityrealm \"tsx tests/rules.test.ts\"",
-    "test:sim": "firebase emulators:exec --only firestore,auth --project cowboycityrealm \"tsx tests/sim-core.test.ts && tsx tests/play-core.test.ts\" && tsx tests/cat1-harness.ts && tsx tests/defense-harness.ts && tsx tests/chains-harness.ts && tsx tests/cat2-harness.ts && tsx tests/acq-harness.ts && tsx tests/market-harness.ts && tsx tests/lore-harness.ts && npx tsx tests/closeout-harness.ts && npx tsx tests/governance-harness.ts && npx tsx tests/situations-harness.ts"
+    "test:sim": "firebase emulators:exec --only firestore,auth --project cowboycityrealm \"tsx tests/sim-core.test.ts && tsx tests/play-core.test.ts\" && tsx tests/cat1-harness.ts && tsx tests/defense-harness.ts && tsx tests/chains-harness.ts && tsx tests/cat2-harness.ts && tsx tests/acq-harness.ts && tsx tests/market-harness.ts && tsx tests/lore-harness.ts && npx tsx tests/closeout-harness.ts && npx tsx tests/governance-harness.ts && npx tsx tests/situations-harness.ts && npx tsx tests/wake-harness.ts"
   },
   "dependencies": {
     "@fontsource/press-start-2p": "^5.3.0",

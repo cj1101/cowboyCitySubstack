@@ -1372,7 +1372,25 @@ service cloud.firestore {
         && request.resource.data.confirmation == null
         && request.resource.data.resolutionId == null
         && request.resource.data.firstLogSeq == null
-        && request.resource.data.lastLogSeq == null;
+        && request.resource.data.lastLogSeq == null
+        // Phase 5 PR-4: the fabric committer creates DELEGATED actions
+        // for the wake passes (a delegation fire's / trigger's action).
+        // Fenced to this provenance exactly: committer identity only,
+        // NPC actor only, source "wake-pass" only, born 'confirmed'
+        // (the cited mandate is the confirmation — the pass stores
+        // the fabric-computed preview + mandate confirmation in its
+        // next write, under the fabric update branch below), and no
+        // resolution fields. A member can never mint an NPC-actor
+        // action, and the committer can never mint a member-actor one.
+        || (isFabricCommitter()
+            && request.resource.data.actor.type == 'npc'
+            && request.resource.data.source == 'wake-pass'
+            && request.resource.data.status == 'confirmed'
+            && request.resource.data.preview == null
+            && request.resource.data.confirmation == null
+            && request.resource.data.resolutionId == null
+            && request.resource.data.firstLogSeq == null
+            && request.resource.data.lastLogSeq == null);
       // The member confirmation (brief §9.4) — REPLACES the Phase 1 clause,
       // which pinned status to the PRE-transition value and so made
       // confirmation impossible for every action (P2-D7, a latent Phase 1

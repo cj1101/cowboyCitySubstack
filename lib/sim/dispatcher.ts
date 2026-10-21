@@ -12,7 +12,16 @@
  *      AFTER the actions it carried have committed, so an op's
  *      execution-time revalidation sees everything that landed in its
  *      wake (TC-U07). Processing an op never triggers a scan.
- *   3. Terminal snapshot refresh (Phase 3 brief §3.2; the writer Phase
+ *   3. Phase 5 wake passes (brief §1.3 steps 4–6, PR-4), over THIS
+ *      wake's commits only — the candidate situations are collected
+ *      from the manifests of the actions and ripenings committed
+ *      above, never from a live scan of the collection: the
+ *      needsAttention conversion, the delegation pass, the
+ *      standing-team trigger pass, delegated-action follow-ups, the
+ *      §8 silence pass, and the envelope claim pass (wakePasses.ts).
+ *      Passes never trigger a ripeness scan, and an undo never
+ *      triggers a pass step.
+ *   4. Terminal snapshot refresh (Phase 3 brief §3.2; the writer Phase
  *      2's P2-D9 deferred): if the wake changed the world, run the
  *      dashboard snapshot projection once and write it in its own
  *      transaction. Failure-isolated — a failed refresh never fails a
@@ -54,6 +63,11 @@ import { firestoreQueryReader, firestoreReader } from "./readers";
 import { CommitError, commitResolution, type CommitOutcome } from "./committer";
 import { scanRipeness, WakeScanState, type ScanSummary } from "./pending";
 import { processUndoOperation } from "./undo";
+import {
+  runWakePasses,
+  type EnvelopeWorker,
+  type WakePassSummary,
+} from "./wakePasses";
 import { wakeChangedWorld } from "./snapshot";
 import { refreshSnapshotAfterWake } from "./snapshotRefresh";
 import type { BaselineRegistry } from "./baseline/registry";
@@ -107,6 +121,8 @@ export interface WakeSummary {
   actionsStale: string[];
   actionsFailed: { actionId: string; code: string }[];
   scans: ScanSummary[];
+  /** Phase 5 (PR-4): the wake passes' bookkeeping (steps 4–6). */
+  passes?: WakePassSummary;
   aborted?: string;
 }
 
@@ -210,6 +226,11 @@ export async function runWake(
     cycleId: string;
     preparedPayloads?: ReadonlyMap<string, PreparedPayload>;
     maxActions?: number;
+    /** Phase 5 (PR-4): the envelope worker for the claim pass. When
+     *  absent, the claim pass claims nothing (claiming without an
+     *  execution seam would burn attempts) and reports the deferral
+     *  in the pass summary. */
+    envelopeWorker?: EnvelopeWorker;
   }
 ): Promise<WakeSummary> {
   const summary: WakeSummary = {
@@ -225,6 +246,12 @@ export async function runWake(
   // evaluation/event budgets and the candidate snapshot are wake-
   // scoped, shared by every scan pass this wake runs.
   const wakeScanState = new WakeScanState();
+  // Phase 5 (PR-4): the wake passes' candidate collection — the
+  // manifests of everything this wake commits (actions here, ripening
+  // manifests read back after the phase), plus follow-ups for
+  // wake-pass actions this wake's action phase resolves.
+  const wakeManifests: Record<string, unknown>[] = [];
+  const passFollowups: { situationId: string; actionId: string }[] = [];
 
   // Confirmed actions first (brief §1.3's wake order: actions commit,
   // each followed by its scan; queued undo operations are picked up
@@ -378,10 +405,18 @@ export async function runWake(
 
     if (outcome.status === "committed" || outcome.status === "already-committed") {
       const manifest = outcome.manifest;
+      wakeManifests.push(manifest);
       const finalSnap = await getDoc(doc(deps.fabricDb, "sim_actions", action.actionId));
       const finalStatus = (finalSnap.data() as SimAction | undefined)?.status;
       if (finalStatus === "rejected") summary.actionsRejected.push(action.actionId);
       else summary.actionsCommitted.push(action.actionId);
+      if (
+        action.source === "wake-pass" &&
+        action.threadRef?.kind === "situation" &&
+        typeof action.threadRef.id === "string"
+      ) {
+        passFollowups.push({ situationId: action.threadRef.id, actionId: action.actionId });
+      }
       // Exactly one ripeness scan pass per committed player action.
       const scan = await scanRipeness(
         { committerDb: deps.committerDb, baselineRegistry: deps.baselineRegistry, reader },
@@ -423,11 +458,72 @@ export async function runWake(
     summary.undoOpsProcessed += 1;
   }
 
+  // Phase 5 wake passes (brief §1.3 steps 4–6), over this wake's
+  // commits. Skipped entirely when the wake aborted on an integrity
+  // failure — nothing further commits onto a suspect head (§4.6).
+  if (!summary.aborted) {
+    // Ripening manifests join the collection (their ids are
+    // deterministic: ripen_<pendingId> / void_<pendingId>).
+    for (const scan of summary.scans) {
+      for (const pendingId of scan.ripened) {
+        const snap = await getDoc(doc(deps.committerDb, "sim_resolutions", `ripen_${pendingId}`));
+        if (snap.exists()) wakeManifests.push(snap.data() as Record<string, unknown>);
+      }
+      for (const pendingId of scan.voided) {
+        const snap = await getDoc(doc(deps.committerDb, "sim_resolutions", `void_${pendingId}`));
+        if (snap.exists()) wakeManifests.push(snap.data() as Record<string, unknown>);
+      }
+    }
+    // Situations created or updated by this wake's commits, in
+    // first-touch order (the touching commit's firstSeq, then id).
+    const touched = new Map<string, number>();
+    for (const manifest of wakeManifests) {
+      const firstSeq = typeof manifest.firstSeq === "number" ? manifest.firstSeq : 0;
+      const writeSet = Array.isArray(manifest.writeSet) ? manifest.writeSet : [];
+      for (const write of writeSet) {
+        const path = (write as { path?: unknown }).path;
+        if (typeof path === "string" && path.startsWith("sim_situations/")) {
+          const id = path.slice("sim_situations/".length);
+          if (!touched.has(id) || firstSeq < (touched.get(id) as number)) {
+            touched.set(id, firstSeq);
+          }
+        }
+      }
+    }
+    const situationIds = [...touched.entries()]
+      .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]))
+      .map(([id]) => id);
+    const passes = await runWakePasses(
+      {
+        fabricDb: deps.fabricDb,
+        committerDb: deps.committerDb,
+        baselineRegistry: deps.baselineRegistry,
+        queryReader: deps.queryReader,
+        envelopeWorker: opts.envelopeWorker,
+        now: opts.now,
+        cycleId: opts.cycleId,
+      },
+      { situationIds, followups: passFollowups }
+    );
+    summary.passes = passes;
+    if (passes.aborted && !summary.aborted) summary.aborted = passes.aborted;
+  }
+
   // Terminal snapshot refresh (Phase 3 brief §3.2): one projection per
   // world-changing wake, in its own transaction, failure-isolated (the
   // adapter never throws). An empty wake writes nothing — there is
   // nothing new to project, and §0.1.1 forbids implying otherwise.
-  if (wakeChangedWorld(summary)) {
+  if (
+    wakeChangedWorld({
+      actionsCommitted: summary.actionsCommitted,
+      undoOpsProcessed: summary.undoOpsProcessed,
+      passResolutionsCommitted:
+        (summary.passes?.passStepsCommitted ?? 0) +
+        (summary.passes?.delegatedActions.filter(
+          (a) => a.outcome === "resolved" || a.outcome === "rejected"
+        ).length ?? 0),
+    })
+  ) {
     await refreshSnapshotAfterWake(deps, opts.now);
   }
 

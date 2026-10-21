@@ -27,6 +27,11 @@
  *       approved phrasing, changes []), and ruleHash parity between
  *       Vera's computeRuleHash and the governance copy over her
  *       harness S4e payload (the pinned digest).
+ *   G12 Handled-by-declining (PR-4, F3): situation.handle + the
+ *       outcome verb "declined" completes the card in its own
+ *       resolution (verb on the card and in the Log); without the
+ *       verb §6.3A's record-and-stay-open default is unchanged; the
+ *       verb does not widen the §9.6 audience gate.
  *   G5  P5-K13 canonical half — buildLogEntry stores characterId only
  *       when it carries a value (absent ≡ null): a null-key actor
  *       stores byte-identically to a no-key actor and hashes the same;
@@ -1169,6 +1174,48 @@ check("a terminal situation refuses with the module's SITUATION_TERMINAL code, p
   const plan = runAction(situationDocs({ status: "handled", resolvedSeq: 9 }), action, NOW_A);
   assert.equal(plan.outcome, "rejected");
   assert.equal(plan.rejection?.code, "SITUATION_TERMINAL");
+});
+
+section("G12 — handled-by-declining (PR-4, June's W4 flag F3): the §6.3A decline completion");
+check("situation.handle with outcome 'declined' completes an awaiting_owner draft in its own resolution", () => {
+  const action = memberAction(OWNER, "ownerA", "situation.handle", {
+    situationId: "sit-1", outcome: "declined", decisionNote: "Not pursuing this draft.",
+    citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-decline-1");
+  const plan = runAction(situationDocs({ status: "awaiting_owner" }), action, NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  assert.equal(plan.writes.length, 1, "decision + completion fold into ONE situation write");
+  const after = plan.writes[0].afterDoc as Record<string, unknown>;
+  assert.equal(after.status, "handled", "handled-by-declining (§6.1): the decline decision is the flow's resolution");
+  const handling = after.handling as Record<string, unknown>;
+  assert.equal(handling.mode, "self");
+  assert.equal(handling.outcomeVerb, "declined", "the outcome verb is on the card (§3.3)");
+  const entry = plan.entries[plan.entries.length - 1];
+  assert.equal((entry.classification as Record<string, unknown>).outcome, "declined", "and in the Log");
+  assert.equal(after.resolvedSeq, 1, "resolved at this resolution's own summary seq (fixture head 0 + its one entry)");
+  assert.equal(after.resolvedByResolutionId, action.actionId);
+});
+
+check("without the verb, the same awaiting_owner card records the decision and stays awaiting_owner", () => {
+  const action = memberAction(OWNER, "ownerA", "situation.handle", {
+    situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-decline-2");
+  const plan = runAction(situationDocs({ status: "awaiting_owner" }), action, NOW_A);
+  assert.equal(plan.outcome, "resolved");
+  const after = plan.writes[0].afterDoc as Record<string, unknown>;
+  assert.equal(after.status, "awaiting_owner", "§6.3A default unchanged: no verb, no completion");
+  assert.equal((after.handling as Record<string, unknown>).outcomeVerb, null);
+});
+
+check("the decline verb does not widen the gate: a non-audience member still refuses", () => {
+  const action = memberAction(OWNER_B, "ownerB", "situation.handle", {
+    situationId: "sit-1", outcome: "declined",
+    citations: { recordPaths: ["sim_situations/sit-1"] },
+  }, "req-sit-decline-3");
+  const plan = runAction(situationDocs({ status: "awaiting_owner" }), action, NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
+  assert.equal(plan.writes.length, 0);
 });
 
 function delegateDocs(npcMode: string, mandateMode: string | null): Map<string, Record<string, unknown> | null> {
