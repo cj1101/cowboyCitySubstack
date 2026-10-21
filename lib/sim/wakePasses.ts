@@ -59,6 +59,7 @@ import { firestoreQueryReader, firestoreReader } from "./readers";
 import { computePreview } from "./preview";
 import { CommitError, commitResolution, type CommitOutcome } from "./committer";
 import {
+  buildDelegatedActionDoc,
   delegatedActionId,
   evaluateDelegationStep,
   evaluateTriggerPosture,
@@ -74,7 +75,6 @@ import {
 import { situationFromSnapshot } from "./situations";
 import { readSituationActionSpec } from "./delegation";
 import { npcFromDoc } from "../authority/view";
-import { npcActorStanding } from "../authority/actor";
 import {
   claimEnvelope,
   failureOutcome,
@@ -294,43 +294,29 @@ async function executeDelegatedAction(
     summary.notes.push(`delegated action ${actionId}: NPC ${input.npcId} holds no current mandate — deferred`);
     return finish("deferred");
   }
-  const action: SimAction = {
-    actionId,
-    schemaVersion: 2,
-    clientRequestId: actionId,
-    idempotencyKey: actionId,
-    source: "wake-pass",
-    actor: npcActorStanding(npc, mandateId, mandateVersion),
-    actionType: input.spec.actionType,
-    actionText: null,
-    structuredAction: {
-      ...input.spec.structuredAction,
-      delegatedVia: {
-        situationId: input.situationId,
-        via: input.via,
-        mandateId,
-        mandateVersion,
-      },
-    },
-    targetCityIds:
-      input.spec.targetCityIds.length > 0
-        ? input.spec.targetCityIds
-        : [input.audienceCityId ?? npc.cityId],
-    threadRef: { kind: "situation", id: input.situationId },
-    audienceUids: [input.ownerUid],
-    preview: null,
-    previewPlanHash: null,
-    confirmation: null,
-    claim: null,
-    lastAttempt: null,
-    status: "confirmed",
-    resolutionId: null,
-    firstLogSeq: null,
-    lastLogSeq: null,
-    failure: null,
-    createdAt: new Date(deps.now),
-    updatedAt: new Date(deps.now),
-  };
+  // The §3.2 trigger citation roots in the card itself: its
+  // createdSeq (the creating event's summary seq) is read from the
+  // standing doc, never derived from the wake's own position — an
+  // unreadable card defers like an unreadable NPC.
+  const sitSnap = await getDoc(doc(deps.committerDb, "sim_situations", input.situationId));
+  if (!sitSnap.exists()) {
+    summary.notes.push(`delegated action ${actionId}: situation ${input.situationId} not readable — deferred`);
+    return finish("deferred");
+  }
+  const situationCreatedSeq = (sitSnap.data() as Record<string, unknown>).createdSeq;
+  const action = buildDelegatedActionDoc({
+    situationId: input.situationId,
+    situationCreatedSeq: typeof situationCreatedSeq === "number" ? situationCreatedSeq : null,
+    ownerUid: input.ownerUid,
+    npc,
+    mandateId,
+    mandateVersion,
+    spec: input.spec,
+    audienceCityId: input.audienceCityId,
+    via: input.via,
+    cycleId: deps.cycleId,
+    nowIso: deps.now,
+  });
   const actionRef = doc(deps.committerDb, "sim_actions", actionId);
   const existing = await getDoc(actionRef);
   if (!existing.exists()) {
