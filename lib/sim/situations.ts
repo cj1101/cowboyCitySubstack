@@ -10,10 +10,21 @@
  * the gate suite (W6) consume the same shapes.
  *
  * INVARIANTS this module exists to hold:
+ *  - Situations mint ONLY from occasions — a Resolution Event, or
+ *    the ripening of a pending an earlier confirmed act created.
+ *    Derived states (overdue, default-as-a-state, bank health,
+ *    ladder states) never mint cards by themselves; where a derived
+ *    state must reach a human it rides the card of the occasion
+ *    that made it true, or waits for the next occasion and is
+ *    stated in that card's detail, derived at creation from
+ *    standing state. (Felix's governing distinction, banking
+ *    addendum §1.0 — adopted verbatim as the producer discipline
+ *    for every family, not only banking.)
  *  - A Situation is created ONLY inside a Resolution Event, by a
- *    producer (§6.5) or the §6.4 conversion — never from a clock, a
- *    view, or an age. No `overdue`/`expired`/age-escalated status
- *    exists in the status set, by construction (§6.1).
+ *    producer (§6.5 + the ripening-occasion class below) or the
+ *    §6.4 conversion — never from a clock, a view, or an age. No
+ *    `overdue`/`expired`/age-escalated status exists in the status
+ *    set, by construction (§6.1).
  *  - Duplicate source events update/supersede by `dedupeKey` rather
  *    than duplicating (§2.6): one open card per key, superseded cards
  *    remain in history, badged, not actionable.
@@ -722,9 +733,31 @@ export function buildEscalationSituation(
   });
 }
 
-/** Resolver spillover (§6.5): consequences stated as ALREADY RESOLVED,
- *  asks stated explicitly — the card informs and requests; it never
- *  re-opens the event that caused it. */
+/** The episode source ID for Pattern X cards (banking addendum
+ *  §1.1): subject key + episode discriminator, e.g.
+ *  `bank:<corporationId>:failed-payment`. The dedupeKey derived from
+ *  it is what makes "never two open episode cards of one class for
+ *  one subject" structural: every qualifying event for the episode
+ *  keys to the same card, and the upsert accumulates. */
+export function episodeSourceId(subjectKey: string, episodeClass: string): string {
+  return `${subjectKey}:${episodeClass}`;
+}
+
+/** Resolver spillover (§6.5, GAP-2 widened): consequences stated as
+ *  ALREADY RESOLVED, asks stated explicitly — the card informs and
+ *  requests; it never re-opens the event that caused it. The class
+ *  covers events naming a city OR a chartered bank/corporation and
+ *  its counterparties (banking addendum GAP-2, ruled in W3): the
+ *  subject is stamped in detail, and recipients are addressed per
+ *  §6.1 (a member by recipientUid; a city by audienceCityId).
+ *
+ *  Two dedupe forms ride this builder (banking addendum §1.1):
+ *  Pattern E (default) — one card per (event, recipient), source =
+ *  the event's Log entry. Pattern X (`episode` given) — an episode
+ *  card keyed to a standing condition's subject + discriminator;
+ *  subsequent qualifying events update/supersede the open card with
+ *  detail accumulated from standing state at creation, and the
+ *  curing/closing event terminals it. */
 export function buildIncidentSituation(
   input: ProducerBase & {
     title: string;
@@ -733,6 +766,11 @@ export function buildIncidentSituation(
     ask: string;
     amountRubars?: number | null;
     counterpartyCityId?: string | null;
+    /** The event's subject when it is not simply the card's city —
+     *  a chartered bank/corporation subject is stamped here. */
+    subject?: { kind: "city" | "corporation"; id: string } | null;
+    /** Pattern X keying (see above). */
+    episode?: { subjectKey: string; episodeClass: string } | null;
   }
 ): SimSituation {
   return buildSituationDoc({
@@ -749,13 +787,21 @@ export function buildIncidentSituation(
       ask: input.ask,
       amountRubars: input.amountRubars ?? null,
       counterpartyCityId: input.counterpartyCityId ?? null,
+      subject: input.subject ?? null,
     },
-    source: {
-      kind: "log",
-      sourceId: input.sourceResolutionId,
-      sourceSeq: input.sourceSeq,
-      sourceResolutionId: input.sourceResolutionId,
-    },
+    source: input.episode
+      ? {
+          kind: "system",
+          sourceId: episodeSourceId(input.episode.subjectKey, input.episode.episodeClass),
+          sourceSeq: input.sourceSeq,
+          sourceResolutionId: input.sourceResolutionId,
+        }
+      : {
+          kind: "log",
+          sourceId: input.sourceResolutionId,
+          sourceSeq: input.sourceSeq,
+          sourceResolutionId: input.sourceResolutionId,
+        },
     createdSeq: input.createdSeq,
     now: input.now,
   });
@@ -1123,4 +1169,131 @@ export function silencePlanWritesOnlySituation(plan: ResolutionPlan, situationId
     plan.writes[0].path === situationPath(situationId) &&
     plan.entries.every((e) => e.changes.length === 0)
   );
+}
+
+// ---------------------------------------------------------------------------
+// The ripening-occasion producer (GAP-1, banking addendum §1.6 —
+// ruled in W3: the class is ADDED here). §6.5's five classes do not
+// express banking's due occasions: scheduled consequences of
+// earlier confirmed acts (a loan's installment schedule created at
+// funding; a bank's premium chain), announced when their AGR
+// pending ripens, with zero state effects beyond the ripening's own
+// marker entry. A due marker is not spillover (nothing has resolved
+// — the ask IS the recipient's next act) and not needsAttention
+// (nothing has failed).
+//
+// The occasion rides the pending itself: the creating act stamps
+// an `occasion` spec into the pending's payloadSpec (the schedule
+// is a consequence of the origination action — Felix §1.0), and
+// the ripening Resolution Event mints the Situation in its own
+// transaction via this builder — the card's causedBy chain is the
+// ripening event's, and its source names the pending. There is NO
+// dispatcher post-pass: a card minted a wake later would break the
+// atomicity every other producer keeps. Where the occasion's own
+// condition says nothing is owed (the premium chain's zero-due
+// period), the creating family simply does not call the builder —
+// the ripening's marker entry still lands, and no card is minted
+// (§6.2's empty-state honesty).
+//
+// Dedupe is Pattern P (banking addendum §1.1): source kind
+// `system`, source ID = the pending's ID — one card per ripening,
+// and a LATER pending (next installment, next period) is a distinct
+// source minting a distinct card, never resurrecting a terminal
+// one. The accumulation exception is the premium card (K3/K4): a
+// bank never holds two open premium cards, so that family's wake
+// composition routes a new period's occasion through the upsert
+// against the bank's open premium card instead of a fresh mint —
+// the upsert's supersede carries the accumulated arrears detail.
+// ---------------------------------------------------------------------------
+
+/** The spec a creating act stamps into a pending's payloadSpec
+ *  under `occasion`. Addressing KEYS only: the owner snapshot is
+ *  resolved at ripening (ownership may have changed since the act),
+ *  and the recipient uid / cities named here are the durable keys
+ *  (banking addendum §1.0 addressing). */
+export interface RipeningOccasionSpec {
+  /** Banking's due occasions: `system` (ruled in W3 for B2/B3/K1/
+   *  K3/K4 — schedule markers from the world's own machinery). */
+  kind: string;
+  severity: SituationSeverity;
+  title: string;
+  summary: string;
+  detail: Record<string, unknown> | null;
+  /** Subject/facet city (the loan's or bank's home city). */
+  cityId: string | null;
+  audienceCityId: string | null;
+  recipientUid: string | null;
+}
+
+const SEVERITIES: ReadonlySet<string> = new Set(["routine", "important", "major"]);
+
+/** Read the occasion spec off a pending doc's payloadSpec —
+ *  defensively, like every payloadSpec reader in the engine: a
+ *  malformed spec reads as NO occasion (the ripening proceeds; a
+ *  card is never minted from a shape the producer didn't write). */
+export function occasionSpecFromPending(pending: {
+  payloadSpec: Record<string, unknown> | null | undefined;
+}): RipeningOccasionSpec | null {
+  const raw = pending.payloadSpec?.occasion;
+  if (typeof raw !== "object" || raw === null) return null;
+  const spec = raw as Record<string, unknown>;
+  if (typeof spec.kind !== "string" || spec.kind.length === 0) return null;
+  if (typeof spec.severity !== "string" || !SEVERITIES.has(spec.severity)) return null;
+  if (typeof spec.title !== "string" || spec.title.length === 0) return null;
+  if (typeof spec.summary !== "string" || spec.summary.length === 0) return null;
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  return {
+    kind: spec.kind,
+    severity: spec.severity as SituationSeverity,
+    title: spec.title,
+    summary: spec.summary,
+    detail:
+      typeof spec.detail === "object" && spec.detail !== null
+        ? (spec.detail as Record<string, unknown>)
+        : null,
+    cityId: str(spec.cityId),
+    audienceCityId: str(spec.audienceCityId),
+    recipientUid: str(spec.recipientUid),
+  };
+}
+
+export function buildRipeningOccasionSituation(input: {
+  pending: { pendingId: string; originSeq: number | null };
+  spec: RipeningOccasionSpec;
+  /** The ripening event: its summary seq + resolution id. */
+  ripeningSeq: number | null;
+  ripeningResolutionId: string | null;
+  /** Current owners of the audience, resolved at ripening. */
+  audienceOwnerUidsSnapshot: string[];
+  createdSeq: number | null;
+  now: string;
+}): SimSituation {
+  const { spec } = input;
+  return buildSituationDoc({
+    cityId: spec.cityId,
+    audienceCityId: spec.audienceCityId,
+    audienceOwnerUidsSnapshot: input.audienceOwnerUidsSnapshot,
+    recipientUid: spec.recipientUid,
+    kind: spec.kind,
+    severity: spec.severity,
+    title: spec.title,
+    summary: spec.summary,
+    detail: {
+      ...(spec.detail ?? {}),
+      // Stamped after the spec's own detail: the card always names
+      // its pending and the origination seq, unspoofably — this is
+      // the traceability link (every card traceable to a causedBy
+      // chain, Felix §1.0).
+      pendingId: input.pending.pendingId,
+      originSeq: input.pending.originSeq,
+    },
+    source: {
+      kind: "system",
+      sourceId: input.pending.pendingId,
+      sourceSeq: input.ripeningSeq,
+      sourceResolutionId: input.ripeningResolutionId,
+    },
+    createdSeq: input.createdSeq,
+    now: input.now,
+  });
 }
