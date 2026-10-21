@@ -805,6 +805,47 @@ export function voidingResolutionId(pendingId: string): string {
   return `void_${pendingId}`;
 }
 
+/** §3.2 trigger citation for ripening/voiding entries (PR #45 CI
+ * round 8): these plans' entries carry the pending's ORIGIN actor
+ * verbatim (the Phase 2 posture above) — when that actor is an NPC
+ * actor, the standing verifier's traceability reads a
+ * classification.trigger on EVERY such entry, and the R-33/R-34/R-32
+ * drafts (and the delivery/schedule family plans) carry none: their
+ * classifications are null or family-shaped. The citation is the
+ * origin event itself — kind "log-event", the pending as the source
+ * record, the origin resolution's summary seq: the same seq these
+ * entries already cite as causedBySeq, and a seq that stands (the
+ * origin resolution is never erased by a ripening/voiding — voiding
+ * here is the ripeness verdict's own standing event, not an undo).
+ * Entries already carrying a trigger keep it; member/system origin
+ * actors keep their landed shapes byte-identical (NPC-only stamp). */
+function stampOriginActorTrigger(
+  plan: ResolutionPlan,
+  pendingId: string,
+  originSeq: number
+): void {
+  for (const entry of plan.entries) {
+    if (entry.actor?.type !== "npc") continue;
+    const existing =
+      entry.classification !== null && typeof entry.classification === "object"
+        ? entry.classification
+        : {};
+    const trigger = (existing as Record<string, unknown>).trigger as
+      | Record<string, unknown>
+      | undefined;
+    if (trigger && typeof trigger.kind === "string") continue;
+    entry.classification = {
+      ...existing,
+      trigger: {
+        kind: "log-event",
+        sourceId: pendingId,
+        sourceSeq: originSeq,
+        deliberation: null,
+      },
+    };
+  }
+}
+
 export function resolveRipening(
   snapshot: SimSnapshot,
   pending: Record<string, unknown>,
@@ -857,6 +898,7 @@ export function resolveRipening(
           snapshot.counterHead.lastSeq
         )?.version ?? null,
     });
+    stampOriginActorTrigger(deliveryPlan, pendingId, originSeq);
     validatePlan(deliveryPlan, {
       baselineRegistry: opts.baselineRegistry,
       covertEntriesAllowed: delivery.visibilityClass === "actor-private",
@@ -942,6 +984,7 @@ export function resolveRipening(
         schedulePlan.entries.find((entry) => entry.summary)?.summaryText ??
         `Schedule ripening of ${pendingId} (origin seq ${originSeq}).`,
     });
+    stampOriginActorTrigger(schedulePlan, pendingId, originSeq);
     validatePlan(schedulePlan, {
       baselineRegistry: opts.baselineRegistry,
       covertEntriesAllowed: false,
@@ -1086,6 +1129,7 @@ export function resolveRipening(
     })
   );
 
+  stampOriginActorTrigger(plan, pendingId, originSeq);
   validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false, snapshot });
   return finalizePlan(plan);
 }
@@ -1180,6 +1224,7 @@ export function resolveVoiding(
     })
   );
 
+  stampOriginActorTrigger(plan, pendingId, originSeq);
   validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false, snapshot });
   return finalizePlan(plan);
 }

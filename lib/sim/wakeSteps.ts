@@ -58,6 +58,7 @@ import {
   readSituationActionSpec,
   resolveDelegationAuthority,
   situationTierB,
+  type DelegatedActionSpec,
   type DelegationEvaluation,
   type HandlerAuthorityView,
   type SimDelegationRule,
@@ -77,7 +78,7 @@ import {
   type TaskEnvelopeRecord,
 } from "../envelopes";
 import { npcFromDoc } from "../authority/view";
-import type { MandateVersionRecord } from "../authority/types";
+import type { MandateVersionRecord, NpcRecord } from "../authority/types";
 import { deriveAttempt, projectAuthorityView } from "./authorityStage";
 import { npcActorEnvelope, npcActorStanding } from "../authority/actor";
 import type { PermissionMode, SimMandateVersion } from "../npcs/types";
@@ -215,6 +216,90 @@ export function delegatedActionId(input: {
   cycleId: string;
 }): string {
   return `dlg_${hashKey(input)}`;
+}
+
+/** The delegated action document a fire creates, built whole — the
+ *  executor (wakePasses.ts executeDelegatedAction) persists exactly
+ *  this shape, and the wake harness pins the construction (W24).
+ *  Born `confirmed`: the mandate IS the confirmation (the executor's
+ *  preview/confirm update stamps authorityType "mandate").
+ *
+ *  The §3.2 trigger citation rides `structuredAction.trigger`: kind
+ *  "situation", sourceId the card, sourceSeq the card's createdSeq —
+ *  the creating event's summary seq (situations.ts), the committed
+ *  record that asked for this act. The authority stage's check 5
+ *  refuses an unrooted attempt (NO_TRIGGER_ROOT: a delegated action
+ *  with no resolvable trigger is an orphan, TC-N03), so a
+ *  construction without the citation can never resolve. PR #45 CI
+ *  round 6 convicted exactly that: the executor built the action
+ *  with delegatedVia only, every act-for-me fire rejected at the
+ *  stage, and the pure venues stayed green because their fixtures
+ *  hand-stamp the citation. A null createdSeq stamps as null and
+ *  the stage's fail-closed verdict governs — the citation is never
+ *  fabricated. */
+export function buildDelegatedActionDoc(input: {
+  situationId: string;
+  situationCreatedSeq: number | null;
+  ownerUid: string;
+  npc: NpcRecord;
+  mandateId: string;
+  mandateVersion: number;
+  spec: DelegatedActionSpec;
+  audienceCityId: string | null;
+  via: string;
+  cycleId: string;
+  nowIso: string;
+}): SimAction {
+  const actionId = delegatedActionId({
+    situationId: input.situationId,
+    via: input.via,
+    npcId: input.npc.npcId,
+    cycleId: input.cycleId,
+  });
+  const action: SimAction = {
+    actionId,
+    schemaVersion: 2,
+    clientRequestId: actionId,
+    idempotencyKey: actionId,
+    source: "wake-pass",
+    actor: npcActorStanding(input.npc, input.mandateId, input.mandateVersion),
+    actionType: input.spec.actionType,
+    actionText: null,
+    structuredAction: {
+      ...input.spec.structuredAction,
+      delegatedVia: {
+        situationId: input.situationId,
+        via: input.via,
+        mandateId: input.mandateId,
+        mandateVersion: input.mandateVersion,
+      },
+      trigger: {
+        kind: "situation",
+        sourceId: input.situationId,
+        sourceSeq: input.situationCreatedSeq,
+        deliberation: null,
+      },
+    },
+    targetCityIds:
+      input.spec.targetCityIds.length > 0
+        ? input.spec.targetCityIds
+        : [input.audienceCityId ?? input.npc.cityId],
+    threadRef: { kind: "situation", id: input.situationId },
+    audienceUids: [input.ownerUid],
+    preview: null,
+    previewPlanHash: null,
+    confirmation: null,
+    claim: null,
+    lastAttempt: null,
+    status: "confirmed",
+    resolutionId: null,
+    firstLogSeq: null,
+    lastLogSeq: null,
+    failure: null,
+    createdAt: new Date(input.nowIso),
+    updatedAt: new Date(input.nowIso),
+  };
+  return action;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +461,7 @@ export function handlerAuthorityView(
   const mandateId = rule.handler.mandateId ?? str(npcDoc?.currentMandateId);
   if (!mandateId) return { npc, mandate: null };
   const root = snapshotDoc(snapshot, `sim_mandates/${mandateId}`);
-  if (!root) return { npc, mandate: { found: false, rootStatus: null, version: null } };
+  if (!root) return { npc, mandate: { mandateId, found: false, rootStatus: null, version: null } };
   const currentVersion = num(root.currentVersion);
   const versionDoc =
     currentVersion !== null
@@ -385,6 +470,7 @@ export function handlerAuthorityView(
   return {
     npc,
     mandate: {
+      mandateId,
       found: true,
       rootStatus: str(root.status),
       version: (versionDoc as unknown as SimMandateVersion | null) ?? null,
@@ -1000,9 +1086,10 @@ export function resolveAttentionStep(
   );
   const originActor = (pendingDoc.originActor as SimActor | null) ?? null;
   const fallbackOwner = cityOwnerUids(snapshot, originCityId)[0] ?? situation.audienceOwnerUidsSnapshot[0];
+  const entryActor = originActor ?? (fallbackOwner ? memberActor(fallbackOwner) : memberActor(""));
   plan.entries.push(
     summaryDraft({
-      actor: originActor ?? (fallbackOwner ? memberActor(fallbackOwner) : memberActor("")),
+      actor: entryActor,
       cityId: originCityId,
       cityIds: originCityId ? [originCityId] : [],
       ruleIds: [],
@@ -1014,6 +1101,23 @@ export function resolveAttentionStep(
         pendingKind: str(pendingDoc.kind),
         failureCode: view.lastFailure?.code ?? null,
         situationId: situation.situationId,
+        // §3.2 trigger citation (PR #45 CI round 8): the conversion
+        // entry carries the pending's ORIGIN actor — when that actor
+        // is an NPC (a delegated action's pending that exhausted its
+        // retries), the standing verifier's traceability requires
+        // the citation: the pending itself, rooted at its origin
+        // event. Member-origin conversions keep their landed shape.
+        ...(entryActor.type === "npc"
+          ? {
+              trigger: {
+                kind: "log-event",
+                sourceId: pendingId,
+                sourceSeq:
+                  typeof pendingDoc.originSeq === "number" ? pendingDoc.originSeq : null,
+                deliberation: null,
+              },
+            }
+          : {}),
       },
       summaryText: `A delayed consequence (${pendingId}) exhausted its ripening retries; its needs-attention card ${situation.situationId} now stands in the owner's Situations.`,
     })

@@ -424,11 +424,17 @@ export interface HandlerAuthorityView {
     permissionMode: PermissionMode;
     status: string;
   } | null;
-  /** The cited mandate: null when the rule cites none. `found:false`
-   *  when it cites one that does not resolve. `version` is the
-   *  mandate's CURRENT active version — the fire cites it (§7.1:
-   *  the Log cites rule id/version and mandate id/version). */
+  /** The mandate the handler acts under: the rule's CITED mandate
+   *  when the rule cites one, else the handler NPC's STANDING
+   *  mandate — the caller resolves cited-or-standing (the §6.3B
+   *  doctrine; the wake pass's `handlerAuthorityView` is the
+   *  production resolver). Null when the handler holds no mandate
+   *  at all. `found:false` when the resolved root does not stand.
+   *  `version` is the mandate's CURRENT active version — the fire
+   *  cites the pair (§7.1: the Log cites rule id/version and
+   *  mandate id/version). */
   mandate: {
+    mandateId: string;
     found: boolean;
     rootStatus: string | null;
     version: SimMandateVersion | null;
@@ -449,6 +455,10 @@ export interface DelegationFire {
    *  decidedByUid and the envelope's requester. */
   ownerUid: string;
   npcId: string | null;
+  /** The mandate in force for the fire — the rule's cited mandate,
+   *  or the handler NPC's standing mandate when the rule cites none
+   *  (the evaluator's adoption, §7.1/§7.2). Null only when the fire
+   *  names no NPC (a handler-less silence) — never for a work fire. */
   mandateId: string | null;
   mandateVersion: number | null;
   effectiveMode: PermissionMode;
@@ -567,6 +577,18 @@ export function evaluateDelegation(input: {
     return blocked("the rule names no handler NPC for a mode that must do work");
   }
   let mandateVersion: SimMandateVersion | null = null;
+  // The mandate the fire acts under and cites (§7.1): the rule's
+  // cited mandate when it cites one, else the handler NPC's
+  // STANDING mandate, which the authority view has already resolved
+  // (cited-or-standing). An uncited rule is not a mandateless fire:
+  // §7.2 step 4 gives "the handler's mandate" the override, and
+  // §3.2 fails any NPC entry that cites no authority root — a fire
+  // composed without this adoption carries a rootless actor, and
+  // the standing verifier flags it (PR #45 CI round 7: the gate
+  // suite's uncited rule-fire-1 was the first uncited fire ever
+  // exercised end-to-end; every pure-venue fixture cited its
+  // mandate, so the gap was invisible there).
+  let effectiveMandateId: string | null = rule.handler.mandateId;
   if (rule.handler.mandateId !== null) {
     if (authority.mandate === null || authority.mandate.found !== true) {
       return blocked(`cited mandate ${rule.handler.mandateId} no longer resolves`);
@@ -582,6 +604,28 @@ export function evaluateDelegation(input: {
     }
     if (mandateVersion.cityId !== rule.cityId) {
       return blocked(`cited mandate ${rule.handler.mandateId} is for city ${mandateVersion.cityId}, not this rule's city ${rule.cityId}`);
+    }
+  } else if (rule.handler.npcId !== null) {
+    if (authority.mandate === null) {
+      return blocked(
+        `handler NPC ${rule.handler.npcId} holds no standing mandate — the rule cites none, so no mandate is in force to act under or cite (§7.2)`
+      );
+    }
+    if (authority.mandate.found !== true) {
+      return blocked(`standing mandate ${authority.mandate.mandateId} no longer resolves`);
+    }
+    if (authority.mandate.rootStatus !== "active" || authority.mandate.version === null) {
+      return blocked(
+        `standing mandate ${authority.mandate.mandateId} is ${authority.mandate.rootStatus ?? "unavailable"}, not active — the rule stops matching until the owner fixes it (§7.2)`
+      );
+    }
+    mandateVersion = authority.mandate.version;
+    effectiveMandateId = authority.mandate.mandateId;
+    if (mandateVersion.npcId !== rule.handler.npcId) {
+      return blocked(`standing mandate ${authority.mandate.mandateId} belongs to NPC ${mandateVersion.npcId}, not the handler ${rule.handler.npcId}`);
+    }
+    if (mandateVersion.cityId !== rule.cityId) {
+      return blocked(`standing mandate ${authority.mandate.mandateId} is for city ${mandateVersion.cityId}, not this rule's city ${rule.cityId}`);
     }
   }
 
@@ -631,7 +675,7 @@ export function evaluateDelegation(input: {
     ruleHash: rule.ruleHash,
     ownerUid: rule.ownerUid,
     npcId: rule.handler.npcId,
-    mandateId: rule.handler.mandateId,
+    mandateId: effectiveMandateId,
     mandateVersion: mandateVersion?.version ?? null,
     effectiveMode: resolution.effectiveMode,
     authority: resolution,
@@ -650,12 +694,12 @@ export function evaluateDelegation(input: {
               situationKind: situation.kind,
               delegationRuleId: rule.ruleId,
               delegationRuleVersion: rule.version,
-              mandateId: rule.handler.mandateId,
+              mandateId: effectiveMandateId,
               mandateVersion: mandateVersion?.version ?? null,
               tierB: tierB.tierB,
             },
             counterpartyCityIds: attrs.counterpartyCityId ? [attrs.counterpartyCityId] : [],
-            mandateId: rule.handler.mandateId,
+            mandateId: effectiveMandateId,
             mandateVersion: mandateVersion?.version ?? null,
           }
         : null,
@@ -703,6 +747,19 @@ export function buildRuleFireEntry(
       tierB: fire.tierB,
       situationId: situation.situationId,
       situationKind: situation.kind,
+      // §3.2 trigger citation (PR #45 CI round 8): the fire entry's
+      // actor is the handler NPC, so the standing verifier's
+      // traceability requires the citation on THIS entry — the same
+      // situation citation the delegated action itself carries
+      // (buildDelegatedActionDoc): the card, rooted at the seq of
+      // the event that created it. Its absence was the gate suite's
+      // seq 13 (NPC_TRACE_TRIGGER_MISSING).
+      trigger: {
+        kind: "situation",
+        sourceId: situation.situationId,
+        sourceSeq: situation.createdSeq,
+        deliberation: null,
+      },
     },
     // The situation transition is a top-level record effect:
     // claimed via recordsUpdated + the manifest write set, not

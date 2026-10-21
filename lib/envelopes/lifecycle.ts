@@ -297,6 +297,18 @@ export function buildEnvelopeOutcomeEntryDraft(
       mandateVersion: null,
       taskType: env.taskType,
       outcome: output.outcome,
+      // §3.2 trigger citation (PR #45 CI round 8): the outcome entry's
+      // actor is the envelope actor, so the standing verifier's
+      // traceability requires the citation — the envelope itself,
+      // rooted at its creating event, mirroring entryTriggerOf's
+      // envelope fallback in the authority stage. Its absence made
+      // every completed envelope's entry an orphan.
+      trigger: {
+        kind: "envelope",
+        sourceId: env.taskId,
+        sourceSeq: env.createdSeq ?? null,
+        deliberation: null,
+      },
     },
     summaryText: output.outputText,
   });

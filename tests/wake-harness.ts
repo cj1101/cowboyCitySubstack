@@ -29,6 +29,35 @@
  *   W23     the step read-plan contract: every step kind's seed paths
  *           carry sim_counters/log (the mandatory snapshot input —
  *           PR-4 fix round 1's regression pin).
+ *   W24     the executor's delegated-action construction
+ *           (buildDelegatedActionDoc) carries the §3.2 situation
+ *           trigger citation — the stage resolves the built action;
+ *           the same action unstamped rejects NO_TRIGGER_ROOT
+ *           (PR #45 fix round 6's regression pin).
+ *   W25     §3.2 trigger citations on EVERY NPC-actor entry: the
+ *           fire entry, every entry of a delegated resolution, the
+ *           silence commit, the envelope outcome entry, and a
+ *           ripening under an NPC origin actor — asserted at the
+ *           producers and through the real standing verifier
+ *           (no NPC_TRACE_* findings; a stripped citation flags)
+ *           (PR #45 fix round 8's regression pin).
+ *   W26     a FIRE-SPAWNED envelope (ask-first, uncited handler —
+ *           the gate suite's N5 shape) chained through the real
+ *           claim planner, the real lifecycle claim, and the real
+ *           terminal step in one wake: claimable in its own wake
+ *           (the fire stamps availableAt with the wake's instant),
+ *           completing with exactly one output — addressed by doc
+ *           id, the record carrying outputId/envelopeTaskId and no
+ *           `taskId` field (PR #45 fix round 9's regression pin).
+ *   W27     the fixture-economy trap, chained through the real
+ *           handlers: fixture_adjust on a money field clamps it to
+ *           [0,1000] (500,000 → 1,000), and a later fixture_fund
+ *           against the clamped treasury rejects
+ *           INSUFFICIENT_TREASURY and writes NO pending — while the
+ *           same fund against the standing treasury resolves and
+ *           creates pend_<actionId>_01 (PR #45 fix round 10's
+ *           regression pin; the gate suite's N6 drive → N7 fundB
+ *           starvation).
  *
  * Every composed plan runs the real validatePlan (the committer's
  * §5.6/§6.3 guards incl. F-02 reconciliation) before assertions.
@@ -42,6 +71,7 @@ import {
   collectActionReadPlan,
   digestQueryResults,
   resolveAction,
+  resolveRipening,
   snapshotFromDocs,
   validatePlan,
 } from "../lib/sim/resolver";
@@ -49,8 +79,10 @@ import { WakeScanState } from "../lib/sim/pending";
 import { buildFixtureBaselineRegistry } from "../lib/sim/baseline/fixtures";
 import { buildActionDoc } from "../lib/sim/intake";
 import { buildLogEntry, headHashOf } from "../lib/sim/log";
-import { summaryDraft } from "../lib/sim/rules/planHelpers";
+import { ruleEffectDraft, summaryDraft } from "../lib/sim/rules/planHelpers";
+import { verifyStandingLog } from "../lib/sim/verify";
 import type {
+  LogEntryDraft,
   ResolutionPlan,
   SimAction,
   SimActor,
@@ -58,12 +90,14 @@ import type {
   SnapshotQueryRecord,
 } from "../lib/sim/state";
 import {
+  buildSilenceCommit,
   buildSituationDoc,
   silencePlanWritesOnlySituation,
   type SimSituation,
 } from "../lib/sim/situations";
 import {
   WAKE_RULES_QUERY_ID,
+  buildDelegatedActionDoc,
   delegatedActionId,
   evaluateDelegationStep,
   evaluateTriggerPosture,
@@ -79,8 +113,11 @@ import {
   wakeStepSeedPaths,
   type WakePassStep,
 } from "../lib/sim/wakeSteps";
-import { buildTaskEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../lib/envelopes";
+import { buildTaskEnvelope, claimEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../lib/envelopes";
 import { buildMandateVersion } from "../lib/npcs";
+import { npcFromDoc } from "../lib/authority/view";
+import { readSituationActionSpec } from "../lib/sim/delegation";
+import { validateNpcActorForm } from "../lib/authority/actor";
 
 const registry = buildFixtureBaselineRegistry();
 const NOW = "2026-10-20T15:00:00.000Z";
@@ -1089,6 +1126,770 @@ check("W23 every step kind's seed paths carry sim_counters/log — the snapshot-
       `${step.kind} seed paths name sim_counters/head, a doc that does not exist`
     );
   }
+});
+
+check("W24 the executor's delegated-action construction carries the §3.2 situation trigger — it resolves; the same action unstamped rejects NO_TRIGGER_ROOT; an uncited rule's fire cites the standing mandate (§7.1), and blocks when it is gone (round 7)", () => {
+  // PR #45 CI round 6: executeDelegatedAction built the delegated
+  // action with delegatedVia only — no trigger citation — so the
+  // authority stage's check 5 refused every act-for-me fire
+  // (NO_TRIGGER_ROOT) while the pure venues stayed green: their
+  // fixtures hand-stamped the citation the engine was responsible
+  // for. This check drives the REAL construction (the executor
+  // persists buildDelegatedActionDoc's output verbatim) through the
+  // real resolver, so the joint cannot silently unstamp again.
+  const docs = baseDocs();
+  standingNpc(docs, {
+    version: {
+      structuredScope: {
+        triggerKinds: ["situation"],
+        allowedActionTypes: ["fixture_adjust"],
+        namedRecordIds: [],
+        counterpartyCityIds: null,
+      },
+    },
+  });
+  docs.set("sim_cities/cityA", {
+    cityId: "cityA",
+    stats: { infrastructure: 50, treasuryRubars: 1_000_000 },
+    stateVersion: 1,
+  });
+  const sit = makeSituation({
+    kind: "proposal",
+    detail: {
+      delegatedAction: {
+        actionType: "fixture_adjust",
+        structuredAction: { cityId: "cityA", field: "stats.infrastructure", delta: 5 },
+        targetCityIds: ["cityA"],
+      },
+    },
+  });
+  putSituation(docs, sit);
+  const npc = npcFromDoc(docs.get("sim_npcs/npc1") ?? null);
+  assert.ok(npc, "the standing steward parses");
+  const spec = readSituationActionSpec(sit);
+  assert.ok(spec, "the card carries a readable delegated spec");
+  const action = buildDelegatedActionDoc({
+    situationId: sit.situationId,
+    situationCreatedSeq: sit.createdSeq,
+    ownerUid: "ownerA",
+    npc,
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    spec,
+    audienceCityId: "cityA",
+    via: "rule1",
+    cycleId: CYCLE,
+    nowIso: NOW,
+  });
+  const trigger = (action.structuredAction as Record<string, unknown>).trigger as Record<string, unknown>;
+  assert.equal(trigger?.kind, "situation");
+  assert.equal(trigger?.sourceId, sit.situationId);
+  assert.equal(trigger?.sourceSeq, sit.createdSeq, "rooted at the card's creating event, not the wake");
+  const plan = runActionAt(docs, action, NOW);
+  assert.equal(plan.outcome, "resolved");
+  const summary = plan.entries[plan.entries.length - 1];
+  const classification = summary?.classification as unknown as Record<string, unknown>;
+  assert.deepEqual(classification?.trigger, {
+    kind: "situation",
+    sourceId: sit.situationId,
+    sourceSeq: sit.createdSeq,
+    deliberation: null,
+  });
+  assert.deepEqual(classification?.mandate, {
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    mode: "act-for-me",
+  }, "the stage stamps its verified mandate citation beside the trigger");
+  const cityWrite = plan.writes.find((w) => w.path === "sim_cities/cityA");
+  assert.equal(
+    ((cityWrite?.afterDoc as Record<string, unknown>)?.stats as Record<string, unknown>)?.infrastructure,
+    55,
+    "the delegated act lands"
+  );
+  // Falsifiability: the identical action with the citation stripped
+  // — the executor's pre-fix shape — refuses at check 5.
+  const unstamped: SimAction = {
+    ...action,
+    structuredAction: { ...(action.structuredAction as Record<string, unknown>) },
+  };
+  delete (unstamped.structuredAction as Record<string, unknown>).trigger;
+  const plan2 = runActionAt(docs, unstamped, NOW);
+  assert.equal(plan2.outcome, "rejected");
+  assert.equal(plan2.rejection?.code, "NO_TRIGGER_ROOT");
+
+  // Round 7 (the same joint, the fire's half): a rule whose handler
+  // cites NO mandate fires under the handler NPC's STANDING mandate,
+  // and the citation stands on the fire, the card's handling, and
+  // the fire entry's actor — the three records the gate suite reads.
+  // PR #45 CI round 7 convicted the pre-fix evaluator: it adopted
+  // the authority view's resolved mandate only for cited rules, so
+  // an uncited fire composed a ROOTLESS entry actor (mandateId and
+  // envelopeId both null) — a §3.2 orphan the standing verifier
+  // flags NPC_ACTOR_FORM. Every pure-venue fire fixture cited its
+  // mandate (W1's ruleDoc, the situations harness's rule()); the
+  // gate suite's rule-fire-1 was the first uncited fire exercised.
+  const docsF = baseDocs();
+  standingNpc(docsF, {
+    rule: ruleDoc({ handler: { npcId: "npc1", mode: "act-for-me", mandateId: null } }),
+  });
+  const sitF = makeSituation({
+    kind: "proposal",
+    detail: {
+      delegatedAction: {
+        actionType: "advance_project",
+        structuredAction: { projectId: "proj-1" },
+        targetCityIds: ["cityA"],
+      },
+    },
+  });
+  putSituation(docsF, sitF);
+  const snapshotF = snapshotOf(docsF);
+  const stepF: WakePassStep = { kind: "delegation", situationId: sitF.situationId };
+  const fired = evaluateDelegationStep(snapshotF, sitF.situationId, {
+    resolutionId: wakeStepResolutionId(stepF, CYCLE), cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(fired.evaluation?.outcome, "fire");
+  if (fired.evaluation?.outcome !== "fire") throw new Error("unreachable");
+  assert.equal(fired.evaluation.fire.kind, "delegated-action");
+  assert.equal(fired.evaluation.fire.mandateId, "mandate1", "the fire adopts the standing mandate the view resolved");
+  assert.equal(fired.evaluation.fire.mandateVersion, 1);
+  assertPlanValid(fired.plan, snapshotF);
+  const fireEntry = fired.plan.entries.find(
+    (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+  );
+  assert.ok(fireEntry, "the fire entry stands in the plan");
+  assert.equal(fireEntry.actor.mandateId, "mandate1", "the fire entry's actor cites the standing mandate");
+  assert.equal(fireEntry.actor.mandateVersion, 1);
+  assert.equal(
+    validateNpcActorForm(fireEntry.actor).ok,
+    true,
+    "the fire entry's actor passes the verifier's exactly-one-root form gate (§3.2)"
+  );
+  const afterF = planWriteFor(fired.plan, `sim_situations/${sitF.situationId}`)?.afterDoc as unknown as SimSituation;
+  assert.equal(afterF?.handling?.mandateId, "mandate1", "the card's handling cites the standing mandate");
+  assert.equal(afterF?.handling?.mandateVersion, 1);
+
+  // Falsifiability: the same uncited rule with the standing mandate
+  // revoked (the NPC holds none) blocks at evaluation — no fire, no
+  // transition, no rootless entry (§7.2 handler-authority-changed).
+  const docsB = baseDocs();
+  standingNpc(docsB, {
+    npc: { currentMandateId: null, currentMandateVersion: null },
+    rule: ruleDoc({ handler: { npcId: "npc1", mode: "act-for-me", mandateId: null } }),
+  });
+  putSituation(docsB, sitF);
+  const snapshotB = snapshotOf(docsB);
+  const blockedFire = evaluateDelegationStep(snapshotB, sitF.situationId, {
+    resolutionId: wakeStepResolutionId(stepF, CYCLE), cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(blockedFire.evaluation?.outcome, "blocked-handler-authority-changed");
+  if (blockedFire.evaluation?.outcome === "blocked-handler-authority-changed") {
+    assert.match(blockedFire.evaluation.reason, /no standing mandate/);
+  }
+  assert.equal(
+    blockedFire.plan.entries.some(
+      (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+    ),
+    false,
+    "no fire entry is composed for the blocked rule"
+  );
+  assert.equal(planWriteFor(blockedFire.plan, `sim_situations/${sitF.situationId}`), undefined, "the card is not transitioned");
+});
+
+// ---------------------------------------------------------------------------
+section("W25 — §3.2 trigger citations on every NPC-actor entry (PR #45 CI round 8)");
+
+check("W25 every NPC-actor producer stamps classification.trigger — the standing verifier finds no NPC_TRACE_* over the produced entries; stripping a citation flags it", () => {
+  // PR #45 CI round 8: N4's verifyOk returned exactly two findings —
+  // NPC_TRACE_TRIGGER_MISSING at seq 13 (the delegation FIRE entry:
+  // buildRuleFireEntry's classification carried no trigger) and
+  // seq 14 (the delegated action's rule-effect DETAIL entry:
+  // stampMandateCitation stamped the summary only, and the
+  // verifier's traceability reads classification.trigger on EVERY
+  // NPC-actor entry). The full producer sweep indicted the whole
+  // class: the silence commit's {sourceKind, …} trigger shape (and
+  // its mirror in the stage's silence verdict), the envelope
+  // outcome entry (no trigger), attention conversions carrying an
+  // NPC origin actor, ripening/voiding entries under an NPC origin
+  // actor, the stage's reject plan, and the committer's
+  // WRITE_SET_TOO_LARGE fallback. This check drives the real
+  // producers for the entry-writing fixes and runs their standing
+  // entries through the REAL verifier.
+  const docs = baseDocs();
+  standingNpc(docs, {
+    version: {
+      structuredScope: {
+        triggerKinds: ["situation"],
+        allowedActionTypes: ["fixture_adjust"],
+        namedRecordIds: [],
+        counterpartyCityIds: null,
+      },
+    },
+  });
+  docs.set("sim_cities/cityA", {
+    cityId: "cityA",
+    stats: { infrastructure: 50, spirit: 50, treasuryRubars: 1_000_000 },
+    stateVersion: 1,
+  });
+  // The card's creating event is seq 2 in the assembled world below.
+  const sit = makeSituation({
+    kind: "proposal",
+    sourceSeq: 2,
+    detail: {
+      delegatedAction: {
+        actionType: "fixture_adjust",
+        structuredAction: { cityId: "cityA", field: "stats.infrastructure", delta: 5 },
+        targetCityIds: ["cityA"],
+      },
+    },
+  });
+  putSituation(docs, sit);
+  const snapshot = snapshotOf(docs);
+
+  // (1) The delegation fire entry (buildRuleFireEntry).
+  const step: WakePassStep = { kind: "delegation", situationId: sit.situationId };
+  const fired = evaluateDelegationStep(snapshot, sit.situationId, {
+    resolutionId: wakeStepResolutionId(step, CYCLE), cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(fired.evaluation?.outcome, "fire");
+  const fireEntry = fired.plan.entries.find(
+    (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+  );
+  assert.ok(fireEntry, "the fire entry stands in the plan");
+  assert.deepEqual((fireEntry.classification as Record<string, unknown>).trigger, {
+    kind: "situation", sourceId: sit.situationId, sourceSeq: 2, deliberation: null,
+  }, "the fire entry carries the §3.2 situation citation");
+
+  // (2) The delegated action's resolution — EVERY entry stamped,
+  // not only the summary (the seq-14 half of the conviction).
+  const npc = npcFromDoc(docs.get("sim_npcs/npc1") ?? null);
+  assert.ok(npc, "the standing steward parses");
+  const spec = readSituationActionSpec(sit);
+  assert.ok(spec, "the card carries a readable delegated spec");
+  const action = buildDelegatedActionDoc({
+    situationId: sit.situationId,
+    situationCreatedSeq: sit.createdSeq,
+    ownerUid: "ownerA",
+    npc,
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    spec,
+    audienceCityId: "cityA",
+    via: "rule1",
+    cycleId: CYCLE,
+    nowIso: NOW,
+  });
+  const actionPlan = runActionAt(docs, action, NOW);
+  assert.equal(actionPlan.outcome, "resolved");
+  assert.equal(actionPlan.entries.length, 2, "fixture_adjust writes a detail entry + a summary");
+  for (const entry of actionPlan.entries) {
+    const classification = entry.classification as Record<string, unknown>;
+    assert.deepEqual(classification?.trigger, {
+      kind: "situation", sourceId: sit.situationId, sourceSeq: 2, deliberation: null,
+    }, "every entry of the resolution carries the stage's verified trigger");
+    assert.deepEqual(classification?.mandate, {
+      mandateId: "mandate1", mandateVersion: 1, mode: "act-for-me",
+    }, "every entry of the resolution carries the stage's verified mandate citation");
+  }
+
+  // (3) The silence commit (buildSilenceCommit) — entry-vocab
+  // trigger, rooted at the seq its own summary text cites.
+  const sitSilence = makeSituation({ kind: "question", sourceSeq: 2 });
+  const silence = buildSilenceCommit({
+    situation: sitSilence,
+    producingMode: "npc-silent-mode",
+    ownerUid: "ownerA",
+    npcId: "npc1",
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    cityName: "Fixture City A",
+    resolvedSeq: 10,
+    resolvedByResolutionId: "wake_silence_w25",
+    now: NOW,
+  });
+  assert.equal(silence.entry.actor.type, "npc");
+  assert.deepEqual((silence.entry.classification as Record<string, unknown>).trigger, {
+    kind: "situation", sourceId: sitSilence.situationId, sourceSeq: 2, deliberation: null,
+  });
+
+  // (4) The envelope outcome entry (via the real terminal step).
+  const env = runningEnvelope({ taskId: "env_w25", createdSeq: 2 });
+  const envPlan = resolveEnvelopeTerminalStep(
+    snapshotOf(terminalWorld(env)),
+    { kind: "envelope-terminal", taskId: env.taskId, leaseId: LEASE, outcome: DONE_OUTCOME },
+    { resolutionId: "wake_envterm_w25" }
+  );
+  assert.equal(envPlan.entries.length, 1);
+  const outcomeEntry = envPlan.entries[0];
+  assert.equal(outcomeEntry.actor.type, "npc");
+  assert.equal(outcomeEntry.actor.envelopeId, "env_w25");
+  assert.deepEqual((outcomeEntry.classification as Record<string, unknown>).trigger, {
+    kind: "envelope", sourceId: "env_w25", sourceSeq: 2, deliberation: null,
+  });
+
+  // (5) A ripening whose origin actor is the NPC (resolveRipening):
+  // every entry the R-33 path writes cites the origin event.
+  const ripeningPending = {
+    pendingId: "pend_w25",
+    kind: "delayed-stat-effect",
+    originResolutionId: action.actionId,
+    originActionId: action.actionId,
+    originActor: {
+      type: "npc", memberId: null, npcId: "npc1", onBehalfOfMemberId: "ownerA",
+      mandateId: "mandate1", mandateVersion: 1, envelopeId: null,
+    },
+    originCityId: "cityA",
+    originSummaryText: "delegated adjustment ripens",
+    targetCityId: "cityA",
+    originSeq: 9,
+    generation: 0,
+    chainId: "pend_w25",
+    chainRootPendingId: "pend_w25",
+    payloadSpec: {
+      mode: "determinate",
+      effect: { type: "stat-delta", cityId: "cityA", field: "stats.spirit", delta: 3 },
+    },
+    audienceUids: ["ownerA"],
+  };
+  docs.set("sim_pending_consequences/pend_w25", ripeningPending);
+  const ripeningPlan = resolveRipening(snapshotOf(docs), ripeningPending, { baselineRegistry: registry });
+  assert.equal(ripeningPlan.entries.length, 2, "the R-33 detail entry + the summary");
+  for (const entry of ripeningPlan.entries) {
+    assert.equal(entry.actor.type, "npc");
+    assert.deepEqual((entry.classification as Record<string, unknown> | null)?.trigger, {
+      kind: "log-event", sourceId: "pend_w25", sourceSeq: 9, deliberation: null,
+    }, "ripening entries under an NPC origin actor cite the origin event");
+  }
+
+  // (6) The stage's silence verdict plan: same entry vocabulary.
+  const docsS = baseDocs();
+  standingNpc(docsS, {
+    npc: { permissionMode: "silent" },
+    version: {
+      permissionMode: "silent",
+      structuredScope: {
+        triggerKinds: ["situation"],
+        allowedActionTypes: ["fixture_adjust"],
+        namedRecordIds: [],
+        counterpartyCityIds: null,
+      },
+    },
+  });
+  putSituation(docsS, sit);
+  const npcS = npcFromDoc(docsS.get("sim_npcs/npc1") ?? null);
+  assert.ok(npcS);
+  const silentAction = buildDelegatedActionDoc({
+    situationId: sit.situationId,
+    situationCreatedSeq: sit.createdSeq,
+    ownerUid: "ownerA",
+    npc: npcS,
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    spec,
+    audienceCityId: "cityA",
+    via: "rule1",
+    cycleId: CYCLE,
+    nowIso: NOW,
+  });
+  const silencePlan = runActionAt(docsS, silentAction, NOW);
+  assert.equal(silencePlan.entries.length, 1);
+  const silenceVerdictClassification = silencePlan.entries[0].classification as Record<string, unknown>;
+  assert.equal(silenceVerdictClassification?.silence, true, "the silent mode dispositions to silence");
+  assert.deepEqual(silenceVerdictClassification?.trigger, {
+    kind: "situation", sourceId: sit.situationId, sourceSeq: 2, deliberation: null,
+  });
+
+  // (7) The stage's reject plan: the citation keys ride the
+  // rejection too (parity with the sibling verdict plans). The
+  // unstamped action is round 6's falsifiability shape — its
+  // citation is the defaulted one, the honest record of a
+  // triggerless attempt.
+  const unstamped: SimAction = {
+    ...action,
+    structuredAction: { ...(action.structuredAction as Record<string, unknown>) },
+  };
+  delete (unstamped.structuredAction as Record<string, unknown>).trigger;
+  const rejectPlan = runActionAt(docs, unstamped, NOW);
+  assert.equal(rejectPlan.rejection?.code, "NO_TRIGGER_ROOT");
+  const rejectClassification = rejectPlan.entries[0].classification as Record<string, unknown>;
+  assert.equal(rejectClassification?.mandateId, "mandate1");
+  assert.equal(rejectClassification?.mandateVersion, 1);
+  assert.deepEqual(rejectClassification?.trigger, {
+    kind: "log-event", sourceId: null, sourceSeq: null, deliberation: null,
+  });
+
+  // (8) An attention conversion whose pending's origin actor is
+  // the NPC: the conversion entry cites the pending's origin event.
+  const docsA = baseDocs();
+  docsA.set("sim_pending_consequences/pend-attn-w25", {
+    pendingId: "pend-attn-w25",
+    kind: "innovation-ripening",
+    status: "failed",
+    originCityId: "cityA",
+    originActor: {
+      type: "npc", memberId: null, npcId: "npc1", onBehalfOfMemberId: "ownerA",
+      mandateId: "mandate1", mandateVersion: 1, envelopeId: null,
+    },
+    originSeq: 9,
+    originResolutionId: action.actionId,
+    attempts: 3,
+    needsAttention: true,
+    lastFailure: { code: "GENERATION_FAILED", message: "the generator refused" },
+    attentionSituationId: null,
+    audienceUids: ["ownerA"],
+  });
+  const attnPlan = resolveAttentionStep(snapshotOf(docsA), "pend-attn-w25", { resolutionId: "wake_attention_w25" });
+  assert.equal(attnPlan.entries.length, 1);
+  assert.equal(attnPlan.entries[0].actor.type, "npc");
+  assert.deepEqual((attnPlan.entries[0].classification as Record<string, unknown>).trigger, {
+    kind: "log-event", sourceId: "pend-attn-w25", sourceSeq: 9, deliberation: null,
+  });
+
+  // Assemble the produced entries into a standing world and run the
+  // REAL verifier: genesis + member seed entries at the seqs the
+  // citations name (the card's creating event stands at 2; the
+  // delegated summary stands at 9 as the ripening's origin), then
+  // the produced entries in production order. The assertion is the
+  // §3.2 family — the synthetic assembly's empty manifest write
+  // sets are not the bijection's subject here; the emulator
+  // suite's verifyOk runs the full verifier over committed worlds.
+  const built: Record<string, unknown>[] = [];
+  const manifests = new Map<string, Record<string, unknown>>();
+  let prevHash = "0".repeat(64);
+  const pushBuilt = (
+    draft: LogEntryDraft,
+    seq: number,
+    resolutionId: string,
+    entryIndexWithinResolution = 0
+  ): void => {
+    const entry = buildLogEntry(draft, {
+      seq,
+      resolutionSeq: seq - entryIndexWithinResolution,
+      resolutionId,
+      entryIndexWithinResolution,
+      resolvedAt: NOW,
+      rulesVersion: "sim-rules-0.5.0-phase5",
+      prevHash,
+      wakeActionId: null,
+      executedDuringSeq: null,
+    }) as unknown as Record<string, unknown>;
+    prevHash = entry.entryHash as string;
+    built.push(entry);
+    manifests.set(resolutionId, { writeSet: [], lastSeq: seq });
+  };
+  pushBuilt(
+    {
+      ...ruleEffectDraft({
+        actor: {
+          type: "system", memberId: null, npcId: null, onBehalfOfMemberId: null,
+          mandateId: null, mandateVersion: null, envelopeId: null,
+        } as SimActor,
+        summaryText: "genesis",
+      }),
+      kind: "genesis",
+      summary: true,
+    } as LogEntryDraft,
+    1,
+    "genesis"
+  );
+  for (const seq of [2, 3, 4, 5, 6]) {
+    pushBuilt(
+      summaryDraft({ actor: OWNER, cityId: "cityA", cityIds: ["cityA"], summaryText: `seed entry ${seq}` }),
+      seq,
+      `w25-seed-${seq}`
+    );
+  }
+  pushBuilt(fireEntry, 7, wakeStepResolutionId(step, CYCLE));
+  actionPlan.entries.forEach((draft, i) => pushBuilt(draft, 8 + i, action.actionId, i));
+  pushBuilt(silence.entry, 10, "wake_silence_w25");
+  pushBuilt(outcomeEntry, 11, "wake_envterm_w25");
+  ripeningPlan.entries.forEach((draft, i) => pushBuilt(draft, 12 + i, "ripen_pend_w25", i));
+  const lastSeq = 13;
+
+  const stateDocs = new Map<string, Record<string, unknown>>();
+  stateDocs.set("sim_npcs/npc1", docs.get("sim_npcs/npc1") as Record<string, unknown>);
+  stateDocs.set("sim_mandates/mandate1", docs.get("sim_mandates/mandate1") as Record<string, unknown>);
+  stateDocs.set(
+    "sim_mandates/mandate1/versions/1",
+    docs.get("sim_mandates/mandate1/versions/1") as Record<string, unknown>
+  );
+  stateDocs.set(
+    "sim_task_envelopes/env_w25",
+    planWriteFor(envPlan, "sim_task_envelopes/env_w25")?.afterDoc as Record<string, unknown>
+  );
+  stateDocs.set(
+    "sim_task_outputs/env_w25",
+    planWriteFor(envPlan, "sim_task_outputs/env_w25")?.afterDoc as Record<string, unknown>
+  );
+  const world = {
+    entries: built,
+    manifests,
+    counter: { lastSeq, lastEntryHash: prevHash },
+    world: { lastCommittedSeq: lastSeq },
+    stateDocs,
+    baselineRegistry: registry,
+  };
+  const result = verifyStandingLog(world);
+  assert.deepEqual(
+    result.findings.filter((f) => f.code.startsWith("NPC_TRACE")),
+    [],
+    "no NPC_TRACE_* findings over the produced entries"
+  );
+
+  // Falsifiability: strip the fire entry's citation → the verifier
+  // flags the round-8 finding at the fire entry's seq; strip the
+  // delegated DETAIL entry's → flagged at its seq.
+  const stripAt = (seq: number) => ({
+    ...world,
+    entries: built.map((e) =>
+      e.seq === seq
+        ? {
+            ...e,
+            classification: {
+              ...(e.classification as Record<string, unknown>),
+              trigger: undefined,
+            },
+          }
+        : e
+    ),
+  });
+  const tamperedFire = verifyStandingLog(stripAt(7) as never);
+  assert.ok(
+    tamperedFire.findings.some((f) => f.code === "NPC_TRACE_TRIGGER_MISSING" && f.seq === 7),
+    "a triggerless fire entry is flagged at its seq"
+  );
+  const tamperedDetail = verifyStandingLog(stripAt(8) as never);
+  assert.ok(
+    tamperedDetail.findings.some((f) => f.code === "NPC_TRACE_TRIGGER_MISSING" && f.seq === 8),
+    "a triggerless detail entry is flagged at its seq"
+  );
+});
+
+// ---------------------------------------------------------------------------
+section("W26 — a fire-spawned envelope, claimed + completed in the same wake (PR #45 CI round 9)");
+
+check("W26 an ask-first fire's envelope is claimable in its own wake and completes with exactly one output, addressed by doc id", () => {
+  // PR #45 CI round 9: the gate suite's N5 died at "exactly one
+  // output record stands" (0 !== 1) while its own earlier assertions
+  // proved the fire spawned the envelope, the claim pass claimed it
+  // (RUNNING observed), completed it (claims.completed DONE), and
+  // the envelope stood DONE. The terminal plan commits output +
+  // envelope patch + outcome entry wholesale, so the output stood —
+  // under its doc id. The suite read it with a field query on
+  // `taskId`, a field the output record never carries (the record
+  // binds by doc id + envelopeTaskId — §4.3's exactly-one mechanism;
+  // the lifecycle's own words: "the output's id is the task id, so
+  // this is an existence check, not a query"). The pure venues had
+  // never chained the joint: W13's planner fixtures and W14's
+  // terminal fixtures are hand-built envelopes. This check drives
+  // a FIRE-SPAWNED envelope (the real evaluator, N5's shape: an
+  // ask-first handler citing no mandate, a question card with no
+  // delegated spec) through the real claim planner, the real
+  // lifecycle claim, and the real terminal step — and pins the
+  // record shape the corrected suite reading rests on.
+  const askFirstWorld = () => {
+    const docs = baseDocs();
+    standingNpc(docs, {
+      npc: { permissionMode: "ask-first" },
+      version: { permissionMode: "ask-first" },
+      rule: ruleDoc({
+        match: { situationKinds: ["question"] },
+        handler: { npcId: "npc1", mode: "ask-first", mandateId: null },
+      }),
+    });
+    return docs;
+  };
+  const docs = askFirstWorld();
+  const sit = makeSituation({
+    kind: "question",
+    detail: { question: "What should the harbor watch rotation be?" },
+  });
+  putSituation(docs, sit);
+  const snapshot = snapshotOf(docs);
+  const step: WakePassStep = { kind: "delegation", situationId: sit.situationId };
+  const resolutionId = wakeStepResolutionId(step, CYCLE);
+  const { evaluation, plan } = evaluateDelegationStep(snapshot, sit.situationId, {
+    resolutionId, cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(evaluation?.outcome, "fire");
+  if (evaluation?.outcome !== "fire") throw new Error("unreachable");
+  assert.equal(evaluation.fire.kind, "envelope", "an ask-first handler fires an envelope, never an execution");
+  assertPlanValid(plan, snapshot);
+  const taskId = envelopeTaskId("ownerA", resolutionId);
+  const env = planWriteFor(plan, `sim_task_envelopes/${taskId}`)?.afterDoc as unknown as TaskEnvelopeRecord;
+  assert.ok(env, "the fire step's plan carries the envelope document");
+  assert.equal(env.status, "QUEUED");
+  // Claim eligibility, at the joint: the fire stamps availableAt
+  // with the wake's own instant (composeFirePlan injects
+  // snapshot.now), and the claim planner's availability floor reads
+  // that same instant — a same-wake spawn is claimable in its own
+  // wake, never not-yet-available.
+  assert.equal(env.availableAt, NOW, "the fire stamps the wake's own instant as availableAt");
+  const decisions = planEnvelopeClaims([env], { nowIso: NOW });
+  assert.deepEqual(
+    decisions.claims,
+    [{ taskId, recovered: false }],
+    "the claim planner claims the fire-spawned envelope in its own wake"
+  );
+  assert.equal(decisions.skipped.length, 0);
+  // The claim itself — the lifecycle claim claimEnvelopeTx applies.
+  const leaseId = "lease-w26";
+  const claimed = claimEnvelope(env, {
+    cycleId: CYCLE, leaseId, nowIso: NOW, leaseExpiresAt: "2026-10-20T15:15:00.000Z",
+  });
+  assert.ok(claimed.ok, "the lifecycle claim takes the envelope RUNNING");
+  if (!claimed.ok) throw new Error("unreachable");
+  assert.equal(claimed.envelope.status, "RUNNING");
+  // The terminal step over the claimed envelope, in a world where
+  // the fire entry stands at the envelope's createdSeq (its
+  // provenance) and the card carries the fire's transition.
+  const docsT = askFirstWorld();
+  docsT.set(`sim_task_envelopes/${taskId}`, claimed.envelope as unknown as Record<string, unknown>);
+  const afterSit = planWriteFor(plan, `sim_situations/${sit.situationId}`)?.afterDoc as unknown as SimSituation;
+  assert.ok(afterSit, "the fire transitioned the card");
+  putSituation(docsT, afterSit);
+  const fireDraft = plan.entries.find(
+    (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+  );
+  assert.ok(fireDraft, "the fire entry stands in the fire plan");
+  const fireEntry = buildLogEntry(fireDraft, {
+    seq: env.createdSeq,
+    resolutionSeq: env.createdSeq,
+    resolutionId,
+    entryIndexWithinResolution: 0,
+    resolvedAt: NOW,
+    rulesVersion: "sim-rules-0.5.0-phase5",
+    prevHash: "a".repeat(64),
+    wakeActionId: null,
+    executedDuringSeq: null,
+  }) as unknown as Record<string, unknown>;
+  docsT.set(`sim_log_entries/${String(env.createdSeq).padStart(12, "0")}`, fireEntry);
+  const snapshotT = snapshotOf(docsT);
+  const termPlan = resolveEnvelopeTerminalStep(
+    snapshotT,
+    { kind: "envelope-terminal", taskId, leaseId, outcome: DONE_OUTCOME },
+    { resolutionId: "wake_envterm_w26" }
+  );
+  assertPlanValid(termPlan, snapshotT);
+  // The bijection, addressed the way every reader addresses it: by
+  // doc id. The output record carries outputId/envelopeTaskId and
+  // NO `taskId` field — a field query on `taskId` can never match a
+  // standing output (the gate suite's pre-fix N5 reading).
+  const output = planWriteFor(termPlan, `sim_task_outputs/${taskId}`)?.afterDoc as unknown as Record<string, unknown>;
+  assert.ok(output, "the terminal plan writes the output at sim_task_outputs/{taskId}");
+  assert.equal(output.outputId, taskId);
+  assert.equal(output.envelopeTaskId, taskId);
+  assert.equal(output.outcome, "DONE");
+  assert.equal(
+    output.taskId,
+    undefined,
+    "the output record carries no taskId field — outputs are read by doc id, never by a taskId field query"
+  );
+  const afterEnv = planWriteFor(termPlan, `sim_task_envelopes/${taskId}`)?.afterDoc as unknown as TaskEnvelopeRecord;
+  assert.equal(afterEnv.status, "DONE");
+  assert.equal(afterEnv.outputId, taskId);
+  assert.equal(afterEnv.claim, null);
+  assert.equal(termPlan.entries.length, 1);
+  assert.deepEqual(termPlan.entries[0].recordsCreated, [`sim_task_outputs/${taskId}`]);
+  assert.equal(termPlan.entries[0].actor.envelopeId, taskId);
+});
+
+section("W27 — the fixture-economy trap: a clamped treasury starves a later fund (PR #45 CI round 10)");
+
+check("W27 fixture_adjust on a money field clamps it to [0,1000]; fixture_fund then rejects INSUFFICIENT_TREASURY writing no pending — the unclamped control funds and creates pend_<actionId>_01", () => {
+  // PR #45 CI round 10: the gate suite's N7 died at "pending B
+  // stands" — pend_<fundB.actionId>_01 never existed. The chain,
+  // proven here through the real handlers: the suite seeded cityB
+  // treasuryRubars 500,000; N6's wake-driving fixture_adjust on
+  // stats.treasuryRubars (delta 1) clamped it to 1,000 (the
+  // FIXTURE-ADJUST handler bounds every stat it touches to
+  // [0,1000]); N7's fixture_fund of 10,000 R then hit the fund
+  // handler's designed guard (amount > treasury →
+  // INSUFFICIENT_TREASURY), the resolution was rejected, and a
+  // rejected resolution writes no pending. CityA was untouched by
+  // any treasury-field adjust, so fundA resolved — the asymmetry
+  // that localised the defect. The suite fix drives N6's wake on
+  // stats.infrastructure instead; this check pins the engine facts
+  // the construction rule rests on.
+  const OWNER_B: SimActor = {
+    type: "member", memberId: "ownerB", npcId: null, onBehalfOfMemberId: null,
+    mandateId: null, mandateVersion: null, envelopeId: null,
+  };
+  const cityBDoc = (treasuryRubars: number): Record<string, unknown> => ({
+    cityId: "cityB",
+    stats: { infrastructure: 80, treasuryRubars },
+    stateVersion: 1,
+  });
+  const memberAction = (
+    req: string,
+    actionType: string,
+    structuredAction: Record<string, unknown>
+  ): SimAction => {
+    const { doc } = buildActionDoc({
+      actorUid: "ownerB",
+      clientRequestId: req,
+      actor: OWNER_B,
+      actionType,
+      structuredAction,
+      targetCityIds: ["cityB"],
+      now: NOW,
+    });
+    return { ...doc, status: "confirmed" };
+  };
+  const fundParams = {
+    cityId: "cityB",
+    fundName: "W27 Fund",
+    fundId: "fundW27",
+    amountRubars: 10_000,
+    mode: "determinate",
+    effectField: "stats.treasuryRubars",
+    effectDelta: 1,
+    disbursementRubars: 10_000,
+  };
+
+  // (1) The drive: fixture_adjust +1 on cityB's money field.
+  const docs = baseDocs();
+  docs.set("sim_cities/cityB", cityBDoc(500_000));
+  const adjustPlan = runActionAt(
+    docs,
+    memberAction("req-w27-adjust", "fixture_adjust", {
+      cityId: "cityB", field: "stats.treasuryRubars", delta: 1,
+    }),
+    NOW
+  );
+  assert.equal(adjustPlan.outcome, "resolved");
+  const clampedCity = planWriteFor(adjustPlan, "sim_cities/cityB")?.afterDoc as Record<string, unknown>;
+  assert.equal(
+    (clampedCity.stats as Record<string, unknown>).treasuryRubars,
+    1000,
+    "the clamp lands the treasury at 1,000 — a seeded 500,000 does not survive a fixture_adjust touch"
+  );
+
+  // (2) The fund against the clamped treasury: rejected, no pending.
+  docs.set("sim_cities/cityB", clampedCity);
+  const fundPlan = runActionAt(docs, memberAction("req-w27-fund", "fixture_fund", fundParams), NOW);
+  assert.equal(fundPlan.outcome, "rejected");
+  assert.equal(fundPlan.rejection?.code, "INSUFFICIENT_TREASURY");
+  assert.equal(
+    fundPlan.pendingCreates.length,
+    0,
+    "a rejected fund creates no pending — the gate suite's vanished pend_<actionId>_01"
+  );
+
+  // (3) Control: the same fund against the standing treasury.
+  const docsControl = baseDocs();
+  docsControl.set("sim_cities/cityB", cityBDoc(500_000));
+  const fundControl = memberAction("req-w27-fund", "fixture_fund", fundParams);
+  const controlPlan = runActionAt(docsControl, fundControl, NOW);
+  assert.equal(controlPlan.outcome, "resolved");
+  assert.ok(
+    controlPlan.pendingCreates.some(
+      (d) => (d as { doc?: { pendingId?: unknown } }).doc?.pendingId === `pend_${fundControl.actionId}_01`
+    ),
+    "the pending is created as pend_<resolutionId>_01 (resolutionId = actionId for an action resolution)"
+  );
+  const debited = planWriteFor(controlPlan, "sim_cities/cityB")?.afterDoc as Record<string, unknown>;
+  assert.equal((debited.stats as Record<string, unknown>).treasuryRubars, 490_000);
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);

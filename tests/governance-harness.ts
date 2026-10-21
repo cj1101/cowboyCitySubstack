@@ -64,6 +64,7 @@ import { GOVERNANCE_DESCRIPTORS } from "../lib/sim/rules/governance";
 import {
   DEFAULT_PERMISSION_MODE,
   buildMandateVersion,
+  mandateHash,
   memberActor,
   memberInCharacterActor,
   npcActorStanding,
@@ -675,7 +676,10 @@ check("silence: silent mode resolves as the §8 silence entry shape", () => {
   assert.equal(classification.silence, true);
   assert.equal(classification.producingMode, "silent");
   const trigger = classification.trigger as Record<string, unknown>;
-  assert.equal(trigger.sourceKind, "log-event");
+  // PR #45 CI round 8: the §3.2 entry vocabulary (kind, not the
+  // pre-fix sourceKind mirror shape the verifier read as
+  // triggerless).
+  assert.equal(trigger.kind, "log-event");
   assert.equal(trigger.sourceId, "evt-1");
   assert.equal(trigger.sourceSeq, 0);
 });
@@ -1138,6 +1142,64 @@ check("ruleHash parity: Vera's computeRuleHash == the governance copy == the pin
   assert.equal(computeRuleHash({ ...payload, version: 2 } as never), computeDelegationRuleHash({ ...payload, version: 2 } as never), "parity holds off-vector too");
 });
 
+// The Firestore-read form of a value: what a snapshot read returns
+// after the doc has been written — undefined members dropped, Dates
+// back as Timestamp-shaped values, explicit nulls preserved.
+function firestoreReadForm<T>(value: T): T {
+  if (value instanceof Date) {
+    return { seconds: Math.floor(value.getTime() / 1000), nanoseconds: 0 } as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => firestoreReadForm(v)) as T;
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      out[k] = firestoreReadForm(v);
+    }
+    return out as T;
+  }
+  return value;
+}
+check("mandateHash round-trip pin: the stored hash recomputes over the Firestore-read form", () => {
+  // The mandate-side mirror of the parity discipline above, pinned
+  // after PR #45 fix round 1: the authority stage and the
+  // standing-Log verifier recompute lib/npcs mandateHash over
+  // SNAPSHOT docs (the Firestore-read form), so the stored hash must
+  // survive the write/read round-trip exactly. The gate suite's N2
+  // asserts the same property against a real emulator read-back;
+  // this pure pin catches a payload-form drift without the emulator.
+  const built = buildMandateVersion({
+    version: 1,
+    npcId: "charA2",
+    cityId: "cityA",
+    ownerUid: "ownerA",
+    permissionMode: "act-for-me",
+    scopeFreeform: "Run routine harbor funds when a situation calls.",
+    structuredScope: {
+      triggerKinds: ["situation"],
+      allowedActionTypes: ["fixture_adjust"],
+      namedRecordIds: [],
+      counterpartyCityIds: null,
+    },
+    caps: {
+      perActionRubars: 100_000,
+      perResolutionPeriodRubars: 1_000_000,
+      periodDefinition: null,
+      maxProjectPhase: null,
+      allowPartialExecution: false,
+    },
+    negotiationBounds: null,
+    alwaysEscalate: [],
+    responseStyle: null,
+    expiresAtSeq: null,
+    horizonActions: null,
+    sourceActionId: "act-governance-harness-pin",
+  }, new Date(0));
+  const readBack = firestoreReadForm({ ...built, effectiveSeq: 42 });
+  assert.ok(!(readBack.createdAt instanceof Date), "the transform must actually bite: createdAt returns Timestamp-shaped");
+  assert.equal(mandateHash(readBack), built.mandateHash);
+});
+
 check("situation.handle records the §6.3A self-handling decision; the card stays open", () => {
   const action = memberAction(OWNER, "ownerA", "situation.handle", {
     situationId: "sit-1", citations: { recordPaths: ["sim_situations/sit-1"] },
@@ -1165,6 +1227,24 @@ check("the §9.6 audience gate: a non-audience member's decision refuses AUTHORI
   const plan = runAction(situationDocs(), action, NOW_A);
   assert.equal(plan.outcome, "rejected");
   assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
+});
+
+check("the §9.6 gate's faction leg is seed-fed (F-01): even the audience owner's decision refuses when the action names no city and cites nothing — the faction doc never materializes (the production client always names the card's city in targetCityIds)", () => {
+  const { doc } = buildActionDoc({
+    actorUid: "ownerA",
+    clientRequestId: "req-sit-handle-nocity",
+    actor: OWNER,
+    actionType: "situation.handle",
+    actionText: null,
+    structuredAction: { situationId: "sit-1" },
+    targetCityIds: [],
+    now: NOW_A,
+  });
+  const action = { ...doc, status: "confirmed" } as SimAction;
+  const plan = runAction(situationDocs(), action, NOW_A);
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "AUTHORITY_REVOKED");
+  assert.equal(plan.writes.length, 0);
 });
 
 check("a terminal situation refuses with the module's SITUATION_TERMINAL code, passed through", () => {
