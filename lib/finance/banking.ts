@@ -32,7 +32,13 @@
  *     insurance or credit creation "exists" as a system truth.
  */
 
-import { docField } from "../sim/state";
+import {
+  docField,
+  snapshotDoc,
+  type PendingDraft,
+  type SimActor,
+  type SimSnapshot,
+} from "../sim/state";
 import type { LedgerRef } from "./accounts";
 
 // ---------------------------------------------------------------------------
@@ -174,6 +180,10 @@ export interface BankDepositRecord {
   openedAtSeq: number;
   openingEntryId: string;
   lastSettledSeq: number;
+  /** Phase 5: created-claim principal extinguished by a pool
+   * closing's realized-loss write-down (Appendix C's A-B5
+   * bookkeeping). Absent ≡ 0; only ever stamped at pool closing. */
+  writtenDownRubars?: number;
   /** Phase 5 (B-10): the liquidation block, stamped when the record
    * sweeps into a depositor pool (status "assigned"). The frozen
    * claim figure (REC-5) and everything the pool derivation needs
@@ -596,6 +606,123 @@ export const NO_INSTITUTION_POSTURE: InsurancePosture = {
 /** Charter-flow posture lines (§7.6), generated from derived state.
  * Surfaces call this with the posture they derived at preview; the
  * text is a rendering of that state, not a claim about the world. */
+// ---------------------------------------------------------------------------
+// Schedule pendings (amendment §3.4 + V2-§1.3) — banking's due
+// occasions ride AGR pendings whose ripen condition is CONTRACTUAL,
+// not delay-derived: installment k is due at originatedAtSeq +
+// k × dueIntervalSeqs, and a premium period is due exactly
+// PREMIUM_PERIOD_SEQS after its anchor. buildPendingDraft cannot
+// express either (its requiredSeq derives from the delay formula
+// over the target city's traits), so this builder mirrors its doc
+// shape field-for-field — the acquisition family's precedent for a
+// family-held draft shape — and sets the ripen condition's
+// minSeqAdvance EXACTLY: the committer stamps requiredSeq =
+// creation summary seq + minSeqAdvance (P4-K19 anchoring), which is
+// the contractual due seq by construction. The wall floor is 0:
+// these pendings are seq-scheduled, and the seq gate alone governs
+// (eligibleAt = the creation instant). The payloadSpec is the
+// family's own (schedule data + Vera's `occasion` spec, GAP-1); the
+// ripening application is the family's composition
+// (buildScheduleRipeningPlan in rules/finance.ts), dispatched on
+// the kinds' declared effectPath "schedule".
+// ---------------------------------------------------------------------------
+
+export interface SchedulePendingArgs {
+  pendingId: string;
+  kind: "loan-installment-due" | "insurance-premium-due";
+  originResolutionId: string;
+  originActionId: string | null;
+  originActor: SimActor;
+  originCityId: string | null;
+  originSummaryText: string;
+  targetCityId: string;
+  sourceKind: "action" | "ripening";
+  generation: number;
+  chainId: string;
+  chainRootPendingId: string | null;
+  createdByResolutionId: string | null;
+  /** The exact seq advance to the contractual due seq. For
+   * generation-1 schedule pendings created inside the origin event
+   * this is (dueSeq − originEventSummarySeq); the successor
+   * mechanics in the ripening composition anchor it to the ripened
+   * pending's requiredSeq (SPEC-1 as confirmed by Vera). */
+  minSeqAdvance: number;
+  /** Recorded on the doc as the derivation of record (in place of a
+   * delay derivation): the schedule arithmetic that produced
+   * minSeqAdvance, so the due seq is recomputable from the record. */
+  scheduleDerivation: Record<string, unknown>;
+  payloadSpec: Record<string, unknown>;
+  extraAudienceUids?: string[];
+}
+
+export function buildSchedulePendingDraft(
+  snapshot: SimSnapshot,
+  args: SchedulePendingArgs
+): { draft: PendingDraft } {
+  const audience = new Set<string>(args.extraAudienceUids ?? []);
+  const actorUid = args.originActor.memberId ?? args.originActor.onBehalfOfMemberId;
+  if (actorUid) audience.add(actorUid);
+  for (const cityId of [args.originCityId, args.targetCityId]) {
+    if (!cityId) continue;
+    const faction = snapshotDoc(snapshot, `factions/${cityId}`);
+    const owners = faction?.ownerUids;
+    if (Array.isArray(owners)) {
+      for (const uid of owners) if (typeof uid === "string") audience.add(uid);
+    }
+  }
+  const targetCity = snapshotDoc(snapshot, `sim_cities/${args.targetCityId}`);
+  const doc: Record<string, unknown> = {
+    pendingId: args.pendingId,
+    schemaVersion: 2,
+    kind: args.kind,
+    status: "pending",
+    originResolutionId: args.originResolutionId,
+    originActionId: args.originActionId,
+    originActor: args.originActor,
+    originCityId: args.originCityId,
+    originSummaryText: args.originSummaryText,
+    targetCityId: args.targetCityId,
+    sourceKind: args.sourceKind,
+    generation: args.generation,
+    chainId: args.chainId,
+    chainRootPendingId: args.chainRootPendingId,
+    createdByResolutionId: args.createdByResolutionId,
+    createdBySeq: null, // committer
+    createdAtSeq: null, // committer
+    createdAt: null, // committer
+    originSeq: null, // committer (== createdAtSeq for generation-1)
+    ripenCondition: {
+      scope: "realm",
+      minSeqAdvance: args.minSeqAdvance,
+      requiredSeq: null, // committer: creation summary seq + minSeqAdvance
+      minWallElapsedHours: 0,
+      eligibleAt: null, // committer: creation instant + 0 (seq gate governs)
+      requiresActionInCities: [],
+      preconditions: [],
+    },
+    delayDerivation: { basis: "contractual-schedule", ...args.scheduleDerivation },
+    payloadSpec: args.payloadSpec,
+    creationSnapshot: {
+      targetStats: (targetCity?.stats as Record<string, unknown> | undefined) ?? null,
+      ruleInputs: { kind: args.kind, targetCityId: args.targetCityId },
+    },
+    audienceUids: [...audience].sort(),
+    claim: null,
+    attempts: 0,
+    needsAttention: false,
+    referencedByRefKeys: [],
+    stateVersion: 1,
+    ripenedAtSeq: null,
+    ripenedAt: null,
+    ripensInResolutionId: null,
+    voidedAtSeq: null,
+    voidReason: null,
+    outcomeSummary: null,
+    updatedAt: null, // committer
+  };
+  return { draft: { doc } };
+}
+
 export function describeInsurancePosture(posture: InsurancePosture): string[] {
   const lines: string[] = [];
   if (!posture.institutionExists) {
