@@ -6,6 +6,11 @@
  * Genesis is NOT a Resolution Event and writes no `sim_resolutions`
  * manifest (brief §1.5). It is the one pre-resolver commit.
  *
+ * Baseline stamp (runbook §3.3, go-live fix B-1): if the Baseline
+ * registry carries a ratified version, genesis stamps its version +
+ * docHash on the world doc at creation and asserts the stamp
+ * post-commit; if none is ratified, no stamp fields are written.
+ *
  * PRODUCTION GUARD: genesis refuses to run unless FIRESTORE_EMULATOR_HOST
  * is set (the emulator), OR both an explicit `allowProduction` option AND
  * the `SIM_GENESIS_ALLOW_PRODUCTION=1` environment variable are present.
@@ -23,12 +28,23 @@ import {
   computeLogEntryHash,
   logEntryDocId,
 } from "./template";
+import {
+  PRODUCTION_BASELINE_REGISTRY,
+  ratifiedBaselineForGenesis,
+  type BaselineRegistry,
+} from "./baseline/registry";
 
 export interface GenesisOptions {
   /** Must be true AND SIM_GENESIS_ALLOW_PRODUCTION=1 set to run off-emulator. */
   allowProduction?: boolean;
   /** Injectable clock for tests; defaults to the current time. */
   now?: Date;
+  /**
+   * The Baseline registry genesis stamps from (runbook §3.3). Defaults
+   * to the production registry; injectable so the unratified case is
+   * exercisable in tests.
+   */
+  baselineRegistry?: BaselineRegistry;
 }
 
 export interface GenesisResult {
@@ -104,7 +120,26 @@ export async function runGenesis(
   }
 
   const now = opts.now ?? new Date();
-  const worldDoc = buildSimWorldDoc(now);
+  // The ratified-Baseline stamp (runbook §3.3; go-live blocker B-1):
+  // when the registry carries a ratified version, genesis stamps its
+  // version + docHash on sim_world/current at creation — the stamp is
+  // what later makes the version citable from the genesis seq via
+  // projectBaselineStamp. When nothing is ratified, NO stamp fields
+  // are written at all: the world doc is exactly the pre-stamp shape,
+  // the resolver keeps failing closed, and the projection can only
+  // arrive later via a logged Resolution Event (never a script).
+  const stampVersion = ratifiedBaselineForGenesis(
+    opts.baselineRegistry ?? PRODUCTION_BASELINE_REGISTRY
+  );
+  const worldDoc = {
+    ...buildSimWorldDoc(now),
+    ...(stampVersion
+      ? {
+          baselineVersion: stampVersion.version,
+          baselineDocHash: stampVersion.docHash,
+        }
+      : {}),
+  };
   const entryCore = buildGenesisLogEntry(now);
   const entryHash = computeLogEntryHash(entryCore);
   const counterDoc = buildSimCountersDoc(entryHash, now);
@@ -167,6 +202,28 @@ export async function runGenesis(
   const worldData = worldSnap.data() as Record<string, unknown>;
   if (worldData.evenStartTemplateHash !== BASELINE_HASH) {
     throw new Error("genesis verification: sim_world evenStartTemplateHash != baselineHash");
+  }
+  // Post-commit Baseline-stamp assertion (B-1 fix item 3): when the
+  // registry carries a ratified version, the stored world doc must
+  // carry its stamp verbatim; in the unratified case it must carry no
+  // stamp fields at all. A silent omission here is the failure this
+  // fix exists to prevent — genesis fails loudly instead.
+  if (stampVersion) {
+    if (
+      worldData.baselineVersion !== stampVersion.version ||
+      worldData.baselineDocHash !== stampVersion.docHash
+    ) {
+      throw new Error(
+        `genesis verification: Baseline stamp mismatch (stored version ${String(worldData.baselineVersion)}, hash ${String(worldData.baselineDocHash)}; registry ratified ${stampVersion.version} / ${stampVersion.docHash})`
+      );
+    }
+  } else if (
+    worldData.baselineVersion !== undefined ||
+    worldData.baselineDocHash !== undefined
+  ) {
+    throw new Error(
+      "genesis verification: world doc carries a Baseline stamp but the registry has no ratified version"
+    );
   }
   const recomputedWriteSet = sha256Hex({
     "sim_world/current": projectFirestoreValue(worldSnap.data()),

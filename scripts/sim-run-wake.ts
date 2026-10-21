@@ -41,12 +41,15 @@ import { initializeApp as initializeAdminApp, getApps as getAdminApps } from "fi
 import { getAuth } from "firebase-admin/auth";
 import { initializeApp } from "firebase/app";
 import { connectAuthEmulator, getAuth as getClientAuth, signInWithCustomToken } from "firebase/auth";
-import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
+import { connectFirestoreEmulator, doc, getDoc, getFirestore } from "firebase/firestore";
 import { getSimDb, requireEmulator, SIM_PROJECT_ID } from "./sim-admin";
 import { runWake } from "../lib/sim/dispatcher";
 import type { EnvelopeWorker } from "../lib/sim/wakePasses";
 import type { EnvelopeWorkerOutcome } from "../lib/sim/wakeSteps";
-import { PRODUCTION_BASELINE_REGISTRY } from "../lib/sim/baseline/registry";
+import {
+  PRODUCTION_BASELINE_REGISTRY,
+  projectBaselineStamp,
+} from "../lib/sim/baseline/registry";
 import type { PreparedPayload } from "../lib/sim/state";
 
 async function main() {
@@ -101,8 +104,29 @@ async function main() {
   const [host, port] = (process.env.FIRESTORE_EMULATOR_HOST as string).split(":");
   connectFirestoreEmulator(db, host, Number(port));
 
+  // The genesis stamp projection (runbook §3.3): project the standing
+  // world doc's Baseline stamp into the injected registry so the
+  // ratified version is citable from the genesis seq. A missing doc or
+  // an unreadable one leaves the registry unprojected — the
+  // pre-genesis, fail-closed posture — and says so, rather than
+  // silently pretending the stamp was applied.
+  let baselineRegistry = PRODUCTION_BASELINE_REGISTRY;
+  try {
+    const worldSnap = await getDoc(doc(db, "sim_world", "current"));
+    if (worldSnap.exists()) {
+      baselineRegistry = projectBaselineStamp(
+        PRODUCTION_BASELINE_REGISTRY,
+        worldSnap.data() as Record<string, unknown>
+      );
+    }
+  } catch {
+    console.error(
+      "warning: could not read sim_world/current for the Baseline stamp projection; proceeding with the unprojected registry (pre-genesis posture)"
+    );
+  }
+
   const summary = await runWake(
-    { fabricDb: db, committerDb: db, baselineRegistry: PRODUCTION_BASELINE_REGISTRY },
+    { fabricDb: db, committerDb: db, baselineRegistry },
     { now, cycleId: `cycle-${now}`, preparedPayloads, envelopeWorker }
   );
   console.log(JSON.stringify(summary, null, 2));

@@ -125,6 +125,78 @@ export function citableBaselineVersion(
   return best;
 }
 
+/**
+ * The version genesis stamps on `sim_world/current` (runbook §3.3,
+ * ratified case): the registry's ratified version, or null when no
+ * version is ratified — in which case genesis writes NO stamp fields
+ * at all and the world doc is exactly the pre-stamp shape (the
+ * unratified case §3.3 governs: the projection later arrives only via
+ * a logged Resolution Event). When several versions are ratified, the
+ * one with the greatest in-force seq wins (the same ordering
+ * `citableBaselineVersion` applies); a ratified version whose
+ * `effectiveFromSeq` is still null counts as in force from genesis.
+ */
+export function ratifiedBaselineForGenesis(
+  registry: BaselineRegistry
+): BaselineVersion | null {
+  let best: BaselineVersion | null = null;
+  for (const v of registry.versions) {
+    if (v.status !== "ratified") continue;
+    if (
+      best === null ||
+      (v.effectiveFromSeq ?? 0) > (best.effectiveFromSeq ?? 0)
+    ) {
+      best = v;
+    }
+  }
+  return best;
+}
+
+/**
+ * The stamp → effective-registry projection (runbook §3.3; readiness
+ * B-1 fix item 2). Entry points that inject the Baseline registry read
+ * the standing world doc and project its genesis stamp: the stamped
+ * version becomes citable from the world's genesis seq, so
+ * `citableBaselineVersion` can select it. PURE — the input registry is
+ * never mutated (the code registry's `effectiveFromSeq: null` is what
+ * keeps pre-genesis worlds fail-closed, and it must survive).
+ *
+ * Fail-closed in every doubtful case — the registry is returned
+ * unchanged when: there is no world doc or no stamp on it (a
+ * pre-genesis / unratified-case world, behaving exactly as before this
+ * projection existed); the stamp names a version the registry does
+ * not carry; the stamped version is not ratified; or the stamp's
+ * docHash differs from the registry's stored hash for that version
+ * (a tampered or drifted stamp projects nothing).
+ */
+export function projectBaselineStamp(
+  registry: BaselineRegistry,
+  worldDoc: Record<string, unknown> | null | undefined
+): BaselineRegistry {
+  if (!worldDoc) return registry;
+  const version = worldDoc.baselineVersion;
+  const docHash = worldDoc.baselineDocHash;
+  if (typeof version !== "string" || typeof docHash !== "string") {
+    return registry;
+  }
+  const entry = getBaselineVersion(registry, version);
+  if (entry === null || entry.status !== "ratified" || entry.docHash !== docHash) {
+    return registry;
+  }
+  if (entry.effectiveFromSeq !== null) return registry;
+  const genesisSeq =
+    typeof worldDoc.genesisSeq === "number" &&
+    Number.isFinite(worldDoc.genesisSeq) &&
+    worldDoc.genesisSeq >= 1
+      ? Math.floor(worldDoc.genesisSeq)
+      : 1;
+  return {
+    versions: registry.versions.map((v) =>
+      v.version === version ? { ...v, effectiveFromSeq: genesisSeq } : v
+    ),
+  };
+}
+
 /** Does a section's structured scope cover an entry about these cities? */
 export function sectionScopeCovers(section: BaselineSection, cityIds: string[]): boolean {
   if (section.scope === "realm") return true;
