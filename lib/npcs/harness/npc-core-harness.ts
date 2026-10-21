@@ -401,6 +401,7 @@ function emptySnapshot(): SimSnapshot {
   return {
     docs: new Map(),
     heads: [],
+    queries: [],
     counterHead: { lastSeq: 0, lastEntryHash: "" },
     now: NOW.toISOString(),
   };

@@ -504,6 +504,7 @@ const actorFor = (npc: NpcRecord, version = 1) => npcActorStanding(npc, "m-stewa
   const snapshot: SimSnapshot = {
     docs,
     heads: [],
+    queries: [],
     counterHead: { lastSeq: 49, lastEntryHash: "" },
     now: "2026-10-18T00:00:00.000Z",
   };
