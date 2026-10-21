@@ -4,6 +4,18 @@
  * (cash-paid interest only), per finance-system-design.md, the
  * conformed banking-amendment-design.md, and brief §6.2/§7.2.
  *
+ * Phase 5 (PR-6, Felix): the banking family completes here —
+ * B-04's credited branch, the REC-6 balance-sheet derivation
+ * replacing the slice-form health reading, loan-record activation
+ * (B-05/B-06/B-07/B-08/B-11), recapitalization (B-09), liquidation
+ * with the waterfall, setoff, assignment and the B-13 insurance
+ * payout step (B-10), the deposit-insurance fund (founding
+ * composition, B-12 premiums + ladder + suspension, B-14
+ * assessments), the B-01 controller bar, and the banking schedule
+ * ripening composition (buildScheduleRipeningPlan) the Lead's
+ * resolver wiring dispatches on effectPath "schedule". Built, not
+ * live: the P2-K15 production chain is unexecuted (PR body).
+ *
  * The Build Lead registers FINANCE_DESCRIPTORS into RULE_DESCRIPTORS
  * (registry.ts is Lead assembly); until then these descriptors are
  * inert data. FINANCE_DESCRIPTOR_META carries finance §2.4's
@@ -60,6 +72,9 @@ import {
   memberAccountOf,
   memberAccountPath,
   bankDepositPath,
+  bankLoanPath,
+  difRef,
+  INSURANCE_FUND_PATH,
   type LedgerRef,
 } from "../../finance/accounts";
 import {
@@ -75,14 +90,68 @@ import {
   bankCashRubars,
   buildBankCharterBlock,
   buildBankDepositDoc,
+  buildSchedulePendingDraft,
   CHARTER_MIN_CAPITAL_RUBARS,
   deriveBankHealth,
+  EQUITY_FLOOR_BPS,
+  INSIDER_CAP_BPS,
   liquidReserveRubars,
+  PREMIUM_PERIOD_SEQS,
   RATE_CAP_BPS_PER_KSEQ,
+  RECHARTER_BAR_SEQS,
   RESERVE_FLOOR_BPS,
+  seizedAssetsOf,
   unencumberedCash,
   type BankDepositRecord,
 } from "../../finance/banking";
+import {
+  allocateRepayment,
+  buildLoanOfferDoc,
+  createdSupplyOf,
+  deriveLoanStanding,
+  distributeProRata,
+  fundingSourceOf,
+  installmentPrincipalOf,
+  isInsiderBorrower,
+  loanRecordOf,
+  nextDueSeqFor,
+  poolUnpaidRubars,
+  setoffFor,
+  type BankLoanRecord,
+  type LoanCollateral,
+} from "../../finance/loans";
+import {
+  buildDifFundDoc,
+  claimBasisRubars,
+  coveredSplitForDepositor,
+  depositCoveredClass,
+  derivePremiumLadder,
+  fundDeficient,
+  fundRecordOf,
+  insuredLiabilitiesForBank,
+  premiumDueRubars,
+  premiumRiskMultiplier,
+  bankRiskGradeOf,
+  queuedShortfallsOf,
+  supplementalAssessments,
+  totalInsuredLiabilities,
+  type PremiumMarkerView,
+  type PremiumSettlementView,
+} from "../../finance/insurance";
+import {
+  applySituationUpsert,
+  buildIncidentSituation,
+  buildProposalSituation,
+  buildRipeningOccasionSituation,
+  dedupeKeyFor,
+  episodeSourceId,
+  markSituationHandled,
+  occasionSpecFromPending,
+  planSituationUpsert,
+  situationPath,
+  type RipeningOccasionSpec,
+  type SimSituation,
+} from "../situations";
 import { corporationPath } from "../corporations";
 
 // ---------------------------------------------------------------------------
@@ -167,6 +236,13 @@ function finishPlan(
     cityId: string | null;
     summaryText: string;
     major?: boolean;
+    /** Phase 5: additive machine-readable extras merged into the
+     * summary entry's classification (premium settlements, banking
+     * liquidations, controller-bar facts). Resolved entries'
+     * classifications are handler-controlled (the resolver replaces
+     * them only for rejections), and the standing verifier projects
+     * its premium/failed-payment inputs from these stamps. */
+    classificationExtra?: Record<string, unknown>;
   }
 ): ResolutionPlan {
   plan.entries.push(
@@ -174,7 +250,13 @@ function finishPlan(
       actor: ctx.action.actor,
       actionId: ctx.action.actionId,
       actionText: ctx.action.actionText,
-      classification: { verb: args.verb, scope: args.scope, ruleIds: [args.ruleId], unruled: false },
+      classification: {
+        verb: args.verb,
+        scope: args.scope,
+        ruleIds: [args.ruleId],
+        unruled: false,
+        ...(args.classificationExtra ?? {}),
+      },
       cityId: args.cityId,
       cityIds: args.cityId ? [args.cityId] : [],
       ruleIds: [args.ruleId],
@@ -186,8 +268,299 @@ function finishPlan(
   return plan;
 }
 
+/** Defense-in-depth NPC refusal for Tier B verbs (addendum §2):
+ * the authority stage refuses an NPC attempting a Tier B act
+ * before dispatch; if a plan nevertheless reaches a Tier B handler
+ * with an NPC actor (a stage bypass, a stale mandate), the handler
+ * refuses on its own — zero banking writes either way. */
+function rejectTierBNpc(ctx: HandlerContext, descriptorId: string): ResolutionPlan | null {
+  if (ctx.action.actor.type !== "npc") return null;
+  return rejectedPlan(
+    descriptorId,
+    "npc-tier-b-refused",
+    [descriptorId],
+    `${descriptorId}: this act is Tier B (binding-by-nature) — no mandate wording demotes it and no cap enlarges an NPC into it (addendum §2). It is the principal's own act or it does not happen.`
+  );
+}
+
+/** Rows of a declared collection query (the market family's
+ * pattern): snapshot.queries records keyed by query id, each row
+ * carrying its materialized path. */
+function queryDocs(
+  snapshot: SimSnapshot,
+  queryId: string,
+  collectionPath: string
+): { path: string; doc: Record<string, unknown> }[] {
+  const records = snapshot.queries?.[queryId] ?? [];
+  return records
+    .filter((record) => record.path.startsWith(`${collectionPath}/`))
+    .map((record) => ({ path: record.path, doc: record.data }));
+}
+
+/** Project the premium marker/settlement views for one bank from
+ * the Log-entry query rows (the derivation inputs of
+ * derivePremiumLadder — every premium figure in this family
+ * recomputes from the standing Log alone, §7.7's bar extended). */
+function premiumLogViews(
+  snapshot: SimSnapshot,
+  bankCorporationId: string
+): { markers: PremiumMarkerView[]; settlements: PremiumSettlementView[] } {
+  const markers: PremiumMarkerView[] = [];
+  const settlements: PremiumSettlementView[] = [];
+  for (const queryId of ["premiumMarkers", "premiumSettlements"]) {
+    for (const { doc } of queryDocs(snapshot, queryId, "sim_log_entries")) {
+      const classification = doc.classification as
+        | {
+            premiumDue?: { pendingId?: unknown; dueRubars?: unknown; periodIndex?: unknown };
+            premiumSettlement?: { settledPendingIds?: unknown };
+          }
+        | undefined;
+      const seq = typeof doc.seq === "number" ? doc.seq : 0;
+      if (queryId === "premiumMarkers" && classification?.premiumDue) {
+        markers.push({
+          pendingId: String(classification.premiumDue.pendingId ?? ""),
+          seq,
+          dueRubars:
+            typeof classification.premiumDue.dueRubars === "number"
+              ? classification.premiumDue.dueRubars
+              : 0,
+          periodIndex:
+            typeof classification.premiumDue.periodIndex === "number"
+              ? classification.premiumDue.periodIndex
+              : 0,
+        });
+      }
+      if (queryId === "premiumSettlements" && classification?.premiumSettlement) {
+        settlements.push({
+          seq,
+          settledPendingIds: Array.isArray(classification.premiumSettlement.settledPendingIds)
+            ? classification.premiumSettlement.settledPendingIds.filter(
+                (id): id is string => typeof id === "string"
+              )
+            : [],
+        });
+      }
+    }
+  }
+  return { markers, settlements };
+}
+
+/** The premium Log queries every banking read plan that derives
+ * ladder/coverage state declares (filters on the classification
+ * stamps' dotted paths — the F-01 query machinery walks them). */
+function premiumQueries(bankCorporationId: string): DescriptorReadPlan["queries"] {
+  return [
+    {
+      id: "premiumMarkers",
+      collectionPath: "sim_log_entries",
+      filters: [
+        { field: "classification.premiumDue.bankCorporationId", op: "==", value: bankCorporationId },
+      ],
+    },
+    {
+      id: "premiumSettlements",
+      collectionPath: "sim_log_entries",
+      filters: [
+        {
+          field: "classification.premiumSettlement.bankCorporationId",
+          op: "==",
+          value: bankCorporationId,
+        },
+      ],
+    },
+  ];
+}
+
+/** Read a bank's standing premium ladder from the snapshot's Log
+ * queries (markers + settlements declared by the caller's plan). */
+function bankPremiumLadder(snapshot: SimSnapshot, bankCorporationId: string) {
+  const views = premiumLogViews(snapshot, bankCorporationId);
+  return derivePremiumLadder(views);
+}
+
+/** Maintain the fund's insured-liabilities aggregate (A-B6's pair)
+ * for a claim change at a bank, folding the delta into the plan
+ * when the deposit is covered-class AT ITS OPEN (top-ups inherit
+ * the record's own eligibility, V2-§1.4). No fund → no-op: coverage
+ * machinery is inert before founding, and pre-founding deposits
+ * derive uninsured for their whole lives (grandfathering: none). */
+function applyInsuredLiabilityDelta(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  args: {
+    deposit: BankDepositRecord;
+    deltaRubars: number;
+    bank: BankTarget;
+    ruleId: string;
+  }
+): TaggedChange | null {
+  if (args.deltaRubars === 0) return null;
+  const fundDoc = snapshotDoc(ctx.snapshot, INSURANCE_FUND_PATH);
+  const fund = fundRecordOf(fundDoc);
+  if (!fund) return null;
+  const covered = depositCoveredClass(args.deposit, {
+    fund,
+    suspensionIntervals: bankPremiumLadder(ctx.snapshot, args.deposit.bankCorporationId)
+      .suspensionIntervals,
+    bankOwnerMemberId:
+      typeof args.bank.corp.ownerMemberId === "string" ? args.bank.corp.ownerMemberId : "",
+  });
+  if (!covered) return null;
+  const planned = plannedDoc(plan, ctx.snapshot, INSURANCE_FUND_PATH);
+  const before = typeof planned?.totalInsuredLiabilitiesRubars === "number" ? planned.totalInsuredLiabilitiesRubars : 0;
+  planMutate(plan, ctx.snapshot, INSURANCE_FUND_PATH, "state", ["totalInsuredLiabilitiesRubars"], (current) =>
+    current
+      ? {
+          ...current,
+          totalInsuredLiabilitiesRubars:
+            (typeof current.totalInsuredLiabilitiesRubars === "number" ? current.totalInsuredLiabilitiesRubars : 0) +
+            args.deltaRubars,
+        }
+      : current
+  );
+  return {
+    entryCityId: null,
+    change: fieldChange(
+      "institutionAccount.totalInsuredLiabilitiesRubars",
+      before,
+      before + args.deltaRubars,
+      `${args.ruleId} insured-liabilities aggregate (A-B6 pair of the covered claim change at ${args.deposit.bankCorporationId})`
+    ),
+  };
+}
+
 function corporationRef(cityId: string, corporationId: string): LedgerRef {
   return { kind: "company", corporationId, cityId };
+}
+
+// ---------------------------------------------------------------------------
+// Banking Situations (addendum §1) — producer occasions ride Vera's
+// landed module. Addressing (§1.0): a personal ref addresses its
+// member; a company ref addresses its owner with the facet city the
+// company's home city; a treasury ref addresses the city (recipient
+// unset; the governor audience is the faction owners snapshot).
+// Banking cards file under the bank's city facet. Every mint goes
+// through planSituationUpsert against the card the caller's read
+// plan materialized by dedupe key (query id "situationsByKey") —
+// dedupe patterns E/P/X live in the inputs the producers build.
+// ---------------------------------------------------------------------------
+
+export interface SituationAddressing {
+  recipientUid?: string;
+  audienceCityId: string;
+  audienceOwnerUidsSnapshot: string[];
+}
+
+export function situationAddressingFor(
+  snapshot: SimSnapshot,
+  ref: LedgerRef,
+  facetCityId: string
+): SituationAddressing {
+  const ownersOf = (cityId: string): string[] => {
+    const faction = snapshotDoc(snapshot, `factions/${cityId}`);
+    const owners = faction?.ownerUids;
+    return Array.isArray(owners) ? owners.filter((u): u is string => typeof u === "string") : [];
+  };
+  switch (ref.kind) {
+    case "personal":
+      return {
+        recipientUid: ref.memberId,
+        audienceCityId: facetCityId,
+        audienceOwnerUidsSnapshot: ownersOf(facetCityId),
+      };
+    case "company": {
+      const corp = snapshotDoc(snapshot, corporationPath(ref.cityId, ref.corporationId));
+      return {
+        recipientUid: typeof corp?.ownerMemberId === "string" ? corp.ownerMemberId : undefined,
+        // Banking cards file under the BANK's city facet uniformly
+        // (the dedupe audience key must be computable by every
+        // later verb in the relationship); the governing audience
+        // snapshot is the company's own city's owners.
+        audienceCityId: facetCityId,
+        audienceOwnerUidsSnapshot: ownersOf(ref.cityId),
+      };
+    }
+    case "treasury":
+      return {
+        audienceCityId: ref.cityId,
+        audienceOwnerUidsSnapshot: ownersOf(ref.cityId),
+      };
+    default:
+      return { audienceCityId: facetCityId, audienceOwnerUidsSnapshot: ownersOf(facetCityId) };
+  }
+}
+
+/** Banking occasion cards are fetched by a city-scoped query
+ * (every banking card's cityId is its bank's city — the producer
+ * discipline in this family) and matched in memory by dedupe key
+ * or producer-stamped fields: several keys (an offer card's
+ * resolution id, a liquidation's) are knowable only from records
+ * the handler reads, never from the action alone, so read plans
+ * fetch the city's cards and handlers match exactly. */
+export function findSituation(
+  ctx: HandlerContext,
+  predicate: (doc: SimSituation) => boolean
+): SimSituation | null {
+  for (const [queryId, records] of Object.entries(ctx.snapshot.queries ?? {})) {
+    if (!queryId.startsWith("situationsByKey")) continue;
+    for (const record of records) {
+      const doc = record.data as unknown as SimSituation;
+      if (predicate(doc)) return doc;
+    }
+  }
+  return null;
+}
+
+/** Mint or upsert one banking Situation inside the caller's plan.
+ * Returns the record ids the caller's entry claims
+ * (recordsCreated/recordsUpdated). */
+export function mintSituation(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  input: Parameters<typeof buildProposalSituation>[0] | Parameters<typeof buildIncidentSituation>[0]
+): { created: string[]; updated: string[] } {
+  const key = dedupeKeyFor(input);
+  const existing = findSituation(ctx, (doc) => doc.dedupeKey === key);
+  const decision = planSituationUpsert(existing, input);
+  const applied = applySituationUpsert(plan, ctx.snapshot, decision);
+  return {
+    created: applied.created.map((id) => situationPath(id)),
+    updated: [...applied.updated, ...applied.superseded].map((id) => situationPath(id)),
+  };
+}
+
+/** Mark a standing card handled inside the caller's transaction
+ * (the §6.3 discipline: the authoritative act's own event closes
+ * its card — B-06 funding closes B1; a curing B-09 closes K2).
+ * Returns the situation path to claim as updated, or null when no
+ * open card matches. */
+export function closeSituationWhere(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  predicate: (doc: SimSituation) => boolean,
+  args: { resolvedSeq: number; resolutionId: string }
+): string | null {
+  const doc = findSituation(ctx, (d) => d.status === "open" && predicate(d));
+  if (!doc) return null;
+  const transition = markSituationHandled(doc, {
+    resolvedSeq: args.resolvedSeq,
+    resolvedByResolutionId: args.resolutionId,
+    decidedAt: ctx.snapshot.now,
+  });
+  planWrite(plan, ctx.snapshot, situationPath(doc.situationId), transition.doc as unknown as Record<string, unknown>, "state", transition.changedFields);
+  return situationPath(doc.situationId);
+}
+
+/** The read-plan query that materializes a bank city's situation
+ * cards for in-memory matching (see findSituation). */
+export function situationKeyQueries(cityId: string): NonNullable<DescriptorReadPlan["queries"]> {
+  return [
+    {
+      id: "situationsByKey0",
+      collectionPath: "sim_situations",
+      filters: [{ field: "cityId", op: "==" as const, value: cityId }],
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +1023,52 @@ function charterBankHandler(ctx: HandlerContext): ResolutionPlan {
   if (existing && existing.status === "active") {
     return rejectedPlan(descriptorId, "already-chartered", [descriptorId], `B-01: ${corporationId} already holds an active charter (chartered at seq ${existing.charteredAtSeq}).`);
   }
+  // The controller bar (BNK-D15, Phase 5): a member who controlled
+  // a bank into liquidation may not charter again until BOTH
+  // RECHARTER_BAR_SEQS resolved seqs have passed since that
+  // liquidation AND every personal obligation the failure named
+  // stands settled (their loans at the failed bank, read from the
+  // records — assigned pool obligations included). Derived from the
+  // standing Log + loan records on every charter attempt; a Town
+  // Hall waiver entry naming the controller + bank lifts that
+  // liquidation's bar (Phase 7 machinery — the derivation reads a
+  // waiver if one ever stands; nothing here mints one).
+  {
+    const standingSeq = ctx.snapshot.counterHead.lastSeq + 1;
+    const liquidations = queryDocs(ctx.snapshot, "controllerLiquidations", "sim_log_entries")
+      .map(({ doc }) => {
+        const banking = (doc.classification as { banking?: Record<string, unknown> } | undefined)
+          ?.banking;
+        return {
+          seq: typeof doc.seq === "number" ? doc.seq : 0,
+          bankCorporationId: typeof banking?.bankCorporationId === "string" ? banking.bankCorporationId : null,
+          waived: banking?.controllerWaived === true,
+        };
+      })
+      .filter((row) => row.bankCorporationId !== null);
+    const actorLoans = queryDocs(ctx.snapshot, "controllerLoans", "sim_bank_loans").map(
+      ({ doc }) => loanRecordOf(doc)
+    );
+    for (const liquidation of liquidations) {
+      if (liquidation.waived) continue;
+      const seqsPassed = standingSeq - liquidation.seq >= RECHARTER_BAR_SEQS;
+      const openObligations = actorLoans.filter(
+        (loan) =>
+          loan !== null &&
+          loan.bankCorporationId === liquidation.bankCorporationId &&
+          loan.status === "assigned" &&
+          loan.outstandingRubars > 0
+      ).length;
+      if (!seqsPassed || openObligations > 0) {
+        return rejectedPlan(
+          descriptorId,
+          "controller-barred",
+          [descriptorId],
+          `B-01: ${ownerId} controlled ${liquidation.bankCorporationId} into liquidation at seq ${liquidation.seq} and is barred from chartering (BNK-D15): ${standingSeq - liquidation.seq} of ${RECHARTER_BAR_SEQS} required seqs have passed and ${openObligations} named personal obligation(s) at the failed bank stand unsettled. Both conditions must clear; a Town Hall waiver is the only other path.`
+        );
+      }
+    }
+  }
   const reserveRatioBps = sa(ctx.action).reserveRatioBps;
   if (typeof reserveRatioBps !== "number" || !Number.isInteger(reserveRatioBps) || reserveRatioBps < RESERVE_FLOOR_BPS || reserveRatioBps > 10_000) {
     return rejectedPlan(descriptorId, "reserve-ratio-invalid", [descriptorId], `B-01: reserveRatioBps must be an integer in [${RESERVE_FLOOR_BPS}, 10000] — a chartered ratio may only RAISE the published floor (§1.2).`);
@@ -695,6 +1114,59 @@ function charterBankHandler(ctx: HandlerContext): ResolutionPlan {
       summaryText: `B-01: ${corporationId} chartered as a bank. Terms: reserve ratio ${reserveRatioBps} bps, deposit-rate ceiling ${String(depositCeiling)} bps/kseq, loan-rate ceiling ${String(loanCeiling)} bps/kseq. Deposits are claims against the bank, not vault contents; posture copy on surfaces is generated from derived state (§7.6).`,
     })
   );
+  // DIF premium chain seeding (V2-§1.3, SPEC-1 as confirmed): when
+  // the fund stands, chartering starts the bank's premium chain —
+  // the first period's pending, anchored to this event, ripening
+  // exactly PREMIUM_PERIOD_SEQS later. Before founding there is no
+  // chain (pre-founding charters seed at founding's aftermath only
+  // if the fund's own composition says so — the founding act in
+  // this build seeds chains for then-chartered banks itself).
+  const fundStands = fundRecordOf(snapshotDoc(ctx.snapshot, INSURANCE_FUND_PATH)) !== null;
+  if (fundStands) {
+    const pendingId = `prem_${corporationId}_0`;
+    const draft = buildSchedulePendingDraft(ctx.snapshot, {
+      pendingId,
+      kind: "insurance-premium-due",
+      originResolutionId: ctx.resolutionId,
+      originActionId: ctx.action.actionId,
+      originActor: ctx.action.actor,
+      originCityId: cityId,
+      originSummaryText: `Deposit-insurance premium period 0 for ${corporationId}`,
+      targetCityId: cityId,
+      sourceKind: "action",
+      generation: 1,
+      chainId: pendingId,
+      chainRootPendingId: null,
+      createdByResolutionId: null,
+      minSeqAdvance: PREMIUM_PERIOD_SEQS,
+      scheduleDerivation: {
+        bankCorporationId: corporationId,
+        periodIndex: 0,
+        anchor: "charter-event",
+        periodSeqs: PREMIUM_PERIOD_SEQS,
+      },
+      payloadSpec: {
+        schedule: {
+          kind: "insurance-premium",
+          bankCorporationId: corporationId,
+          bankCityId: cityId,
+          periodIndex: 0,
+        },
+        occasion: {
+          kind: "insurance-premium-due",
+          severity: "routine",
+          title: `Deposit-insurance premium due — ${corporationId}`,
+          summary: `A premium period for ${corporationId} has ripened; the due figure is computed at ripening from the bank's standing insured liabilities (B-12).`,
+          detail: { bankCorporationId: corporationId, periodIndex: 0 },
+          cityId,
+          audienceCityId: cityId,
+          recipientUid: ownerId,
+        } satisfies RipeningOccasionSpec,
+      },
+    });
+    plan.pendingCreates.push(draft.draft);
+    plan.readRefKeys.push(`pending:${pendingId}`);
+  }
   return finishPlan(plan, ctx, {
     ruleId: descriptorId,
     verb: "charter-bank",
@@ -762,11 +1234,32 @@ function surrenderCharterHandler(ctx: HandlerContext): ResolutionPlan {
 
 function charterReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
-  const paths: string[] = [];
+  const paths: string[] = [INSURANCE_FUND_PATH];
   if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
     paths.push(corporationPath(record.cityId, record.corporationId));
   }
-  return { paths };
+  const actorId = actorMemberId(seeds.action.actor);
+  const queries: DescriptorReadPlan["queries"] = [];
+  if (actorId && seeds.action.actionType === "charter_bank") {
+    // The controller bar's inputs (BNK-D15): the actor's liquidation
+    // summaries + their loan records (obligations read per-bank in
+    // the handler).
+    queries.push(
+      {
+        id: "controllerLiquidations",
+        collectionPath: "sim_log_entries",
+        filters: [
+          { field: "classification.banking.controllerMemberId", op: "==", value: actorId },
+        ],
+      },
+      {
+        id: "controllerLoans",
+        collectionPath: "sim_bank_loans",
+        filters: [{ field: "borrower.memberId", op: "==", value: actorId }],
+      }
+    );
+  }
+  return { paths, queries };
 }
 
 // ---------------------------------------------------------------------------
@@ -884,6 +1377,46 @@ function parseDepositTarget(
   return { depositPath, deposit, bank: { ...bankOrPlan, cityId, corporationId } };
 }
 
+type BankAggregateField =
+  | "depositLiabilitiesRubars"
+  | "loanBookRubars"
+  | "insiderLoansRubars"
+  | "seizedAssetsRubars";
+
+/** Fold an aggregate delta on the bank's charter block into the
+ * plan and return its tagged change (the per-event pair discipline:
+ * the aggregate and the record(s) it aggregates move in the SAME
+ * event or the conservation checker fires — A-B1/A-B2/A-B3/A-B7). */
+function applyBankAggregateDelta(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  target: BankTarget & { cityId: string; corporationId: string },
+  field: BankAggregateField,
+  delta: number,
+  ruleId: string
+): TaggedChange {
+  const plannedBank = bankBlockOf(plannedDoc(plan, ctx.snapshot, target.corpPath) ?? {});
+  const before = plannedBank ? ((plannedBank[field] as number | undefined) ?? 0) : 0;
+  planMutate(plan, ctx.snapshot, target.corpPath, "state", [`bank.${field}`], (current) => {
+    if (!current) return current;
+    const currentBank = bankBlockOf(current);
+    if (!currentBank) return current;
+    return {
+      ...current,
+      bank: { ...currentBank, [field]: ((currentBank[field] as number | undefined) ?? 0) + delta },
+    };
+  });
+  return {
+    entryCityId: target.cityId,
+    change: fieldChange(
+      `corporations/${target.corporationId}.bank.${field}`,
+      before,
+      before + delta,
+      `${ruleId} aggregate — the per-event pair of the bank record change it aggregates`
+    ),
+  };
+}
+
 /** Fold the liability-aggregate delta for a bank into the plan and
  * return its tagged change (the A-B1 pair of the deposit record's
  * claim change — both sides land in the same event's Log). */
@@ -894,25 +1427,7 @@ function applyAggregateDelta(
   delta: number,
   ruleId: string
 ): TaggedChange {
-  const before = (plannedDoc(plan, ctx.snapshot, target.corpPath)?.bank as { depositLiabilitiesRubars: number }).depositLiabilitiesRubars;
-  planMutate(plan, ctx.snapshot, target.corpPath, "state", ["bank.depositLiabilitiesRubars"], (current) => {
-    if (!current) return current;
-    const currentBank = bankBlockOf(current);
-    if (!currentBank) return current;
-    return {
-      ...current,
-      bank: { ...currentBank, depositLiabilitiesRubars: currentBank.depositLiabilitiesRubars + delta },
-    };
-  });
-  return {
-    entryCityId: target.cityId,
-    change: fieldChange(
-      `corporations/${target.corporationId}.bank.depositLiabilitiesRubars`,
-      before,
-      before + delta,
-      `${ruleId} liability aggregate — the A-B1 pair of the deposit record's claim change`
-    ),
-  };
+  return applyBankAggregateDelta(plan, ctx, target, "depositLiabilitiesRubars", delta, ruleId);
 }
 
 // ---------------------------------------------------------------------------
@@ -927,8 +1442,10 @@ function applyAggregateDelta(
 
 function depositHandler(ctx: HandlerContext): ResolutionPlan {
   const descriptorId = "B-02";
-  const npc = rejectNpc(ctx, descriptorId);
-  if (npc) return npc;
+  // Tier A within caps (addendum §2): the Phase 4 blanket NPC
+  // refusal retires — the authority stage enforces mandate + caps
+  // before dispatch, and the act settles into the principal's
+  // ledgers like every Tier A banking verb.
   const bankOrPlan = parseBankTarget(ctx, descriptorId);
   if ("outcome" in bankOrPlan) return bankOrPlan;
   const cityId = stringField(ctx.action, "cityId") as string;
@@ -941,6 +1458,12 @@ function depositHandler(ctx: HandlerContext): ResolutionPlan {
   }
   if (health === "liquidity-impaired") {
     return rejectedPlan(descriptorId, "bank-impaired", [descriptorId], `B-02: ${corporationId} is liquidity-impaired (cash below its liquid reserve, §5.1) — impairment restricts growth: no new deposits.`);
+  }
+  // Premium suspension (V2-§1.3): a bank two premium periods in
+  // arrears is suspended — B-02 refuses, and deposits opened during
+  // suspension would derive uninsured for life, so none open.
+  if (bankPremiumLadder(ctx.snapshot, corporationId).state === "suspended") {
+    return rejectedPlan(descriptorId, "premium-delinquent-suspended", [descriptorId], `B-02: ${corporationId} is suspended from insured deposit-taking — two consecutive premium periods stand unsettled in its Log (the delinquency ladder, V2-§1.3). Paying the arrears in full (B-12) restores it.`);
   }
   const amount = positiveAmount(ctx.action);
   if (amount === null) {
@@ -1058,13 +1581,25 @@ function depositHandler(ctx: HandlerContext): ResolutionPlan {
     ]);
     depositChanges.push(
       fieldChange(`bankDeposits/${depositId}.principalRubars`, null, amount, "B-02 deposit — claim created (custody is not ownership, §2.1)"),
-      fieldChange(`bankDeposits/${depositId}.creditedInterestRubars`, null, 0, "B-02 deposit — credited interest starts at 0 in the Phase 4 slice"),
+      fieldChange(`bankDeposits/${depositId}.creditedInterestRubars`, null, 0, "B-02 deposit — credited interest starts at 0"),
       fieldChange(`bankDeposits/${depositId}.status`, null, "active", "B-02 deposit — status"),
       fieldChange(`bankDeposits/${depositId}.rateBpsPerKseq`, null, rate, "B-02 deposit — agreed rate"),
       fieldChange(`bankDeposits/${depositId}.origin`, null, "cash", "B-02 deposit — provenance: cash-funded (§2.1)")
     );
   }
   const aggregateChange = applyAggregateDelta(plan, ctx, bankTarget, amount, descriptorId);
+  // A-B6 maintenance: a covered-class deposit's claim growth moves
+  // the fund's insured-liabilities aggregate in the same event
+  // (top-ups read the record's own open-date eligibility).
+  const coverageRecord: BankDepositRecord =
+    topUp ??
+    (depositRecordOf(plannedDoc(plan, ctx.snapshot, depositPath)) as BankDepositRecord);
+  const insuredChange = applyInsuredLiabilityDelta(plan, ctx, {
+    deposit: coverageRecord,
+    deltaRubars: amount,
+    bank: bankTarget,
+    ruleId: descriptorId,
+  });
   const insider =
     depositor.kind === "personal" && depositor.memberId === bankTarget.corp.ownerMemberId;
   plan.entries.push(
@@ -1081,10 +1616,15 @@ function depositHandler(ctx: HandlerContext): ResolutionPlan {
         : `B-02: deposit ${depositId} opened — ${ledgerLabel(depositor)} deposited ${amount} R into ${corporationId} at ${rate} bps/kseq. The cash is the bank's; the depositor owns the recorded claim.${insider ? " Insider deposit (depositor is the bank's owner) — flagged by derivation, ranked identically (§2.3)." : ""}`,
     })
   );
-  pushMovementEntries(plan, ctx, descriptorId, [...applied.changes, aggregateChange], (entryCityId) =>
-    entryCityId === cityId
-      ? `B-02: ${corporationId}'s cash and deposit liabilities each rose by ${amount} R (A-B1 pair). Cash ${bankCashRubars(plannedDoc(plan, ctx.snapshot, bankTarget.corpPath) ?? {})} R; unencumbered ${unencumberedCash(plannedDoc(plan, ctx.snapshot, bankTarget.corpPath))} R after the deposit.`
-      : `B-02: ${ledgerLabel(depositor)} paid ${amount} R into ${corporationId} as a deposit.`
+  pushMovementEntries(
+    plan,
+    ctx,
+    descriptorId,
+    [...applied.changes, aggregateChange, ...(insuredChange ? [insuredChange] : [])],
+    (entryCityId) =>
+      entryCityId === cityId
+        ? `B-02: ${corporationId}'s cash and deposit liabilities each rose by ${amount} R (A-B1 pair). Cash ${bankCashRubars(plannedDoc(plan, ctx.snapshot, bankTarget.corpPath) ?? {})} R; unencumbered ${unencumberedCash(plannedDoc(plan, ctx.snapshot, bankTarget.corpPath))} R after the deposit.`
+        : `B-02: ${ledgerLabel(depositor)} paid ${amount} R into ${corporationId} as a deposit.`
   );
   return finishPlan(plan, ctx, {
     ruleId: descriptorId,
@@ -1099,9 +1639,11 @@ function depositHandler(ctx: HandlerContext): ResolutionPlan {
 
 function depositReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
-  const paths: string[] = [];
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: DescriptorReadPlan["queries"] = [];
   if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
     paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId));
   }
   const fromKind = typeof record.fromKind === "string" ? record.fromKind : "personal";
   if (fromKind === "personal") {
@@ -1115,7 +1657,7 @@ function depositReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   if (typeof record.depositId === "string" && record.depositId) {
     paths.push(bankDepositPath(record.depositId));
   }
-  return { paths };
+  return { paths, queries };
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,8 +1682,8 @@ function depositReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
 
 function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
   const descriptorId = "B-03";
-  const npc = rejectNpc(ctx, descriptorId);
-  if (npc) return npc;
+  // Tier A (addendum §2) — the blanket NPC refusal retires with
+  // B-02's; the authority stage enforces mandate + caps.
   const targetOrPlan = parseDepositTarget(ctx, descriptorId);
   if ("outcome" in targetOrPlan) return targetOrPlan;
   const { depositPath, deposit, bank } = targetOrPlan;
@@ -1171,6 +1713,13 @@ function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
     if (!authority.ok) {
       return rejectedPlan(descriptorId, "not-depositor", [descriptorId], `B-03: a treasury deposit is withdrawn by its governor: ${authority.reason}.`);
     }
+  }
+  // Failure freezes withdrawals (§5.1): a bank deriving insolvent
+  // under the REC-6 identity pays no one outside the waterfall.
+  // Liquidity impairment alone does NOT freeze B-03 — the custodial
+  // test below prices each withdrawal on its own.
+  if (deriveBankHealth(bank.corp) === "insolvent") {
+    return rejectedPlan(descriptorId, "bank-failed", [descriptorId], `B-03: ${bank.corporationId} derives failed (insolvent under the REC-6 balance-sheet identity) — withdrawals are frozen; depositors' claims resolve in liquidation (B-10), not at the window.`);
   }
   const amount = positiveAmount(ctx.action);
   if (amount === null) {
@@ -1209,6 +1758,15 @@ function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
       : current
   );
   const aggregateChange = applyAggregateDelta(plan, ctx, bank, -amount, descriptorId);
+  // A-B6 maintenance: the covered claim falls by the withdrawal —
+  // and by its credited interest too when the withdrawal closes
+  // the record (the derivation counts active records only).
+  const insuredChange = applyInsuredLiabilityDelta(plan, ctx, {
+    deposit,
+    deltaRubars: -(amount + (closes ? deposit.creditedInterestRubars : 0)),
+    bank,
+    ruleId: descriptorId,
+  });
   const depositChanges: SimChange[] = [
     fieldChange(`bankDeposits/${deposit.depositId}.principalRubars`, deposit.principalRubars, newPrincipal, "B-03 withdrawal of principal (custodial)"),
   ];
@@ -1226,10 +1784,15 @@ function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
       summaryText: `B-03: deposit ${deposit.depositId} principal ${deposit.principalRubars} -> ${newPrincipal} R${closes ? "; the record closes at full withdrawal" : ""}${closes && closesAccrued > 0 ? `; ${closesAccrued} R of accrued-unsettled interest is extinguished unclaimed by the depositor's own closing act (it was a derived figure, never a balance — B-04 is the only path that realizes it)` : ""}.`,
     })
   );
-  pushMovementEntries(plan, ctx, descriptorId, [...applied.changes, aggregateChange], (entryCityId) =>
-    entryCityId === bank.cityId
-      ? `B-03: ${bank.corporationId} paid ${amount} R of custodial money to ${ledgerLabel(deposit.depositor)}; unencumbered cash after: ${unencumberedCash(plannedDoc(plan, ctx.snapshot, bank.corpPath))} R.`
-      : `B-03: ${ledgerLabel(deposit.depositor)} received ${amount} R withdrawn from deposit ${deposit.depositId}.`
+  pushMovementEntries(
+    plan,
+    ctx,
+    descriptorId,
+    [...applied.changes, aggregateChange, ...(insuredChange ? [insuredChange] : [])],
+    (entryCityId) =>
+      entryCityId === bank.cityId
+        ? `B-03: ${bank.corporationId} paid ${amount} R of custodial money to ${ledgerLabel(deposit.depositor)}; unencumbered cash after: ${unencumberedCash(plannedDoc(plan, ctx.snapshot, bank.corpPath))} R.`
+        : `B-03: ${ledgerLabel(deposit.depositor)} received ${amount} R withdrawn from deposit ${deposit.depositId}.`
   );
   return finishPlan(plan, ctx, {
     ruleId: descriptorId,
@@ -1241,24 +1804,31 @@ function withdrawHandler(ctx: HandlerContext): ResolutionPlan {
 }
 
 // ---------------------------------------------------------------------------
-// B-04 — settle_deposit_interest, CASH-PAID branch only (amendment
-// §2.6). The credited branch is Phase 5 and is not built: no election
-// in the action can select it in this slice. Settlement is the BANK's
-// act (its owner initiates); the amount is §4.1's one formula over
-// (principal + credited, rate, lastSettledSeq -> settlement seq),
-// reproducible from the standing Log alone. A custodial shortfall
-// rejects in full and the watermark does not move.
+// B-04 — settle_deposit_interest (amendment §2.6). Settlement is
+// the BANK's act (its owner initiates); the amount is §4.1's one
+// formula over (principal + credited, rate, lastSettledSeq ->
+// settlement seq), reproducible from the standing Log alone. The
+// cash-paid branch pays the amount as a custodial transfer (a
+// shortfall rejects in full and the watermark does not move). The
+// CREDITED branch (Phase 5, addendum item 1) capitalizes the
+// amount into the claim instead: creditedInterestRubars += amount,
+// the liability aggregate moves in the same event (A-B1's pair),
+// NO cash moves, and the claim bridge classifies the growth
+// "interest-capitalized" (Appendix A) — which is precisely why the
+// branch waited for the claim bridge to exist.
 // ---------------------------------------------------------------------------
 
 function settleInterestHandler(ctx: HandlerContext): ResolutionPlan {
   const descriptorId = "B-04";
-  const npc = rejectNpc(ctx, descriptorId);
-  if (npc) return npc;
+  // Tier A (addendum §2): a mandated NPC settles for its principal —
+  // actorMemberId resolves the NPC to the owner it acts for, and the
+  // authority stage has already enforced the mandate. The Phase 4
+  // in-handler NPC exclusion retires with the blanket refusal.
   const targetOrPlan = parseDepositTarget(ctx, descriptorId);
   if ("outcome" in targetOrPlan) return targetOrPlan;
   const { depositPath, deposit, bank } = targetOrPlan;
-  if (ctx.action.actor.type === "npc" || actorMemberId(ctx.action.actor) !== bank.corp.ownerMemberId) {
-    return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], "B-04: settling deposit interest is the bank's act — initiated by the bank's owner (or a mandated NPC under Phase 5 fields). It is never auto-debited by the world (§2.6).");
+  if (actorMemberId(ctx.action.actor) !== bank.corp.ownerMemberId) {
+    return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], "B-04: settling deposit interest is the bank's act — initiated by the bank's owner (in person, or by their mandated NPC under the Phase 5 authority stage). It is never auto-debited by the world (§2.6).");
   }
   if (deposit.status !== "active") {
     return rejectedPlan(descriptorId, "deposit-not-active", [descriptorId], `B-04: deposit ${deposit.depositId} is ${deposit.status}; only an active deposit settles.`);
@@ -1267,8 +1837,15 @@ function settleInterestHandler(ctx: HandlerContext): ResolutionPlan {
   if (!namedDepositor || !ledgerRefsEqual(namedDepositor, deposit.depositor)) {
     return rejectedPlan(descriptorId, "depositor-mismatch", [descriptorId], "B-04: the action's depositor ref does not match the deposit record's depositor. The stored record governs.");
   }
+  // Failure fixes claim figures (§5.3): in EITHER branch a bank
+  // deriving failed settles nothing — claims resolve in B-10, where
+  // the frozen figure (principal + credited + computable unsettled
+  // interest at the failure seq) is the one basis (REC-5).
+  if (deriveBankHealth(bank.corp) === "insolvent") {
+    return rejectedPlan(descriptorId, "bank-failed", [descriptorId], `B-04: ${bank.corporationId} derives failed (insolvent under the REC-6 identity) — settlement is frozen in both branches; the claim figure fixes at liquidation (REC-5).`);
+  }
   if (sa(ctx.action).settlementMode === "credited") {
-    return rejectedPlan(descriptorId, "credited-branch-phase-5", [descriptorId], "B-04: the credited settlement branch (interest capitalized into the claim) is Phase 5 (§7.2) and is not built in this slice — cash-paid settlement only.");
+    return settleInterestCredited(ctx, { depositPath, deposit, bank });
   }
 
   const plan = emptyPlan(descriptorId);
@@ -1351,23 +1928,140 @@ function settleInterestHandler(ctx: HandlerContext): ResolutionPlan {
     cityId: bank.cityId,
     summaryText:
       amount > 0
-        ? `Settled ${amount} R of interest on deposit ${deposit.depositId} in cash from ${bank.corporationId} (B-04 cash-paid branch; the credited branch is Phase 5). Watermark now ${watermarkSeq}.`
+        ? `Settled ${amount} R of interest on deposit ${deposit.depositId} in cash from ${bank.corporationId} (B-04 cash-paid branch). Watermark now ${watermarkSeq}.`
         : `Settled deposit ${deposit.depositId}: no interest accrued; watermark advanced to ${watermarkSeq}, no money moved.`,
+    classificationExtra: {
+      settlement: {
+        mode: "cash-paid",
+        depositId: deposit.depositId,
+        amountRubars: amount,
+        bridgeClass: "transfer",
+      },
+    },
+  });
+}
+
+/** B-04 credited branch (Appendix A's B-04 row): interest settles
+ * as claim, not cash. Entry order: the deposit-record entry FIRST
+ * (its seq is the settlement seq the formula names — parity with
+ * the cash branch's settlement-entry arithmetic), then the
+ * liability aggregate's movement entry. A zero accrual advances
+ * the watermark to the settlement entry's own seq with no claim
+ * movement, exactly as the cash branch's zero case. */
+function settleInterestCredited(
+  ctx: HandlerContext,
+  target: DepositTarget
+): ResolutionPlan {
+  const descriptorId = "B-04";
+  const { depositPath, deposit, bank } = target;
+  const plan = emptyPlan(descriptorId);
+  const settlementSeq = nextEntrySeq(ctx.snapshot, plan);
+  const amount = accruedUnsettledRubars(deposit, settlementSeq);
+  const changes: SimChange[] = [];
+  if (amount > 0) {
+    planMutate(plan, ctx.snapshot, depositPath, "state", ["creditedInterestRubars", "lastSettledSeq"], (current) =>
+      current
+        ? {
+            ...current,
+            creditedInterestRubars: (current.creditedInterestRubars as number) + amount,
+            lastSettledSeq: settlementSeq,
+          }
+        : current
+    );
+    changes.push(
+      fieldChange(
+        `bankDeposits/${deposit.depositId}.creditedInterestRubars`,
+        deposit.creditedInterestRubars,
+        deposit.creditedInterestRubars + amount,
+        `B-04 credited settlement — interest capitalizes into the claim (§4.1: floor((${deposit.principalRubars} + ${deposit.creditedInterestRubars}) x ${deposit.rateBpsPerKseq} x ${settlementSeq - deposit.lastSettledSeq} / 10000000) = ${amount} R); the claim bridge classifies this growth interest-capitalized (Appendix A)`
+      ),
+      fieldChange(
+        `bankDeposits/${deposit.depositId}.lastSettledSeq`,
+        deposit.lastSettledSeq,
+        settlementSeq,
+        "B-04 settlement watermark (credited branch)"
+      )
+    );
+  } else {
+    planMutate(plan, ctx.snapshot, depositPath, "state", ["lastSettledSeq"], (current) =>
+      current ? { ...current, lastSettledSeq: settlementSeq } : current
+    );
+    changes.push(
+      fieldChange(
+        `bankDeposits/${deposit.depositId}.lastSettledSeq`,
+        deposit.lastSettledSeq,
+        settlementSeq,
+        "B-04 settlement watermark — no interest accrued over the span (amount 0); the watermark advances and nothing moves"
+      )
+    );
+  }
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      changes,
+      recordsUpdated: [depositPath],
+      summaryText:
+        amount > 0
+          ? `B-04 (credited): deposit ${deposit.depositId} settled ${amount} R of interest into its claim — credited interest ${deposit.creditedInterestRubars} -> ${deposit.creditedInterestRubars + amount} R, watermark ${deposit.lastSettledSeq} -> ${settlementSeq}. No cash moved; the claim grew, classified interest-capitalized.`
+          : `B-04 (credited): deposit ${deposit.depositId} settled — no interest accrued over seq ${deposit.lastSettledSeq} -> ${settlementSeq} (amount 0); the watermark advances and nothing moves.`,
+    })
+  );
+  if (amount > 0) {
+    const aggregateChange = applyAggregateDelta(plan, ctx, bank, amount, descriptorId);
+    // A-B6: credited growth on a covered-class deposit is insured
+    // liability growth in the same event.
+    const insuredChange = applyInsuredLiabilityDelta(plan, ctx, {
+      deposit,
+      deltaRubars: amount,
+      bank,
+      ruleId: descriptorId,
+    });
+    pushMovementEntries(
+      plan,
+      ctx,
+      descriptorId,
+      [aggregateChange, ...(insuredChange ? [insuredChange] : [])],
+      () =>
+        `B-04 (credited): ${bank.corporationId}'s deposit liabilities rose by ${amount} R — the A-B1 pair of the credited claim growth on deposit ${deposit.depositId}. No cash moved.`
+    );
+  }
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "settle-deposit-interest",
+    scope: "bank",
+    cityId: bank.cityId,
+    summaryText:
+      amount > 0
+        ? `Settled ${amount} R of interest on deposit ${deposit.depositId} as CREDITED claim at ${bank.corporationId} (B-04 credited branch): the depositor's claim grew by the formula amount; no cash moved; watermark now ${settlementSeq}.`
+        : `Settled deposit ${deposit.depositId} (credited): no interest accrued; watermark advanced to ${settlementSeq}, no claim movement.`,
+    classificationExtra: {
+      settlement: {
+        mode: "credited",
+        depositId: deposit.depositId,
+        amountRubars: amount,
+        bridgeClass: "interest-capitalized",
+      },
+    },
   });
 }
 
 function depositTargetReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
-  const paths: string[] = [];
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: DescriptorReadPlan["queries"] = [];
   if (typeof record.depositId === "string" && record.depositId) {
     paths.push(bankDepositPath(record.depositId));
   }
   if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
     paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId));
   }
   const depositor = parseLedgerRef(record.depositor);
   paths.push(...depositorReadPaths(depositor));
-  return { paths };
+  return { paths, queries };
 }
 
 // ---------------------------------------------------------------------------

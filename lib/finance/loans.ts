@@ -80,6 +80,10 @@ export interface BankLoanRecord {
   /** Derived at offer (§3.3), stored so the cap and the Log never
    * recompute differently. */
   insider: boolean;
+  /** The offer event's resolution id + summary seq (the B1 card's
+   * source event; later verbs cite them from the record). */
+  offerResolutionId: string | null;
+  offeredAtSeq: number | null;
   status: "offered" | "active" | "repaid" | "seized" | "written-off" | "assigned";
   /** Interest watermark (§3.6) — the funding seq at activation. */
   lastSettledSeq: number;
@@ -139,6 +143,8 @@ export function buildLoanOfferDoc(args: {
   defaultMissedCount: number;
   collateral: LoanCollateral;
   insider: boolean;
+  offerResolutionId: string;
+  offeredAtSeq: number;
 }): Record<string, unknown> {
   const record: BankLoanRecord = {
     loanId: args.loanId,
@@ -164,6 +170,8 @@ export function buildLoanOfferDoc(args: {
     defaultMissedCount: args.defaultMissedCount,
     collateral: args.collateral,
     insider: args.insider,
+    offerResolutionId: args.offerResolutionId,
+    offeredAtSeq: args.offeredAtSeq,
     status: "offered",
     lastSettledSeq: 0,
     totalInterestPaidRubars: 0,

@@ -516,7 +516,15 @@ export function deriveFundSheet(args: {
     });
     if (!covered) continue;
     const d = deposit.depositor;
-    const key = `${deposit.bankCorporationId}|${d.kind}|${d.kind === "personal" ? d.memberId : d.kind === "company" ? d.corporationId : d.cityId}`;
+    const holderKey =
+      d.kind === "personal"
+        ? d.memberId
+        : d.kind === "company"
+          ? d.corporationId
+          : d.kind === "treasury"
+            ? d.cityId
+            : "none"; // depositors are only ever the three holder kinds (§2.3)
+    const key = `${deposit.bankCorporationId}|${d.kind}|${holderKey}`;
     groups.set(key, (groups.get(key) ?? 0) + deposit.principalRubars + deposit.creditedInterestRubars);
   }
   let contingent = 0;

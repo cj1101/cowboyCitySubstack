@@ -191,6 +191,7 @@ export interface BankDepositRecord {
    * no pool account doc exists (§5.6). Absent until liquidation. */
   liquidation?: {
     liquidationId: string;
+    liquidationResolutionId: string;
     bankCorporationId: string;
     frozenClaimRubars: number;
     coveredRubars: number;
