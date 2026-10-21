@@ -33,7 +33,7 @@ import { newClientRequestId, submitPlayAction } from "@/lib/play/intake";
 import type {
   SimSituation,
   SituationHandling,
-  SituationSourceRef,
+  SituationSource,
 } from "@/lib/sim/situations";
 import type { SimDelegationRule } from "@/lib/sim/delegation";
 import type { TaskEnvelopeRecord, TaskOutputRecord } from "@/lib/envelopes/types";
@@ -111,8 +111,19 @@ export function toSituation(data: DocumentData): SimSituation {
           decisionNote: asNullableString(handlingRaw.decisionNote),
         }
       : null;
-  const sourceRef: SituationSourceRef = {
-    kind: asString(source.kind, "log-entry"),
+  const sourceKinds = [
+    "log",
+    "treaty",
+    "task",
+    "ingestion",
+    "contest",
+    "manual-action",
+    "system",
+  ] as const;
+  const sourceRef: SituationSource = {
+    kind: (sourceKinds as readonly string[]).includes(source.kind as string)
+      ? (source.kind as SituationSource["kind"])
+      : "log",
     sourceId: asNullableString(source.sourceId),
     sourceSeq: asNullableNumber(source.sourceSeq),
     sourceResolutionId: asNullableString(source.sourceResolutionId),
