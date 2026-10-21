@@ -1540,6 +1540,27 @@ service cloud.firestore {
       allow create, update, delete: if isFabricCommitter();
     }
 
+    // The deposit-insurance fund singleton (Phase 4 §7.6 posture,
+    // landed at PR-6 assembly — see the note below): an existing
+    // institution is public state (its derived posture gates every
+    // member's deposit decisions), and the record is written only
+    // by the committer inside Resolution Events (founding, premium
+    // ripenings, B-13/B-14). Before its founding the doc simply
+    // does not exist — absence is the pre-founding posture, and no
+    // client write can fake one into being.
+    //
+    // ASSEMBLY NOTE (Rafe, PR-6): the Phase 4 record (PR #30)
+    // states this block landed then ("fund singleton public-read +
+    // committer-write"), but no match for the collection stood in
+    // the rules on master — the singleton was default-denied to
+    // every rules-evaluated identity (the engine never noticed: its
+    // reads run server-side). The block below lands exactly the
+    // recorded posture, nothing wider.
+    match /sim_deposit_insurance_fund/{docId} {
+      allow read: if isViewer() && docId == 'main';
+      allow create, update, delete: if isFabricCommitter() && docId == 'main';
+    }
+
     match /sim_bank_loans/{loanId} {
       allow read: if isAdmin() || isFabricService()
         || (isFullMember()

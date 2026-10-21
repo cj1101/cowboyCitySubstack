@@ -1797,6 +1797,32 @@ async function main() {
     await assertSucceeds(getDoc(loanCompanyRef(guestG)));
     await assertSucceeds(getDoc(loanCompanyRef(ownerB)));
     await assertFails(getDoc(loanCompanyRef(anon)));
+
+    // The deposit-insurance fund singleton (PR-6 assembly catch):
+    // the Phase 4 record (PR #30) states a public-read +
+    // committer-write block landed then, but no match stood in the
+    // rules — PR-6 lands exactly the recorded posture. An existing
+    // institution is public state to any viewer; writes are the
+    // committer's alone.
+    await assertSucceeds(
+      setDoc(doc(committerFs, "sim_deposit_insurance_fund", "main"), {
+        institutionId: "deposit-insurance-fund",
+        fundCashRubars: 1000,
+        targetRatioBps: 200,
+      })
+    );
+    const fundRef = (actor: typeof ownerA) =>
+      doc(actor.firestore(), "sim_deposit_insurance_fund", "main");
+    await assertSucceeds(getDoc(fundRef(guestG)));
+    await assertSucceeds(getDoc(fundRef(memberC)));
+    await assertSucceeds(getDoc(fundRef(fabricWorker)));
+    await assertFails(getDoc(fundRef(anon)));
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_deposit_insurance_fund", "main"), {
+        institutionId: "deposit-insurance-fund",
+        fundCashRubars: 1,
+      })
+    );
   }
   console.log("ok sim finance collections posture (P4 Finance assembly)");
 
