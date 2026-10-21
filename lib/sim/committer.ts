@@ -42,6 +42,10 @@ import { citableBaselineVersion, type BaselineRegistry } from "./baseline/regist
 import { RULE_DESCRIPTORS } from "./rules/registry";
 import { ruleEffectDraft } from "./rules/planHelpers";
 import {
+  buildChronicleDraftDoc,
+  chronicleDraftIdForResolution,
+} from "./rules/lore";
+import {
   PlanValidationError,
   finalizePlan,
   resolveAction,
@@ -168,6 +172,52 @@ async function readAll(
 
 function stateHeadsOf(snapshot: SimSnapshot, exclude: Set<string>): SnapshotHead[] {
   return snapshot.heads.filter((h) => !exclude.has(h.path));
+}
+
+/** Chronicle-draft badging derivation (Phase 4 step 11 assembly —
+ * prep report §4(b)). A RESOLVED plan's chronicle outputs become one
+ * sim-badged draft in the existing `drafts` collection, deterministic
+ * in the resolution: the id is Wren's `chronicle_<id>` form, the title
+ * is the telling's first non-empty line capped at 120 chars, the body
+ * carries every chronicle output's text in plan order (a resolution
+ * gets exactly one draft — the id leaves no room for a second), and
+ * the provenance rules are the summary entry's. Rejected plans badge
+ * nothing (a rejection changes no state). A chronicle output whose
+ * plan has no summary entry naming a subject city fails the commit
+ * closed: a chronicle without a city is unbadgeable. Pure and
+ * exported so the harness exercises the shipped derivation, not a
+ * copy. */
+export function deriveChronicleBadging(
+  plan: ResolutionPlan,
+  resolutionId: string
+): { draftId: string; path: string; doc: Record<string, unknown> } | null {
+  if (plan.outcome !== "resolved") return null;
+  const outputs = plan.narrativeOutputs.filter((o) => o.kind === "chronicle");
+  if (outputs.length === 0) return null;
+  const summary = plan.entries.find((e) => e.summary);
+  if (!summary || summary.cityId === null) {
+    throw new CommitError(
+      "CHRONICLE_UNBADGEABLE",
+      `resolution ${resolutionId} emits a chronicle output but its summary entry names no subject city — a chronicle without a city is unbadgeable.`
+    );
+  }
+  const titleLine =
+    outputs[0].text
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "Chronicle";
+  const draftId = chronicleDraftIdForResolution(resolutionId);
+  return {
+    draftId,
+    path: `drafts/${draftId}`,
+    doc: buildChronicleDraftDoc({
+      resolutionId,
+      cityId: summary.cityId,
+      title: titleLine.slice(0, 120),
+      body: outputs.map((o) => o.text).join("\n\n"),
+      sourceRuleIds: [...summary.ruleIds],
+    }),
+  };
 }
 
 export async function commitResolution(
@@ -345,6 +395,13 @@ export async function commitResolution(
       p.pendingCreates.length +
       p.pendingTransitions.length +
       p.pendingReferenceWrites.length +
+      // The chronicle badge write (step 11 badging, §4(b)): one
+      // drafts/ write per resolved plan carrying chronicle outputs,
+      // counted here so the ceiling sees it before Step 6 derives it.
+      (p.outcome === "resolved" &&
+      p.narrativeOutputs.some((o) => o.kind === "chronicle")
+        ? 1
+        : 0) +
       (req.sourceKind === "action" ? 1 : 0);
     if (countWrites(plan) > MAX_WRITES_PER_RESOLUTION) {
       if (req.sourceKind !== "action") {
@@ -503,6 +560,30 @@ export async function commitResolution(
       });
     }
 
+    // Chronicle badging (Phase 4 step 11 assembly — prep report
+    // §4(b)): the plan's chronicle outputs become a sim-badged draft
+    // write, derived here — after the plan's own writes are finalized,
+    // before the Log entries are built — and stamped like every
+    // plan-produced record (the helper emits null timestamp
+    // placeholders for exactly this). As a finalWrites member with
+    // recordClass "state", the draft is inside the manifest write set,
+    // the write ceiling (counted at Step 5), and undo/erase
+    // accounting. Preview parity needs no hash work: finalizePlan
+    // hashes the whole plan, narrativeOutputs included (verified), so
+    // the output a member confirmed is the output that badges.
+    const badging = deriveChronicleBadging(plan, req.resolutionId);
+    if (badging) {
+      const before = docs.get(badging.path) ?? null;
+      finalWrites.push({
+        path: badging.path,
+        op: before ? "update" : "create",
+        recordClass: "state",
+        beforeDoc: before,
+        afterDoc: stampDoc(before, badging.doc),
+        changedFields: ["badge", "canonLayer", "sourceResolutionId"],
+      });
+    }
+
     // Control records: world, counter, source action.
     const worldAfter: Record<string, unknown> = {
       ...world,
@@ -565,10 +646,25 @@ export async function commitResolution(
       projectFirestoreValue({ writeSet }) as Record<string, unknown>
     );
 
-    // Entries, chained.
+    // Entries, chained. When the resolution badged a chronicle draft,
+    // the Log names the draft it told (§4(b)(3)): the summary entry
+    // carries the stamp, and so does every rule-effect entry whose
+    // ruleIds produced the output — NarrativeIntent carries no
+    // per-output rule linkage of its own, so the producing set is the
+    // summary entry's ruleIds.
+    const producingRuleIds = new Set(
+      plan.entries.find((e) => e.summary)?.ruleIds ?? []
+    );
+    const entryDrafts = badging
+      ? plan.entries.map((draft) =>
+          draft.summary || draft.ruleIds.some((r) => producingRuleIds.has(r))
+            ? { ...draft, chronicleDraftId: badging.draftId }
+            : draft
+        )
+      : plan.entries;
     let prevHash = counter.lastEntryHash as string;
     const builtEntries: { path: string; entry: Record<string, unknown> }[] = [];
-    plan.entries.forEach((draft, index) => {
+    entryDrafts.forEach((draft, index) => {
       const seq = firstSeq + index;
       const entry = buildLogEntry(draft, {
         seq,

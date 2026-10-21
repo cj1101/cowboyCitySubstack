@@ -486,6 +486,16 @@ service cloud.firestore {
       // collection can be listed without a status filter.
       allow read: if isAdmin() || isMember();
       allow create: if validNewPost();
+      // Phase 4 step 11 assembly: R-11 chronicle adoption publishes a
+      // sim-badged draft as a canon post inside the committer's
+      // transaction (authorType 'sim', authorUid '' — no member-shaped
+      // create can express it). The committer's update/delete is
+      // scoped to sim-authored posts only: that is the undo-erasure
+      // channel for an adoption, and nothing else.
+      allow create: if isFabricCommitter() &&
+        request.resource.data.authorType == 'sim' &&
+        request.resource.data.status == 'published';
+      allow update, delete: if isFabricCommitter() && resource.data.authorType == 'sim';
       allow update: if (isMember() || isAdmin()) && (
         (isAdmin() && searchTokenPatch()) ||
         (isAdmin() && preservesPostIdentity()) ||
@@ -543,11 +553,34 @@ service cloud.firestore {
       }
     }
 
+    // Phase 4 step 11 assembly: the chronicle badge fence (TC-C01).
+    // `badge`, `canonLayer`, and the `source*` provenance fields on a
+    // draft are fabric-only: a client write that sets or changes any
+    // of them is a forged sim badge, and R-11 would trust it. Unbadged
+    // drafts carry none of these fields, so the ordinary member draft
+    // flow is untouched.
+    function clientDraftCreateOk() {
+      return !request.resource.data.keys().hasAny(
+        ['badge', 'canonLayer', 'source', 'sourceResolutionId', 'sourceCityId', 'sourceRuleIds']);
+    }
+
+    function clientDraftUpdateOk() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(
+        ['badge', 'canonLayer', 'source', 'sourceResolutionId', 'sourceCityId', 'sourceRuleIds']);
+    }
+
     match /drafts/{postId} {
-      allow read: if isAdmin() ||
+      // The fabric read branch is load-bearing: the committer and the
+      // preview worker read the draft inside the R-11 resolution path.
+      allow read: if isAdmin() || isFabricService() ||
         (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
         (isMember() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId));
-      allow create: if isMember() &&
+      // The committer is a drafts writer: chronicle badging creates
+      // drafts/{chronicle_<resolutionId>} (authorUid "" — no
+      // member-shaped clause can express it), R-11 chronicle adoption
+      // deletes the consumed draft, and undo restores both.
+      allow create: if isFabricCommitter();
+      allow create: if isMember() && clientDraftCreateOk() &&
         request.resource.data.authorUid == request.auth.uid &&
         request.resource.data.status in ['draft', 'scheduled'] &&
         request.resource.data.title is string &&
@@ -555,7 +588,13 @@ service cloud.firestore {
         request.resource.data.title.size() <= 300 &&
         request.resource.data.body is string &&
         request.resource.data.body.size() <= 200000;
-      allow update, delete: if isAdmin() ||
+      allow update: if isFabricCommitter();
+      allow update: if (isAdmin() ||
+        (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
+        (isMember() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId))) &&
+        clientDraftUpdateOk();
+      allow delete: if isFabricCommitter();
+      allow delete: if isAdmin() ||
         (isSignedIn() && resource.data.authorUid == request.auth.uid) ||
         (isMember() && resource.data.keys().hasAll(['factionId']) && isFactionOwner(resource.data.factionId));
     }
@@ -571,8 +610,33 @@ service cloud.firestore {
     }
 
     match /wiki_entries/{entryId} {
-      allow read: if isMember();
-      allow create, update: if isMember() &&
+      // The fabric read branch is load-bearing: the R-11 adoption
+      // path reads the entry (and the by-city query) inside the
+      // resolution under the fabric identity.
+      allow read: if isMember() || isFabricService();
+      // The adoption commit (Dana §3.9) advances the entry's version
+      // pointer and provenance in the committer's transaction.
+      allow create, update, delete: if isFabricCommitter();
+      // Phase 4 step 11 assembly: the fabric-provenance fields
+      // (currentVersion, versioned, canonLayer, canonStatus,
+      // adoptedByUid, adoptedAtSeq, provenanceSummary, contentHash)
+      // are written ONLY by that commit. Client creates must not
+      // carry them; client updates must not touch them (TC-C01/C02).
+      // The member-edit flow is otherwise unchanged.
+      allow create: if isMember() &&
+        !request.resource.data.keys().hasAny(
+          ['currentVersion', 'versioned', 'canonLayer', 'canonStatus', 'adoptedByUid', 'adoptedAtSeq', 'provenanceSummary', 'contentHash']) &&
+        isFactionOwner(request.resource.data.cityId) &&
+        request.resource.data.kind in ['character', 'place', 'faction', 'law', 'species', 'team'] &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 160 &&
+        request.resource.data.slug is string &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 200000;
+      allow update: if isMember() &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(
+          ['currentVersion', 'versioned', 'canonLayer', 'canonStatus', 'adoptedByUid', 'adoptedAtSeq', 'provenanceSummary', 'contentHash']) &&
         isFactionOwner(request.resource.data.cityId) &&
         request.resource.data.kind in ['character', 'place', 'faction', 'law', 'species', 'team'] &&
         request.resource.data.title is string &&
@@ -583,6 +647,18 @@ service cloud.firestore {
         request.resource.data.body.size() <= 200000;
       allow update: if isAdmin() && searchTokenPatch();
       allow delete: if isMember() && (isAdmin() || isFactionOwner(resource.data.cityId));
+
+      // Immutable adoption snapshots (Dana §3.9): written once by the
+      // committer inside the adoption event; NO identity may update
+      // one. The committer's delete is the undo-erasure channel — the
+      // carve-out every sim record family carries under CJ's
+      // erasable-Log ruling; no client can delete a snapshot.
+      match /versions/{version} {
+        allow read: if isMember() || isFabricService();
+        allow create: if isFabricCommitter();
+        allow update: if false;
+        allow delete: if isFabricCommitter();
+      }
     }
 
     match /follows/{followId} {
@@ -1221,6 +1297,15 @@ service cloud.firestore {
         allow create, update: if isFabricCommitter();
         allow delete: if isFabricCommitter();
       }
+
+      // Phase 4 Lore assembly: R-11 cross-references — a labeled
+      // notice on the named city (Dana §3.9: intertwining notices,
+      // not copies in their canon). Viewer reads, committer writes.
+      match /lore_cross_refs/{entryId} {
+        allow read: if isViewer();
+        allow create, update: if isFabricCommitter();
+        allow delete: if isFabricCommitter();
+      }
     }
 
     match /sim_character_extensions/{characterId} {
@@ -1493,6 +1578,29 @@ service cloud.firestore {
     match /sim_verification_adoptions/{adoptionId} {
       allow read: if isFullMember() || isAdmin();
       allow create, update, delete: if isFabricCommitter();
+    }
+
+    // --- Sim layer: lore adoption drafts (Phase 4, step 11) --------------
+    // Dana §3.9 records. Born in the ingestion pipeline (fabric writes
+    // only in Phase 4), read by the subject city's owners + admins (and
+    // the fabric, whose resolution path reads the named draft in the
+    // commit transaction), and decided in the open by the owner: the
+    // owner's ONLY client write is the decision on their own city's
+    // pending draft — status to adoption_requested or rejected, with an
+    // optional decision note, no other field touchable. The adoption
+    // commit itself (status -> adopted, result fields, retconProposal,
+    // decision) is the committer's, inside the R-11 event.
+    match /sim_wiki_entry_drafts/{draftId} {
+      allow read: if isFabricService() || isAdmin()
+        || (isFullMember() && ownsListedCity(resource.data.targetCityId));
+      allow create, update, delete: if isFabricCommitter();
+      allow update: if isFullMember()
+        && resource.data.status == 'pending'
+        && ownsListedCity(resource.data.targetCityId)
+        && request.resource.data.targetCityId == resource.data.targetCityId
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'decision'])
+        && request.resource.data.status in ['adoption_requested', 'rejected'];
     }
 
     // --- Sim layer: market (Phase 4, step 7) ------------------------------
