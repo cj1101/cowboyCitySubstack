@@ -340,6 +340,14 @@
         { "fieldPath": "ownerCityId", "order": "ASCENDING" },
         { "fieldPath": "status", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "sim_market_trades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "corporationId", "order": "ASCENDING" },
+        { "fieldPath": "seq", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
