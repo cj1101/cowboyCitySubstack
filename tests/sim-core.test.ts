@@ -408,7 +408,7 @@ async function main() {
     assert.equal(entries[2].kind, "action-summary");
     for (const entry of entries) {
       assert.equal(entry.hashVersion, "cowboy-canonical-json-v2");
-      assert.equal(entry.rulesVersion, "sim-rules-0.2.0-phase2");
+      assert.equal(entry.rulesVersion, "sim-rules-0.5.0-phase5");
       assert.equal(entry.baseline, null);
       assert.equal(computeEntryHash(entry), entry.entryHash);
     }
@@ -1444,7 +1444,7 @@ async function main() {
       resolutionId: `r${seq}`,
       kind: "action-summary",
       resolvedAt: "2026-10-18T00:00:00.000Z",
-      rulesVersion: "sim-rules-0.2.0-phase2",
+      rulesVersion: "sim-rules-0.5.0-phase5",
       hashVersion: "cowboy-canonical-json-v2",
       actorLabel: "member ownerA",
       actorUid: "ownerA",

@@ -1267,7 +1267,7 @@ async function main() {
     entryIndexWithinResolution: 0,
     kind: "action-summary",
     resolvedAt: "2026-10-17T00:00:00.000Z",
-    rulesVersion: "sim-rules-0.2.0-phase2",
+    rulesVersion: "sim-rules-0.5.0-phase5",
     actor: {
       type: "member",
       memberId: "ownerA",

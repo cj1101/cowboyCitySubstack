@@ -14,7 +14,7 @@ import type { BaselineCitation } from "./baseline/registry";
  * adopted in workstreams/phase2-decisions.md). A different namespace from
  * the genesis label on `sim_world/current`, which stays
  * `"sim-rules-0.1.0-phase1"` forever. */
-export const RESOLVER_RULES_VERSION = "sim-rules-0.2.0-phase2";
+export const RESOLVER_RULES_VERSION = "sim-rules-0.5.0-phase5";
 
 export const COMMITTER_VERSION = "sim-committer-0.2.0-phase2";
 

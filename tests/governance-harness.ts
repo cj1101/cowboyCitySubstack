@@ -334,7 +334,7 @@ const ALLOC = {
   resolutionId: "res_fixture",
   entryIndexWithinResolution: 0,
   resolvedAt: NOW_A,
-  rulesVersion: "sim-rules-0.2.0-phase2",
+  rulesVersion: "sim-rules-0.5.0-phase5",
   prevHash: "a".repeat(64),
   wakeActionId: null,
   executedDuringSeq: null,
