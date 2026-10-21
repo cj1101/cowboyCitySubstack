@@ -60,6 +60,7 @@ import {
   PRODUCTION_BASELINE_REGISTRY,
   citableBaselineVersion,
   computeBaselineDocHash,
+  projectBaselineStamp,
   type BaselineRegistry,
 } from "../lib/sim/baseline/registry";
 import {
@@ -369,6 +370,16 @@ async function main() {
     const world = await adminDoc("sim_world/current");
     assert.equal(world?.evenStartTemplateHash, BASELINE_HASH);
     assert.equal(world?.rulesVersion, "sim-rules-0.1.0-phase1");
+    // DELIBERATE RE-PIN (go-live fix B-1): genesis now stamps the
+    // ratified Baseline on the world doc at creation (runbook §3.3,
+    // ratified case) — the stamp is present and hash-matching. Before
+    // B-1 the world doc carried no baselineVersion/baselineDocHash
+    // fields at all; this assertion replaces that implicit posture.
+    assert.equal(world?.baselineVersion, "world-baseline-1.0");
+    assert.equal(
+      world?.baselineDocHash,
+      "db01a43ab1e6015d18d82cc09bf48cddea70a320bad44617f9d39e6a4e0d63ae"
+    );
     assert.equal(await headSeq(), 1);
   }
   console.log("ok genesis v1 intact, template hash stable (P2-G12/G5)");
@@ -517,6 +528,37 @@ async function main() {
     assert.equal(PRODUCTION_BASELINE_REGISTRY.versions[0].effectiveFromSeq, null);
     assert.equal(citableBaselineVersion(PRODUCTION_BASELINE_REGISTRY, 1), null);
     assert.equal(citableBaselineVersion(PRODUCTION_BASELINE_REGISTRY, 9999), null);
+
+    // DELIBERATE RE-PIN (go-live fix B-1): the registry-alone posture
+    // above is unchanged — the CODE registry still selects nothing.
+    // What B-1 adds is the projection layer: this suite's standing
+    // world doc carries the genesis stamp (asserted at CK1), and
+    // projecting it yields an effective registry under which 1.0 IS
+    // citable from the genesis seq. A stamp-less world (the
+    // pre-genesis shape) still projects nothing.
+    const standingWorld = await adminDoc("sim_world/current");
+    const effectiveRegistry = projectBaselineStamp(
+      PRODUCTION_BASELINE_REGISTRY,
+      standingWorld
+    );
+    assert.equal(
+      citableBaselineVersion(effectiveRegistry, 1)?.version,
+      "world-baseline-1.0"
+    );
+    assert.equal(
+      citableBaselineVersion(effectiveRegistry, 9999)?.version,
+      "world-baseline-1.0"
+    );
+    const stamplessWorld = { ...(standingWorld ?? {}) };
+    delete stamplessWorld.baselineVersion;
+    delete stamplessWorld.baselineDocHash;
+    assert.equal(
+      citableBaselineVersion(
+        projectBaselineStamp(PRODUCTION_BASELINE_REGISTRY, stamplessWorld),
+        9999
+      ),
+      null
+    );
 
     // Fail-closed, proven against a genuinely UNRATIFIED version: the
     // same production text at status "draft" (test-local registry) is
