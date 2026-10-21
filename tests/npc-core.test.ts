@@ -1309,7 +1309,11 @@ async function main() {
   // (npc.setMode with no mandate in force) undoes totally — entries
   // and manifest erased, the doc restored. A resolution whose effects
   // cascaded (the steward's mandate.set, consumed by N4's fire)
-  // refuses with DEPENDENTS_EXIST.
+  // refuses: the standing dependencyReport names the fire as an S3
+  // semantic dependent and names the first structural successor —
+  // the Phase 2 named refusal (brief §8.2/§8.3, P2-K3; the failure
+  // code's structural precedence is adjudicated in the gate record,
+  // PR #45 fix round 12).
   //
   // A-7 HOLDOUT — PRESERVED, NOT ASSERTED: the P5-G9 assertion that
   // turns on P5-D6 (what happens to an EFFECTIVE mandate version
@@ -1368,6 +1372,8 @@ async function main() {
     const versionDoc = await adminDoc("sim_mandates/mand-steward-1/versions/1");
     const mandateSetActionId = versionDoc?.sourceActionId as string;
     assert.ok(mandateSetActionId, "the version names its authoring action");
+    const targetManifest = await adminDoc(`sim_resolutions/${mandateSetActionId}`);
+    assert.ok(targetManifest, "the target resolution stands");
     const treasuryBefore = await treasury("cityA");
     const blockedOpId = await createUndoOp("ownerA", mandateSetActionId);
     await wake();
@@ -1380,10 +1386,54 @@ async function main() {
     // (TARGET_NOT_FOUND; sim-core TC-U11 / genesis). The cascaded case is a
     // refusal: the mandate.set stands, the fire is its semantic dependent.
     assert.equal(blockedOp?.status, "refused");
+    // Which refusal GROUND the one-word failure.code names is the
+    // engine's summary precedence, and it is structural first
+    // (undo.ts: `structuralSuccessor ? "NOT_SUFFIX" : "DEPENDENTS_EXIST"`).
+    // That precedence IS the Phase 2 design, not a departure from it:
+    // brief §8.2 presents the structural class first — "A non-suffix
+    // target is refused with the first structural successor named" —
+    // P2-K3 adopts exactly that, and §8.3 closes the question for
+    // resolution-dependents: "a true dependent would itself be a later
+    // resolution — i.e. a structural successor"; the semantic graph
+    // "produces the *named* refusal TC-U02 requires instead of a bare
+    // 'not the latest'". So for a cascaded target BOTH grounds hold by
+    // construction, the code names the structural one, and the
+    // DEPENDENCY ground — CJ's hard limit, the entire point of this
+    // leg — is proven where the design puts it: in the standing
+    // dependencyReport, asserted below in TC-U04's idiom (sim-core
+    // asserts failure.code for no blocker case except
+    // UNDO_NOT_AUTHORIZED, TC-U06; TC-U03 asserts status + the named
+    // successor, TC-U04 status + blockers naming the dependent).
+    // DEPENDENTS_EXIST remains the code for the complementary case —
+    // target IS the tail yet semantic blockers stand (the §8.3
+    // non-resolution dependents / untracked-drift class). Asserting
+    // it here would assert a state this scenario cannot construct;
+    // asserting NOT_SUFFIX ALONE would retire the dependency proof —
+    // so this leg asserts the code AND the report, which is strictly
+    // stronger than the code alone (the code by itself names no
+    // dependent; the report names the fire). Adjudication: gate
+    // record, PR #45 fix round 12.
     assert.equal(
       (blockedOp?.failure as Record<string, unknown>)?.code,
-      "DEPENDENTS_EXIST",
-      "the mandate's effects cascaded (N4's fire) — undo is refused, per CJ's dependency limit"
+      "NOT_SUFFIX",
+      "the summary code names the structural ground first (§8.2 precedence); the dependency ground is proven by the report below"
+    );
+    const report = blockedOp?.dependencyReport as Record<string, unknown>;
+    const successor = report.structuralSuccessor as Record<string, unknown> | null;
+    assert.ok(successor, "the refusal names the first structural successor (§8.2)");
+    assert.equal(
+      successor.firstSeq,
+      (targetManifest?.lastSeq as number) + 1,
+      "the named successor stands at target.lastSeq + 1"
+    );
+    assert.ok(
+      await adminDoc(`sim_resolutions/${successor.resolutionId as string}`),
+      "the named successor is a standing resolution"
+    );
+    const blockers = report.semanticBlockers as Record<string, unknown>[];
+    assert.ok(
+      blockers.some((b) => b.kind === "S3" && b.refKey === `resolution:${fireActionId}`),
+      `S3 blocker naming the fire (the mandate's effects cascaded — undo is refused, per CJ's dependency limit); got ${JSON.stringify(blockers)}`
     );
     assert.equal(
       (await adminDoc("sim_mandates/mand-steward-1"))?.status,
@@ -1393,7 +1443,7 @@ async function main() {
     assert.equal(await treasury("cityA"), treasuryBefore);
     await verifyOk();
   }
-  console.log("ok N9 undo: leaf governance write erases totally; cascaded mandate.set refuses DEPENDENTS_EXIST (A-7/D6 assertion held out)");
+  console.log("ok N9 undo: leaf governance write erases totally; cascaded mandate.set refused — report names the fire (S3) + first successor (A-7/D6 assertion held out)");
 
   // ======================================================================
   // N10 — The novel-title NPC (P5-G13's engine half): an NPC whose
