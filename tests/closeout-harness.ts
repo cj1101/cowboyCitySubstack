@@ -1025,7 +1025,6 @@ section("S8 manifest sizes — measured, against both ceilings");
       status: "active", stateVersion: 1, lastChangedSeq: SEED_SEQ, lastResolutionId: null,
     });
     docs.set("sim_counters/log", { lastSeq: SEED_SEQ, lastResolvedSeq: SEED_SEQ, lastEntryHash: "seed" });
-    const snapshot = snapshotFromDocs(docs, T0);
     const pending = {
       pendingId: "pend_s8",
       kind: "innovation-breakthrough",
