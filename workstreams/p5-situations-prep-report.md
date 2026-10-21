@@ -273,3 +273,184 @@ UI queue (W4). Everything the module itself promises — shapes,
 dedupe, conversion discipline, evaluation order, narrower-of,
 composer refusals, silence shape/actors, citation completeness —
 is asserted against the real landed engine code, not mocks.
+
+---
+
+## 7. Assembly addendum (Rafe, Build Lead — PR-3)
+
+**Stack.** Base `phase5/engine-core` (`fc472cf`; PR #39 open — if it
+needs a fix round, this stack's base shifts with it, per Theo). Vera's
+five commits cherry-picked in order (situations module · delegation
+module · banking-addendum absorption · harness + corrections · this
+report): **zero conflicts**, her authorship preserved, and all four
+files verified **byte-identical** to `p5/situations-delegation`
+(sha256 per file) after the pick. Her stack was new-files only, as
+recorded — no shared-file payload existed to compose.
+
+**Hash parity — CONFIRMED on her code path, not discovered.** A probe
+ran both implementations over three payloads (her S4e vector + two
+off-vector variants): `lib/sim/delegation`'s `computeRuleHash` and
+governance's `computeDelegationRuleHash` agree on all three, and the
+S4e digest is exactly the pinned `0b37d446…4520`. The parity is now
+locked durably: governance harness G11 asserts her function, the
+copy, and the literal digest, on-vector and off.
+
+**Registry remainders (§3 W1/W6 list) — verified, none missing.**
+All twelve §3.3 kinds already classified at PR-1/PR-2; the
+`situation.handle` descriptor existed with its three kinds. PR-3
+replaces its handlers in place and adds its read plan — no new
+descriptor surface was outstanding.
+
+**Rules/indexes remainders (§3) — verified, no changes ride this PR.**
+(1) §9.6/§9.7 postures landed at PR-1 with suite proofs (the P5-G9
+matrix in `tests/rules.test.ts`): committer mints; the member
+handling write is fenced to `handling` + `updatedAt`, status
+unchanged, `decidedByUid` == caller, mode ∈ {self, delegated,
+silent}; delegation rules author-pending with committer
+effectiveness. (2) §10 indexes: PR-1 landed exactly brief §10's
+`sim_situations` set (audienceCityId+status+createdAt desc ·
+recipientUid+status+createdAt desc · dedupeKey+status) plus the
+`detail` exclusion override; `sim_delegation_rules` appears in no
+index list because every landed access is a doc-path read (the
+handler read plans) — the wake pass (PR-4) will name any query it
+introduces. (3) The kind ≤ 80 cap (her F6): the bound is enforced in
+`buildSituationDoc` (situations.ts) — the single mint path every
+producer funnels through — and rules creation for the collection is
+committer-only, so no client path can write an over-bound kind; a
+rules-side duplicate of a builder invariant would be a second source
+for one fact. Recorded as verified-by-construction; if the gate
+wants the belt-and-braces rules fence anyway, it is a one-line
+follow-up, not a correction.
+
+**Lead assembly decisions (mine, named):**
+- **D-1 Audience gate.** All three handlers sit behind
+  `requireSituationAudience`: member actor AND (named recipient OR
+  current owner of the audience city, read from the stored faction).
+  Refusal is `AUTHORITY_REVOKED` — the resolver-side twin of the
+  §9.6 rules fence, which admits exactly the same audience to the
+  same fields.
+- **D-2 `decidedAt` is nulled in stored docs.** The module stamps
+  `handling.decidedAt` from a caller-supplied instant; the fabric's
+  plan layer is clock-free and the committer stamps only top-level
+  timestamps in-transaction, so a builder Date would be written
+  verbatim as a false 1970 instant. The stored form is null; the
+  decision's ordering truth is its resolution's Log seq. The module
+  types the field `unknown` for exactly this caller choice. (Her
+  harness's ISO-string form remains the module's own venue form.)
+- **D-3 Silence `resolvedSeq`.** The owner-explicit silence handler
+  passes `summarySeqFor(ctx)` — the silence entry's own summary seq,
+  since the entry IS the resolution's summary (§8.1(2)).
+- **D-4 Delegate fences** (all resolver-side, codes by precedent):
+  `NPC_NOT_ACTIVE` (envelope.spawn's code — only an active NPC can
+  be delegated to), `DELEGATION_NPC_CITY_MISMATCH` (delegationRule.set's
+  code — the pick must serve the card's city), `MANDATE_NPC_MISMATCH`
+  (a cited/standing mandate must belong to the pick),
+  `MANDATE_REVOKED` (PR-2's F-E4 code — a revoked mandate cannot
+  carry a delegation), `ENVELOPE_NOT_FOUND` / `ENVELOPE_NOT_OWNED`
+  (a one-off envelope citation must stand and be the decider's own).
+  The mandate in force is the cited mandate or the NPC's standing
+  one; its version is read from the STORED root's `currentVersion`.
+- **D-5 Two transitions are deliberately NOT action kinds.**
+  `markSituationHandled` fires inside the handling flow's own
+  resolution (§6.3A atomicity) and `returnSituationToOpen` belongs
+  to the wake/escalation path (PR-4). Neither is an owner decision
+  on the card; exposing either as a `situation.*` kind would let a
+  card be closed without its flow. The three kinds are exactly
+  brief §3.3's.
+- **D-6 Descriptor summary correction.** `delegationRule.set`'s
+  summary said "Evaluation lands with Situations + delegation
+  (PR-3)"; it now reads: the evaluation MODULE lands at PR-3, the
+  wake pass consuming it at PR-4. Documentation only.
+
+**Vera's flags F1–F8 — assembly adopted NONE.** No wiring choice in
+this PR forced a position: the handlers consume the module as
+built. F3 (step-4 no-cascade) stands as built — nothing in the
+assembled tree or the battery contradicts it; it rides to PR review
+undecided, as do F1/F2/F4–F8. F5's extension case (no-permission
+silence with NPCs present) is a wake-path question (PR-4) — the
+handler here implements only `owner-explicit`, which F5 does not
+contest. Her two design corrections (§2 of her report) ride
+byte-identical and are exercised by both harnesses on the assembled
+tree.
+
+**Tests.** Governance harness 44 → **54** (G4 rewritten — the
+deferral set is empty and a situation action against a missing
+situation now refuses `SITUATION_NOT_FOUND`; new G11 ×10: parity,
+handle, audience refusal, terminal pass-through, delegate
+act-for-me / narrower-of awaiting-owner / silent refusal / foreign
+NPC / envelope citation both ways, silence commit shape via her
+`silencePlanWritesOnlySituation`). `tests/situations-harness.ts`
+chained into `test:sim` after the governance harness.
+
+**Regression (assembled tree):** cat1 all · defense 12 · chains 34 ·
+cat2 34 · acq 14 · market 27 · lore 27 · close-out 29 · governance
+54 · situations 32 · NPC core 36 · authority A1–A13 all · envelopes
+E1–E11 all · tsc clean · ESLint clean (touched files) · `next build`
+green. Emulator suites (rules incl. the P5-G9 matrix, sim-core,
+play-core) are CI's venue.
+
+**Gate (A-2): built, not live** — the P2-K15 production chain has
+not run (no production fabric user, no production rules/index
+deploys, no production genesis, no operated wake path).
+
+## 8. PR draft (Lead, final)
+
+**Title:** Phase 5 PR-3 — situations + delegation: W3 modules assembled, situation.* handlers live (built, not live)
+
+**Body:**
+
+> **Built, not live.** This PR assembles Phase 5's situations +
+> delegation layer in code. The P2-K15 production chain has **not**
+> run: (1) no production fabric user exists with the `fabricRole`
+> values (committer + worker); (2) production rules have **not**
+> been deployed; (3) production indexes have **not** been deployed;
+> (4) production genesis has **not** run; (5) there is no operated
+> production wake path. Every Phase 5 gate row in this train closes
+> on CI evidence in **built form only** (countersign A-2).
+>
+> **What lands** (detail: `workstreams/p5-situations-prep-report.md`
+> §§1–6 for the module, §7 for this assembly):
+> - Vera's W3 modules, byte-identical, at the brief §1.1 paths:
+>   `lib/sim/situations.ts` (card shape + builders, dedupe/supersede
+>   upsert with seq-bearing deterministic IDs, §6.3 handling
+>   transitions, §6.5 producers, §6.4 `needsAttention` conversion,
+>   §8 silence commit, GAP-1 ripening-occasion producer) and
+>   `lib/sim/delegation.ts` (Dana's five-step evaluation — step 4
+>   judges only the selected rule, no cascade — narrower-of
+>   resolution, rule-fire payloads, the shared composer validator).
+> - The last three deferral handlers are replaced: `situation.handle`
+>   / `situation.delegate` / `situation.silence` are **live** in
+>   `lib/sim/rules/governance.ts` behind a §9.6 audience gate
+>   (recipient or audience-city owner). Handle records the §6.3A
+>   decision and leaves the card open; delegate records the §6.3B
+>   delegation with the module's narrower-of effective mode over
+>   the NPC's standing mode and its mandate's current version
+>   (silent refuses via the module's own code, passed through);
+>   silence commits the owner's explicit §8 non-response — one
+>   entry, one write, `changes: []`.
+> - **Hash parity confirmed at assembly** (probe + a durable
+>   harness assertion): Vera's `computeRuleHash` and PR-2's copied
+>   `computeDelegationRuleHash` both produce the pinned S4e digest
+>   `0b37d446…4520`, on-vector and off.
+> - §9/§10 verification for the two collections: PR-1's landed
+>   postures + brief §10's exact index set cover the module's
+>   access patterns; the kind ≤ 80 bound is enforced at the
+>   module's single mint path under committer-only creation — no
+>   rules/index change rides this PR (reasoning in §7).
+> - `tests/situations-harness.ts` (32) chained into `test:sim`;
+>   governance harness 44 → 54 (G4 rewritten — no deferrals remain;
+>   G11 situation decisions + parity).
+>
+> **Flags in the open:** Vera's F1–F8 ride as **PR-review
+> ratification items, UNDECIDED** — assembly adopted none (F3,
+> step-4 no-cascade, stands as built). Lead assembly decisions
+> D-1–D-6 are named in §7 (audience gate; `decidedAt` nulled under
+> the clock-free adapter discipline; silence `resolvedSeq`;
+> delegate fences by code precedent; `markSituationHandled` /
+> `returnSituationToOpen` deliberately not action kinds; one
+> descriptor-summary correction).
+>
+> Regression: full pure battery + module suites green locally
+> (13 harnesses, incl. governance 54 and situations 32); CI carries
+> the emulator suites. README updated per the standing rule. No
+> production deploy or data access.
