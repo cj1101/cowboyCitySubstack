@@ -366,12 +366,28 @@ missing completion, in three places:
   coercion predated that additive field and **dropped it**; the
   coercion keeps it now, `outcomeLine` renders a declined history
   line ahead of the mode branches ("Closed as handled — declined by
-  its owner. The draft binds nothing."), and the card's decision line
-  renders "You declined the draft." for a declined record. With
-  PR-4's engine wiring, **P5-G11's confirmation half is closable at
-  the gate on PR-4 + PR-5**, per PR-4's own record. (The confirm half
-  of the pair — adopting a draft — still binds through the draft's
-  own confirmable act, unchanged; F3 was only ever about decline.)
+  its owner (handled-by-declining). The draft stays inert in history
+  and binds nothing."), and the card's decision line renders "You
+  declined the draft." for a declined record. With PR-4's engine
+  wiring, **P5-G11's confirmation half is closable at the gate on
+  PR-4 + PR-5**, per PR-4's own record. (The confirm half of the
+  pair — adopting a draft — still binds through the draft's own
+  confirmable act, unchanged; F3 was only ever about decline.)
+
+One copy refinement rides its own Lead commit, adopted at assembly:
+the decline section's paragraph and the declined history line were
+tightened to name the §6.1 outcome in the brief's and the engine's
+own words — *handled-by-declining* — and to name the outcome verb
+as what is recorded. Final card copy: "Declining is a complete
+outcome — handled-by-declining: your decision and its outcome verb
+are recorded on the card and in the Log, the draft stays inert in
+history exactly as it was written, and nothing in it is adopted or
+acted on. The matter does not return to your queue." The refinement
+was re-verified after adoption (tsc, scoped lint, and a full clean
+build — the first rebuild attempt hit a stale `.next` type-cache
+miss on an unrelated generated route type and was re-run from a
+clean `.next`; the final build is green with both routes in the
+prerender manifest).
 
 **Assembly item 2 — F7 DISPOSITION: no index added.** June's
 fire-stats read (`loadRuleFireStats` in `lib/situations/client.ts`)
