@@ -1,10 +1,14 @@
 # Phase 4 step 7 — Market slice: prep report (Cato)
 
-Status: BUILDING. Branch `p4/market` in `p4-market-clone`, base
-`63a1445` (tree == master `b5eb611`: Finance + Catalogue I + Defensive
-+ Chains + Catalogue II landed; registry at 44 descriptors). Base
-verified tsc-clean before any edit (`npm ci` succeeded in this clone;
-no symlink needed).
+Status: COMPLETE (module build). Branch `p4/market` in
+`p4-market-clone`, base `63a1445` (tree == master `b5eb611`: Finance +
+Catalogue I + Defensive + Chains + Catalogue II landed; registry at
+44 descriptors). Base verified tsc-clean before any edit (`npm ci`
+succeeded in this clone; no symlink needed). Final state: repo
+`tsc --noEmit` clean; `tests/market-harness.ts` 27/27 green; the
+cat1/cat2/chains/defense harnesses re-run green (no regression from
+the §3 finance landings). No registry/rules/index/verify/businesses/
+laws edits; no push; nothing deployed.
 
 Governing texts: `market-systems-spec.md` (my spec, M-01–M-12),
 `phase4-implementation-brief.md` §7.3, `phase4-build-prep-report.md`
@@ -193,4 +197,228 @@ verified before editing).
 
 ## 4. Record shapes (as built)
 
-(To be completed as the module lands; §5–§7 follow at completion.)
+All shapes live in `lib/sim/marketRecords.ts` (builders stamp
+`stateVersion`/`lastChangedSeq`/`lastResolutionId`/`createdAt`/
+`updatedAt` per the family convention). Paths are root collections
+(D-2) so any handler can read/write any counterparty's records in
+one event.
+
+- **Market Account** — `sim_market_account/main`:
+  `{ kind: "market-account", cashRubars, seedRuleId: "M-00",
+  seedRubars: 1_000_000, indexDivisorBaseRubars: number|null,
+  genesisListingCorporationId: string|null }` + version fields.
+  Founded only by the M-00 act (§6); handlers never lazy-create it —
+  trade events reject `market-account-missing` while it is absent.
+- **Listing** — `sim_market_listings/{corporationId}` (D-3):
+  `{ corporationId, homeCityId, ownerMemberId, status:
+  "listed"|"delisted", tradingStatus: "open"|"halted"|"suspended"|
+  "delisted", referencePriceRubars, officialPriceRubars,
+  lastTradePriceRubars|null, tradedSinceLastRepricing,
+  committedFloatShares, publicHeldShares, cumulativeFeesRubars,
+  listedAtSeq, delistedAtSeq|null, finalLiquidationPriceRubars|null,
+  haltReason: null|"downtime"|"owner-suspension", haltedAtSeq|null }`.
+  The float invariant at every commit: `committedFloatShares` ==
+  resting float-offer quantity; `publicHeldShares` == Σ non-founder
+  holdings; the index float is their sum (§3.2).
+- **Holding** — `sim_holdings/{memberId}__{corporationId}` (D-2):
+  `{ memberId, corporationId, homeCityId, quantityShares,
+  committedShares, costBasisRubars }`. `committedShares` backs the
+  holder's resting SELL orders (incl. the founder's float offer);
+  `quantityShares − committedShares` is the free balance every verb
+  validates against. Cost basis moves only on acquisitions.
+- **Order** — `sim_market_orders/{orderId}`: `{ orderId,
+  corporationId, homeCityId, memberId, side, type: "limit"|"market",
+  kind: "standard"|"float-offer", quantityShares (remaining),
+  originalQuantityShares, filledShares, limitPriceRubars|null
+  (protection cap for market orders; the float price for offers),
+  status: "resting"|"filled"|"cancelled"|"expired",
+  cancelReason|null, placedAtSeq, expiresAtSeq|null }`.
+  Ids: `ord_<resolutionId>` for placed orders, `float_<corporationId>`
+  for the one standing float offer per listing.
+  `cancelReason` vocabulary: `owner-cancel`, `float-recall`,
+  `unfilled-market-remainder`, `insufficient-cash-at-settlement`,
+  `listing-liquidated` (+ `expired` is a status, not a reason).
+- **Trade (the tape)** — `sim_market_trades/{tradeId}`: `{ tradeId,
+  corporationId, homeCityId, buyerMemberId, sellerMemberId,
+  quantityShares, priceRubars, valueRubars, buyerFeeRubars,
+  sellerFeeRubars, incomingOrderId, restingOrderId, seq }`.
+  Ids: `trade_<resolutionId>_<nn>` (two-digit execution counter).
+  M-09 buyback fills carry the disclosed spellings
+  `buyerMemberId: "company:<corporationId>"` and
+  `incomingOrderId: "buyback_<resolutionId>"` — the buyer is the
+  company, never a person, and the tape says so.
+- **Corporation record deltas** (additive only): `retiredShares`
+  (new field, written by M-09/M-10; absent reads as 0),
+  `valuationRubars` cache (official × live shares, written by every
+  repricing incl. M-01's opening), `listed`, `sharesOutstanding`,
+  `paidInCapitalRubars`, `openingReferencePriceRubars`,
+  `lastJudgment` (already folded by Cat II assembly; M-01/M-02/M-06
+  are their market writers).
+- **Change-field spellings** (the conservation checker's closed
+  vocabulary): `marketAccount.cashRubars` on null-city entries;
+  `marketListings/<id>.<field>`, `holdings/<memberId>__<id>.<field>`,
+  `marketOrders/<id>.<field>`, `marketTrades/<id>.<field>` on
+  null-city entries; company legs as
+  `corporations/<id>.companyCashRubars` on the home-city entry;
+  treasury legs as `stats.treasuryRubars` on the creditor city's
+  entry; personal legs as `memberAccounts/<id>.cashRubars` on
+  null-city entries. Zero-fee M-04 transfers state their fee line in
+  entry TEXT only — a `marketAccount.cashRubars` change record with
+  no matching write would break the checker's Log⇄writeSet
+  bijection, correctly.
+
+## 5. Lead assembly (exact — specified, not taken)
+
+1. **Registry merge** (`lib/sim/rules/registry.ts`): spread
+   `MARKET_DESCRIPTORS` (from `lib/sim/rules/market.ts`) into
+   `RULE_DESCRIPTORS`, and fold `MARKET_FINANCE_ADDITIONS` onto the
+   `finance` descriptor exactly as `BUSINESS_REGISTERED` folds
+   Catalogue II's additions (class from the addition when the base
+   carries none, `moneyPaths` unioned, `invokesRules` unioned).
+   Result: **57 descriptors** (44 + M-00…M-12).
+2. **`undoClass` (P4-K25)**: `RuleDescriptor` has no such field
+   today. Add `undoClass?: "locked-at-commit" | …` to the type and
+   fold `MARKET_UNDO_CLASSES` (`{ M-03, M-04, M-10 }`) onto the
+   market descriptors at the same merge. Note: `lib/sim/undo.ts`
+   does not read any such field yet — until it does, the class is
+   documentary; the Lead confirms whether assembly also teaches the
+   undo engine to refuse these ruleIds' events outright.
+3. **`verify.ts` holdings supply** (the PR #33 obligation — wire
+   ONLY after the §6 data step completes): in
+   `verifyStandingConservation` (a) add the market rule ids to
+   `financeRuleIds` (`...Object.keys(MARKET_DESCRIPTORS)` once
+   registered — M-00…M-11 move or accompany money; M-12 cites
+   nothing); (b) extend `isFinancePath` with
+   `path.startsWith("sim_market_account/")`; (c) collect
+   `holdingDocs` in the state-docs pass
+   (`segments[0] === "sim_holdings" && segments.length === 2`) and
+   pass `holdings: holdingDocs` into the existing
+   `checkStandingRecords({...})` call, replacing the Cat II comment
+   at that site ("NO holdings supply is wired… stays inert until
+   step 7"). The harness's `assertStanding` is this exact wiring in
+   miniature and is green over every storyline world.
+4. **`firestore.rules` posture for the five new collections**
+   (`sim_market_account`, `sim_market_listings`, `sim_holdings`,
+   `sim_market_orders`, `sim_market_trades`): none has a match block
+   today (grep-verified). Family-consistent recommendation:
+   committer-only writes, viewer reads — the `sim_cases` posture
+   from the Defensive assembly. Until these land, production
+   resolution of any market action cannot read its own records
+   under the committer identity; treat as assembly-blocking.
+5. **`firestore.indexes.json`** (Lead-only): one composite index —
+   `sim_market_trades` on (`corporationId` ASC, `seq` ASC) for the
+   tape/publication reads. The book and holdings queries are
+   equality-only and need no composite.
+6. **`test:sim`**: chain `npx tsx tests/market-harness.ts` after the
+   cat2 harness (the e85a620 pattern).
+7. **`businesses.ts` seams — SPECIFIED, NOT TAKEN** (the module was
+   built so every seam is a composition, not an edit war):
+   (i) R-07 listed Contract cash leg: replace the
+   `cash-leg-requires-market-module` rejection with
+   `composeDistribution({ entryRuleIds: ["R-07","M-08"],
+   invokedByRuleId: "R-07", … })` followed by
+   `composeMarketRepricing({ invokedByRuleId: "R-07", … })` when the
+   Lead wants withdrawals to succeed in-verb. **Recommendation: the
+   fail-closed rejection is also lawful as-is** — it already routes
+   owners to the M-08/M-09 verbs, which ARE the un-block (harness
+   check 16 proves the pair). Take (i) only as a UX decision, never
+   as a correctness need. (ii) R-07 listed Dissolve: same shape with
+   `composeLiquidation({ entryRuleIds: ["R-07","M-10"] })`; same
+   recommendation. (iii) R-07 listed branches + any future
+   input-changing event: compose `composeMarketRepricing` in-event
+   (P4-K18's "M-06 is the only writer" cuts both ways — listed
+   branches currently declare `invokesRules: ["M-06"]` but never
+   reprice; needs `listingPath(corporationId)` + the listings query
+   added to `corporationActionReadPlan` — the structures query is
+   already there). (iv) **Named F-03 gap**: F-03 funding of a listed
+   company changes company cash (an M-06 input) but cannot reprice
+   until a later market event; finance-side composition of
+   `composeMarketRepricing` has the same read-plan shape as (iii).
+   Until (iii)/(iv) land, prices move at the next market verb — a
+   disclosed lag, not a silent one: every market entry prints the
+   inputs it used. (v) **Step-11 hand-off**: M-06 composition inside
+   ripening plans (structure completions/repairs changing coded
+   inputs while no market verb fires) belongs to the pending-rules
+   engine work, not to a handler edit.
+
+## 6. Operated data step (the gate before §5 item 3)
+
+In order, against production corpora, each step a player/fabric act
+— no direct writes:
+
+1. **Found the Market Account**: one member submits
+   `found_market_account` (M-00). Until this lands, every trade verb
+   rejects `market-account-missing` and listings anchor nothing.
+2. **Backfill report**: run `planFounderHoldingBackfill` (pure,
+   exported from `lib/sim/marketRecords.ts`) over all standing
+   corporation docs + holdings + listings. For corpora that predate
+   step 7 the expected output is: one gap per company listed at
+   R-06 founding, `missingShares == sharesOutstanding` (no holdings
+   exist yet), zero gaps elsewhere. Any OTHER shape (a standing
+   holding short of issued, a listing whose founder holding exceeds
+   live shares) is a data incident to surface, not to paper over —
+   M-01 completion itself rejects the over-issued shape as
+   `share-ledger-inconsistent`.
+3. **Completion acts**: for each gap company, its owner submits
+   `list_company` (M-01 branch (a)) — optionally with `floatShares`
+   to open a float in the same act. This creates the listing record
+   + founder holding from the founding figures and anchors the
+   index divisor if the float is the realm's first positive one.
+4. **Only then** wire the `verify.ts` holdings supply (§5 item 3).
+   Wired earlier, the checker would — correctly — fail every
+   standing listed company that has not yet been completed; wired
+   after, the assertion Σ holdings + retired == sharesOutstanding
+   guards the whole corpus from that seq forward.
+
+## 7. Flags (surfaced, not flipped)
+
+- **D-1 / brief §7.3 wording** (Vera/Lead): the brief's market-maker
+  "owned inventory" language is superseded by P4-K21(i) custody;
+  the brief text should be aligned so the next reader does not
+  re-derive the conflict.
+- **D-2 holdings shape** (Dana/Lead ratification): top-level
+  `sim_holdings` vs systems-spec §10.1's subcollection spelling —
+  forced by the F-01 read contract (query results cannot seed doc
+  reads; settlement touches arbitrary counterparties). §5 item 4's
+  rules posture assumes the top-level shape.
+- **D-4 spec errata candidate** (Vera): market spec M-09's
+  "(sharesOutstanding falls)" contradicts the conservation identity
+  under any reading where holdings also fall; the module implements
+  cumulative-issued + `retiredShares` (identity exact, harness
+  check 18). If Vera prefers falling outstanding, the checker
+  assertion and D-4 flip together — a spec decision, not a code
+  preference.
+- **D-6 M-00 numbering + seed** (ratify at assembly): the founding
+  act is numbered M-00 as genesis-class, outside M-01–M-12; the
+  1,000,000 R seed is the N-5 lock proposal. Renumbering is a
+  one-line change in `market.ts` + `conservation.ts` `MINT_RULES`
+  if the Lead prefers it inside the sequence.
+- **D-7 salvage** (Vera): M-10 discloses structure salvage and does
+  not pay it — paying would mint unbacked cash and break the
+  conservation invariant the checker proves. A salvage buyer or a
+  treasury-funded salvage pool is a design addition, not a patch.
+- **§4.1 official-price wording** (Vera): as written, a print in
+  the repricing event supersedes the fresh reference for the
+  official price; harness check 18 pins the consequence (official
+  140 against reference 110 in one M-09 event) and M-08 distributions
+  without prints reprice the official normally (check 16). If the
+  intent was "official follows reference except between repricings,"
+  the composer is the single place to change.
+- **D-5 escrow** (Phase 11 candidate): resting buys are unreserved;
+  crossing re-validation + in-event cancellation is the v1
+  discipline. True escrow needs a reserved-balance field on member
+  accounts (finance's call) and a reservation release protocol.
+- **Custody block-quote derivation** (already flagged in
+  `lib/market/marketMaker.ts`): the spec's block-size derivation
+  assumed an MM-inventory counterparty; under custody the derived
+  cap/quote figures are display + placement-validation inputs only.
+- **M-12 stub**: the descriptor carries `actionKinds: []` — the
+  market publication layer is step 9's R-30 work; the tape records
+  (§4) are written now so R-30 reads, never reconstructs.
+- **NPC actors**: every market handler rejects NPC actors
+  (`npc-mandate-unavailable`) — NPC market mandates are unbuilt
+  design, consistent with the family's posture elsewhere.
+- **D-8 earnings proxy**: no module writes `earningsProxyRubars`
+  yet; M-06 reads a standing finite integer or treats the term as
+  absent (null, logged). The first writer (a finance/business
+  earnings record) inherits the closed-list seat unchanged.
