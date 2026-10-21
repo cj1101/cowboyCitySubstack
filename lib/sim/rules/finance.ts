@@ -87,6 +87,7 @@ import {
 } from "../../finance/transfer";
 import {
   accruedUnsettledRubars,
+  bankBalanceSheet,
   bankBlockOf,
   bankCashRubars,
   buildBankCharterBlock,
@@ -2076,6 +2077,840 @@ function settleInterestCredited(
       },
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Banking loans — shared machinery (B-05..B-11).
+// ---------------------------------------------------------------------------
+
+interface LoanTarget {
+  loanPath: string;
+  loan: BankLoanRecord;
+  bank: BankTarget & { cityId: string; corporationId: string };
+}
+
+function parseLoanTarget(
+  ctx: HandlerContext,
+  descriptorId: string
+): LoanTarget | ResolutionPlan {
+  const loanId = stringField(ctx.action, "loanId");
+  if (!loanId) {
+    return rejectedPlan(descriptorId, "malformed-action", [descriptorId], `${descriptorId}: the action requires loanId.`);
+  }
+  const bankOrPlan = parseBankTarget(ctx, descriptorId);
+  if ("outcome" in bankOrPlan) return bankOrPlan;
+  const cityId = stringField(ctx.action, "cityId") as string;
+  const corporationId = stringField(ctx.action, "corporationId") as string;
+  const loanPath = bankLoanPath(loanId);
+  const loan = loanRecordOf(snapshotDoc(ctx.snapshot, loanPath));
+  if (!loan) {
+    return rejectedPlan(descriptorId, "loan-not-found", [descriptorId], `${descriptorId}: no loan record at ${loanPath}.`);
+  }
+  if (loan.bankCorporationId !== corporationId || loan.bankCityId !== cityId) {
+    return rejectedPlan(descriptorId, "loan-bank-mismatch", [descriptorId], `${descriptorId}: loan ${loanId} names bank ${loan.bankCorporationId} in ${loan.bankCityId}; the action names ${corporationId} in ${cityId}. The stored record governs.`);
+  }
+  return { loanPath, loan, bank: { ...bankOrPlan, cityId, corporationId } };
+}
+
+/** Control of a borrower ref by the actor (the B-03 depositor
+ * discipline, restated for borrowers): personal = the member;
+ * company = its ownerMemberId; treasury = its governor. Returns a
+ * rejection plan or null. */
+function borrowerControlRejection(
+  ctx: HandlerContext,
+  descriptorId: string,
+  borrower: LedgerRef
+): ResolutionPlan | null {
+  const actorId = actorMemberId(ctx.action.actor);
+  if (borrower.kind === "personal") {
+    if (actorId !== borrower.memberId) {
+      return rejectedPlan(descriptorId, "not-borrower", [descriptorId], `${descriptorId}: a personal loan is acted on by its borrower.`);
+    }
+    return null;
+  }
+  if (borrower.kind === "company") {
+    const corp = snapshotDoc(ctx.snapshot, corporationPath(borrower.cityId, borrower.corporationId));
+    if (!corp || corp.ownerMemberId !== actorId) {
+      return rejectedPlan(descriptorId, "not-borrower", [descriptorId], `${descriptorId}: a company loan is acted on by the borrower company's ownerMemberId.`);
+    }
+    return null;
+  }
+  if (borrower.kind === "treasury") {
+    const authority = checkCityAuthority(ctx.snapshot, borrower.cityId, ctx.action.actor);
+    if (!authority.ok) {
+      return rejectedPlan(descriptorId, "not-borrower", [descriptorId], `${descriptorId}: a treasury loan is acted on by its governor: ${authority.reason}.`);
+    }
+    return null;
+  }
+  return rejectedPlan(descriptorId, "borrower-not-eligible", [descriptorId], `${descriptorId}: this ledger kind cannot borrow — loans run to members, companies, and treasuries, never the Market Account, the Exterior, or the fund (M6).`);
+}
+
+/** The member who controls a borrower ref for share pledges
+ * (holdings are member-keyed): the member themselves, or the
+ * borrower company's owner. Treasury borrowers hold no shares. */
+function pledgorMemberId(
+  ctx: HandlerContext,
+  borrower: LedgerRef
+): string | null {
+  if (borrower.kind === "personal") return borrower.memberId;
+  if (borrower.kind === "company") {
+    const corp = snapshotDoc(ctx.snapshot, corporationPath(borrower.cityId, borrower.corporationId));
+    return typeof corp?.ownerMemberId === "string" ? corp.ownerMemberId : null;
+  }
+  return null;
+}
+
+function parseCollateral(value: unknown): LoanCollateral | null {
+  if (typeof value !== "object" || value === null) return null;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "none" || c.kind === undefined) return { kind: "none" };
+  if (
+    c.kind === "shares" &&
+    typeof c.corporationId === "string" &&
+    typeof c.cityId === "string" &&
+    typeof c.quantityShares === "number" &&
+    Number.isInteger(c.quantityShares) &&
+    c.quantityShares > 0
+  ) {
+    return { kind: "shares", corporationId: c.corporationId, cityId: c.cityId, quantityShares: c.quantityShares };
+  }
+  if (c.kind === "structure" && typeof c.structureId === "string" && typeof c.cityId === "string") {
+    return { kind: "structure", structureId: c.structureId, cityId: c.cityId };
+  }
+  return null;
+}
+
+function collateralEchoMatches(action: SimAction, loan: BankLoanRecord): boolean {
+  const echo = parseCollateral(sa(action).collateral);
+  if (!echo) return false;
+  const stored = loan.collateral;
+  if (echo.kind !== stored.kind) return false;
+  if (echo.kind === "shares" && stored.kind === "shares") {
+    return echo.corporationId === stored.corporationId && echo.quantityShares === stored.quantityShares;
+  }
+  if (echo.kind === "structure" && stored.kind === "structure") {
+    return echo.structureId === stored.structureId;
+  }
+  return true;
+}
+
+/** Supersede a standing card in-event (the B-05 cancel discipline:
+ * the card leaves the open queue as history, no successor card is
+ * minted). Returns the situation path claimed, or null. */
+export function supersedeSituationWhere(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  predicate: (doc: SimSituation) => boolean,
+  args: { resolvedSeq: number; resolutionId: string }
+): string | null {
+  const doc = findSituation(ctx, (d) => d.status === "open" && predicate(d));
+  if (!doc) return null;
+  const superseded: SimSituation = {
+    ...doc,
+    status: "superseded",
+    resolvedSeq: args.resolvedSeq,
+    resolvedByResolutionId: args.resolutionId,
+    updatedAt: new Date(ctx.snapshot.now),
+  };
+  planWrite(plan, ctx.snapshot, situationPath(doc.situationId), superseded as unknown as Record<string, unknown>, "state", [
+    "status",
+    "resolvedSeq",
+    "resolvedByResolutionId",
+    "updatedAt",
+  ]);
+  return situationPath(doc.situationId);
+}
+
+// ---------------------------------------------------------------------------
+// B-05 — offer_loan / cancel_loan_offer (amendment §3.3). The offer
+// is the bank owner's Tier B standing act: its terms are complete
+// and recorded verbatim; acceptance (B-06) executes them. The
+// branch (cash | credit) is stated HERE and may not switch later
+// (V2-§2.1). Insider-ness is derived at offer and stored, so the
+// cap and the Log never recompute it differently (§3.3).
+// ---------------------------------------------------------------------------
+
+function offerLoanHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-05";
+  const tierB = rejectTierBNpc(ctx, descriptorId);
+  if (tierB) return tierB;
+  const bankOrPlan = parseBankTarget(ctx, descriptorId);
+  if ("outcome" in bankOrPlan) return bankOrPlan;
+  const cityId = stringField(ctx.action, "cityId") as string;
+  const corporationId = stringField(ctx.action, "corporationId") as string;
+  const bank: BankTarget & { cityId: string; corporationId: string } = { ...bankOrPlan, cityId, corporationId };
+  const ownerId = actorMemberId(ctx.action.actor);
+  if (!ownerId || ownerId !== bank.corp.ownerMemberId) {
+    return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], "B-05: a loan offer is the bank owner's act — offers are the charter's standing terms made specific, and only the owner states them.");
+  }
+  if (deriveBankHealth(bank.corp) === "insolvent") {
+    return rejectedPlan(descriptorId, "bank-failed", [descriptorId], `B-05: ${corporationId} derives failed (insolvent, REC-6) — a failed bank makes no offers; its book resolves in liquidation.`);
+  }
+  const borrower = parseLedgerRef(sa(ctx.action).borrower);
+  if (!borrower || borrower.kind === "market" || borrower.kind === "exterior" || borrower.kind === "institution") {
+    return rejectedPlan(descriptorId, "borrower-not-eligible", [descriptorId], "B-05: the borrower must be a member, a company, or a treasury ledger — households (the Exterior), the Market Account, and the fund never borrow (M6).");
+  }
+  let borrowerCompanyOwner: string | null = null;
+  if (borrower.kind === "company") {
+    const borrowerCorp = snapshotDoc(ctx.snapshot, corporationPath(borrower.cityId, borrower.corporationId));
+    if (!borrowerCorp) {
+      return rejectedPlan(descriptorId, "borrower-not-found", [descriptorId], `B-05: no corporation record for borrower ${borrower.corporationId}.`);
+    }
+    borrowerCompanyOwner = typeof borrowerCorp.ownerMemberId === "string" ? borrowerCorp.ownerMemberId : null;
+  }
+  const principal = positiveAmount(ctx.action, "principalRubars");
+  if (principal === null) {
+    return rejectedPlan(descriptorId, "malformed-loan-terms", [descriptorId], "B-05: principalRubars must be a positive integer.");
+  }
+  const rate = sa(ctx.action).rateBpsPerKseq;
+  if (typeof rate !== "number" || !Number.isInteger(rate) || rate < 0) {
+    return rejectedPlan(descriptorId, "malformed-loan-terms", [descriptorId], "B-05: rateBpsPerKseq must be a non-negative integer stated in the confirmed action.");
+  }
+  if (rate > RATE_CAP_BPS_PER_KSEQ) {
+    return rejectedPlan(descriptorId, "rate-above-cap", [descriptorId], `B-05: rate ${rate} exceeds the published hard cap of ${RATE_CAP_BPS_PER_KSEQ} bps per kseq (§4.4).`);
+  }
+  if (rate > bank.bank.loanRateCeilingBpsPerKseq) {
+    return rejectedPlan(descriptorId, "rate-above-charter-ceiling", [descriptorId], `B-05: rate ${rate} exceeds ${corporationId}'s chartered loan-rate ceiling of ${bank.bank.loanRateCeilingBpsPerKseq} bps per kseq.`);
+  }
+  const fundingSource = sa(ctx.action).fundingSource === "credit" ? "credit" : "cash";
+  let createdDepositRate: number | null = null;
+  if (fundingSource === "credit") {
+    const stated = sa(ctx.action).createdDepositRateBpsPerKseq;
+    createdDepositRate = typeof stated === "number" && Number.isInteger(stated) && stated >= 0 ? stated : 0;
+    if (createdDepositRate > bank.bank.depositRateCeilingBpsPerKseq) {
+      return rejectedPlan(descriptorId, "created-rate-above-ceiling", [descriptorId], `B-05: the created deposit's rate ${createdDepositRate} exceeds ${corporationId}'s chartered deposit-rate ceiling of ${bank.bank.depositRateCeilingBpsPerKseq} bps per kseq — a created deposit is a deposit, and the ceiling binds it at offer (BNK-D14).`);
+    }
+  }
+  const installmentCount = sa(ctx.action).installmentCount;
+  const dueIntervalSeqs = sa(ctx.action).dueIntervalSeqs;
+  const defaultMissedCount = sa(ctx.action).defaultMissedCount;
+  for (const [label, value] of [
+    ["installmentCount", installmentCount],
+    ["dueIntervalSeqs", dueIntervalSeqs],
+    ["defaultMissedCount", defaultMissedCount],
+  ] as const) {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+      return rejectedPlan(descriptorId, "malformed-loan-terms", [descriptorId], `B-05: ${label} must be a positive integer — the schedule is a term of the offer, stated in full at preview (§3.1).`);
+    }
+  }
+  const defaultRate = sa(ctx.action).defaultRateBpsPerKseq;
+  if (defaultRate !== undefined && defaultRate !== null) {
+    if (typeof defaultRate !== "number" || !Number.isInteger(defaultRate) || defaultRate < 0 || defaultRate > RATE_CAP_BPS_PER_KSEQ) {
+      return rejectedPlan(descriptorId, "malformed-loan-terms", [descriptorId], "B-05: defaultRateBpsPerKseq, when stated, must be an integer within the published rate cap — no variable rates exist (M14).");
+    }
+  }
+  const prepaymentFee = sa(ctx.action).prepaymentFeeRubars;
+  if (prepaymentFee !== undefined && prepaymentFee !== null) {
+    if (typeof prepaymentFee !== "number" || !Number.isInteger(prepaymentFee) || prepaymentFee < 0) {
+      return rejectedPlan(descriptorId, "malformed-loan-terms", [descriptorId], "B-05: prepaymentFeeRubars, when stated, must be a non-negative integer.");
+    }
+  }
+  const collateral = parseCollateral(sa(ctx.action).collateral ?? { kind: "none" });
+  if (!collateral) {
+    return rejectedPlan(descriptorId, "malformed-loan-terms", [descriptorId], "B-05: collateral must be { kind: \"none\" } | { kind: \"shares\", corporationId, cityId, quantityShares } | { kind: \"structure\", structureId, cityId }.");
+  }
+  if (collateral.kind === "shares" && borrower.kind === "treasury") {
+    return rejectedPlan(descriptorId, "collateral-not-pledgeable", [descriptorId], "B-05: a treasury borrower holds no shares (holdings are member-keyed) — share collateral cannot be pledged for it. Offer structure collateral or none.");
+  }
+  if (collateral.kind === "structure") {
+    // Structure ownership in this world is the corporation link
+    // (linkedStructureIds) — the one ownership fact a pledge can
+    // validate against. A structure pledge therefore requires a
+    // company borrower whose corporation links the structure.
+    if (borrower.kind !== "company") {
+      return rejectedPlan(descriptorId, "collateral-not-pledgeable", [descriptorId], "B-05: structure collateral is pledgeable only by a company borrower whose corporation links the structure (linkedStructureIds is the world's structure-ownership record).");
+    }
+    const borrowerCorp = snapshotDoc(ctx.snapshot, corporationPath(borrower.cityId, borrower.corporationId));
+    const linked = (borrowerCorp?.linkedStructureIds as unknown[] | undefined) ?? [];
+    if (!linked.includes(collateral.structureId)) {
+      return rejectedPlan(descriptorId, "collateral-not-pledgeable", [descriptorId], `B-05: structure ${collateral.structureId} is not linked to borrower ${borrower.corporationId} — a bank can only take a lien on what the record shows the borrower owns.`);
+    }
+  }
+  const insider = isInsiderBorrower({
+    borrower,
+    bankOwnerMemberId: ownerId,
+    bankCorporationId: corporationId,
+    borrowerCompanyOwnerMemberId: borrowerCompanyOwner,
+  });
+
+  const plan = emptyPlan(descriptorId);
+  const loanId = `loan_${ctx.resolutionId}`;
+  const loanPath = bankLoanPath(loanId);
+  const recordSeq = nextEntrySeq(ctx.snapshot, plan);
+  const summarySeq = recordSeq + 1;
+  const doc = buildLoanOfferDoc({
+    loanId,
+    bankCorporationId: corporationId,
+    bankCityId: cityId,
+    borrower,
+    principalRubars: principal,
+    fundingSource,
+    rateBpsPerKseq: rate,
+    createdDepositRateBpsPerKseq: createdDepositRate,
+    defaultRateBpsPerKseq: typeof defaultRate === "number" ? defaultRate : null,
+    prepaymentFeeRubars: typeof prepaymentFee === "number" ? prepaymentFee : null,
+    installmentCount: installmentCount as number,
+    dueIntervalSeqs: dueIntervalSeqs as number,
+    defaultMissedCount: defaultMissedCount as number,
+    collateral,
+    insider,
+    offerResolutionId: ctx.resolutionId,
+    offeredAtSeq: summarySeq,
+  });
+  planWrite(plan, ctx.snapshot, loanPath, doc, "state", [
+    "status",
+    "principalRubars",
+    "rateBpsPerKseq",
+    "fundingSource",
+    "collateral",
+    "insider",
+  ]);
+  // B1: the borrower's proposal card (Pattern E) — minted before
+  // the record entry pushes so the entry claims its records.
+  const addressing = situationAddressingFor(ctx.snapshot, borrower, cityId);
+  const card = mintSituation(
+    plan,
+    ctx,
+    buildProposalSituation({
+      cityId,
+      audienceCityId: cityId,
+      audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+      recipientUid: addressing.recipientUid ?? null,
+      severity: "routine",
+      createdSeq: summarySeq,
+      now: ctx.snapshot.now,
+      sourceSeq: summarySeq,
+      sourceResolutionId: ctx.resolutionId,
+      sourceKind: "log",
+      sourceId: ctx.resolutionId,
+      title: `Loan offer from ${corporationId}`,
+      summary: `${corporationId} offers ${ledgerLabel(borrower)} a ${fundingSource}-funded loan of ${principal} R at ${rate} bps/kseq over ${String(installmentCount)} installments. Accepting (B-06) funds it on these exact terms; the offer rests until accepted or cancelled.`,
+      counterpartyCityId: cityId,
+      amountRubars: principal,
+      tags: ["loan-offer"],
+      ruleIds: ["B-05", "B-06"],
+      classes: ["Tier B"],
+      proposalRef: loanId,
+    })
+  );
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId,
+      cityIds: [cityId],
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange(`bankLoans/${loanId}.status`, null, "offered", "B-05 loan offer — the record is born offered; funding (B-06) is a separate event"),
+        fieldChange(`bankLoans/${loanId}.principalRubars`, null, principal, "B-05 offered principal"),
+        fieldChange(`bankLoans/${loanId}.rateBpsPerKseq`, null, rate, "B-05 offered rate"),
+        fieldChange(`bankLoans/${loanId}.fundingSource`, null, fundingSource, "B-05 funding branch, stated at offer and unswitchable (V2-§2.1)"),
+      ],
+      recordsCreated: [loanPath, ...card.created],
+      recordsUpdated: card.updated,
+      summaryText: `B-05: ${corporationId} offers a ${fundingSource}-funded loan of ${principal} R to ${ledgerLabel(borrower)} at ${rate} bps/kseq — ${String(installmentCount)} installments every ${String(dueIntervalSeqs)} seqs, default at ${String(defaultMissedCount)} missed${insider ? "; INSIDER loan (derived at offer, §3.3)" : ""}. The offer rests until accepted (B-06) or cancelled; resting offers never expire.`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "offer-loan",
+    scope: "bank",
+    cityId,
+    summaryText: `Offered a ${fundingSource}-funded loan of ${principal} R from ${corporationId} to ${ledgerLabel(borrower)} at ${rate} bps/kseq (loan ${loanId})${insider ? " — insider loan, derived and recorded" : ""}. The borrower's proposal card stands in their Situations.`,
+    classificationExtra: {
+      loan: { loanId, fundingSource, insider, principalRubars: principal },
+    },
+  });
+}
+
+function cancelLoanOfferHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-05";
+  const targetOrPlan = parseLoanTarget(ctx, descriptorId);
+  if ("outcome" in targetOrPlan) return targetOrPlan;
+  const { loanPath, loan, bank } = targetOrPlan;
+  if (loan.status !== "offered") {
+    return rejectedPlan(descriptorId, "loan-not-offered", [descriptorId], `B-05: loan ${loan.loanId} is ${loan.status}; only a resting offer can be cancelled.`);
+  }
+  const actorId = actorMemberId(ctx.action.actor);
+  const isBankOwner = actorId !== null && actorId === bank.corp.ownerMemberId;
+  if (!isBankOwner) {
+    const control = borrowerControlRejection(ctx, descriptorId, loan.borrower);
+    if (control) {
+      return rejectedPlan(descriptorId, "not-offer-party", [descriptorId], "B-05: a resting offer is cancelled by the bank's owner (withdrawal) or by the borrower (decline) — no one else.");
+    }
+  }
+  const plan = emptyPlan(descriptorId);
+  planMutate(plan, ctx.snapshot, loanPath, "state", ["status"], (current) =>
+    current ? { ...current, status: "cancelled" } : current
+  );
+  const summarySeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + 2;
+  const supersededCard = supersedeSituationWhere(
+    plan,
+    ctx,
+    (doc) => doc.kind === "proposal" && doc.detail?.proposalRef === loan.loanId,
+    { resolvedSeq: summarySeq, resolutionId: ctx.resolutionId }
+  );
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bank.cityId,
+      cityIds: [bank.cityId],
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange(`bankLoans/${loan.loanId}.status`, "offered", "cancelled", "B-05 cancel — the offer is withdrawn/declined before funding; nothing was disbursed and nothing is owed"),
+      ],
+      recordsUpdated: [loanPath, ...(supersededCard ? [supersededCard] : [])],
+      summaryText: `B-05: loan offer ${loan.loanId} (${loan.principalRubars} R from ${bank.corporationId} to ${ledgerLabel(loan.borrower)}) cancelled by ${isBankOwner ? "the bank's owner" : "the borrower"}. The borrower's proposal card is superseded in this event.`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "cancel-loan-offer",
+    scope: "bank",
+    cityId: bank.cityId,
+    summaryText: `Cancelled the resting loan offer ${loan.loanId} (${loan.principalRubars} R). No money moved; the offer never funded.`,
+    classificationExtra: { loan: { loanId: loan.loanId, cancelled: true } },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// B-06 — accept_loan (amendment §3.2): the borrower accepts the
+// resting offer and the loan FUNDS in this event. Funding
+// revalidates everything at the funding snapshot — terms frozen at
+// offer, position read fresh: an offer that can no longer lawfully
+// fund rejects IN FULL and the offer rests (it is never silently
+// amended). The branch is the offer's own (fundingSource), never
+// the acceptance's choice. Tier B by construction: the stage
+// refuses NPC acceptances categorically (addendum §2, gate A-8).
+// ---------------------------------------------------------------------------
+
+function acceptLoanHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-06";
+  const tierB = rejectTierBNpc(ctx, descriptorId);
+  if (tierB) return tierB;
+  const targetOrPlan = parseLoanTarget(ctx, descriptorId);
+  if ("outcome" in targetOrPlan) return targetOrPlan;
+  const { loanPath, loan, bank } = targetOrPlan;
+  if (loan.status !== "offered") {
+    return rejectedPlan(descriptorId, "loan-not-offered", [descriptorId], `B-06: loan ${loan.loanId} is ${loan.status}; only a resting offer can be accepted.`);
+  }
+  // The acceptance names the borrower + collateral as read-plan
+  // echoes (the B-03 depositor discipline): the stored record
+  // governs, and a mismatch refuses rather than redirects.
+  const namedBorrower = parseLedgerRef(sa(ctx.action).borrower);
+  if (!namedBorrower || !ledgerRefsEqual(namedBorrower, loan.borrower)) {
+    return rejectedPlan(descriptorId, "borrower-mismatch", [descriptorId], "B-06: the action's borrower ref does not match the loan record's borrower. The stored record governs.");
+  }
+  if (!collateralEchoMatches(ctx.action, loan)) {
+    return rejectedPlan(descriptorId, "collateral-mismatch", [descriptorId], "B-06: the action's collateral echo does not match the offer's recorded collateral. The stored record governs.");
+  }
+  const control = borrowerControlRejection(ctx, descriptorId, loan.borrower);
+  if (control) return control;
+  if (deriveBankHealth(bank.corp) === "insolvent") {
+    return rejectedPlan(descriptorId, "bank-failed", [descriptorId], `B-06: ${bank.corporationId} derives failed (insolvent, REC-6) — its offers cannot fund; the book resolves in liquidation. The offer rests.`);
+  }
+
+  const principal = loan.principalRubars;
+  const branch = fundingSourceOf(loan);
+
+  // -- Collateral pledge validation (both branches; §3.2 step 2) --
+  const pledgor = pledgorMemberId(ctx, loan.borrower);
+  let pledgeHoldingPath: string | null = null;
+  let pledgeHoldingDoc: Record<string, unknown> | null = null;
+  let structurePathForLien: string | null = null;
+  if (loan.collateral.kind === "shares") {
+    const sharesCollateral = loan.collateral;
+    if (!pledgor) {
+      return rejectedPlan(descriptorId, "collateral-unavailable", [descriptorId], "B-06: the borrower controls no member holding to pledge shares from.");
+    }
+    const row = queryDocs(ctx.snapshot, "pledgeHoldings", "sim_holdings").find(
+      ({ doc }) => doc.memberId === pledgor && doc.corporationId === sharesCollateral.corporationId
+    );
+    pledgeHoldingDoc = row?.doc ?? null;
+    pledgeHoldingPath = row?.path ?? null;
+    const quantity = typeof pledgeHoldingDoc?.quantityShares === "number" ? pledgeHoldingDoc.quantityShares : 0;
+    const committed = typeof pledgeHoldingDoc?.committedShares === "number" ? pledgeHoldingDoc.committedShares : 0;
+    const pledged = typeof pledgeHoldingDoc?.pledgedShares === "number" ? pledgeHoldingDoc.pledgedShares : 0;
+    const free = quantity - committed - pledged;
+    if (!pledgeHoldingDoc || free < sharesCollateral.quantityShares) {
+      return rejectedPlan(descriptorId, "insufficient-free-shares", [descriptorId], `B-06: the pledgor holds ${free} free shares of ${sharesCollateral.corporationId} (quantity ${quantity} − committed ${committed} − already pledged ${pledged}); the offer pledges ${sharesCollateral.quantityShares}. Funding rejects in full and the offer rests.`);
+    }
+  }
+  if (loan.collateral.kind === "structure") {
+    const { structureId, cityId: structureCityId } = loan.collateral;
+    structurePathForLien = `sim_cities/${structureCityId}/structures/${structureId}`;
+    const structure = snapshotDoc(ctx.snapshot, structurePathForLien);
+    if (!structure) {
+      return rejectedPlan(descriptorId, "collateral-unavailable", [descriptorId], `B-06: no structure record at ${structurePathForLien} to take a lien on. The offer rests.`);
+    }
+    if (structure.bankLien) {
+      return rejectedPlan(descriptorId, "collateral-encumbered", [descriptorId], `B-06: structure ${structureId} already carries a bank lien — one lien per structure. The offer rests.`);
+    }
+    if (loan.borrower.kind === "company") {
+      const borrowerCorp = snapshotDoc(ctx.snapshot, corporationPath(loan.borrower.cityId, loan.borrower.corporationId));
+      const linked = (borrowerCorp?.linkedStructureIds as unknown[] | undefined) ?? [];
+      if (!linked.includes(structureId)) {
+        return rejectedPlan(descriptorId, "collateral-not-pledgeable", [descriptorId], `B-06: structure ${structureId} is no longer linked to borrower ${loan.borrower.corporationId} at funding — the pledge fails validation and the offer rests.`);
+      }
+    }
+  }
+
+  const plan = emptyPlan(descriptorId);
+  if (loan.borrower.kind === "personal") {
+    composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: loan.borrower.memberId, viaActionKind: "accept_loan" });
+  }
+  // Entry seqs that depend only on the entries already planned:
+  // the loan record entry is next, the created-deposit entry (credit
+  // branch) follows it. The summary seq is computed once every
+  // tagged change exists (below).
+  const loanEntrySeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + 1;
+  const depositEntrySeq = loanEntrySeq + 1;
+
+  // -- Branch funding validations + money/record writes (§3.2) ----
+  const tagged: TaggedChange[] = [];
+  let createdDeposit: BankDepositRecord | null = null;
+  let createdDepositPath: string | null = null;
+  if (branch === "cash") {
+    const bankDocNow = plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? bank.corp;
+    const lendable = Math.max(0, bankCashRubars(bankDocNow) - liquidReserveRubars(bankDocNow));
+    if (principal > lendable) {
+      return rejectedPlan(descriptorId, "insufficient-lendable-cash", [descriptorId], `B-06: cash funding of ${principal} R exceeds ${bank.corporationId}'s lendable cash of ${lendable} R (cash minus liquid reserve, §3.2). Funding rejects in full; the offer rests.`);
+    }
+    const line: TransferLine = {
+      from: corporationRef(bank.cityId, bank.corporationId),
+      to: loan.borrower,
+      amountRubars: principal,
+      ruleId: descriptorId,
+      memo: `loan disbursement for ${loan.loanId}`,
+      surface: "reserve",
+    };
+    const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+    if (!applied.ok) {
+      return rejectedPlan(descriptorId, applied.code.toLowerCase().replace(/_/g, "-"), [descriptorId], `B-06: disbursement refused: ${applied.message} The offer rests.`);
+    }
+    tagged.push(...applied.changes);
+  } else {
+    // Credit branch: validate the POST-funding position (the
+    // Appendix A pair lands first in the plan, then the tests read
+    // the planned sheet — V-B7's preview parity is this same
+    // computation).
+    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", principal, descriptorId));
+    if (loan.insider) {
+      tagged.push(applyBankAggregateDelta(plan, ctx, bank, "insiderLoansRubars", principal, descriptorId));
+    }
+    tagged.push(applyAggregateDelta(plan, ctx, bank, principal, descriptorId));
+    const sheet = bankBalanceSheet(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {});
+    if (!sheet) {
+      return rejectedPlan(descriptorId, "bank-not-chartered", [descriptorId], "B-06: the bank's charter block vanished mid-plan — refusing rather than pricing a creation against no charter.");
+    }
+    if (sheet.cashRubars < sheet.liquidReserveRubars) {
+      return rejectedPlan(descriptorId, "creation-reserve-shortfall", [descriptorId], `B-06: credit funding of ${principal} R would leave ${bank.corporationId} with cash ${sheet.cashRubars} R against a liquid reserve of ${sheet.liquidReserveRubars} R over TOTAL post-funding liabilities (V2-§2.4) — creation is lawful only inside the published tests. The offer rests.`);
+    }
+    if (sheet.netWorthRubars * 10_000 < EQUITY_FLOOR_BPS * sheet.totalAssetsRubars) {
+      return rejectedPlan(descriptorId, "creation-capital-floor", [descriptorId], `B-06: credit funding of ${principal} R would leave ${bank.corporationId}'s net worth at ${sheet.netWorthRubars} R against total recognized assets of ${sheet.totalAssetsRubars} R — below the ${EQUITY_FLOOR_BPS} bps equity floor over TOTAL RECOGNIZED ASSETS (REC-1). The offer rests.`);
+    }
+    if (loan.insider) {
+      const insiderAfter = bank.bank.insiderLoansRubars + principal;
+      if (insiderAfter * 10_000 > INSIDER_CAP_BPS * sheet.netWorthRubars) {
+        return rejectedPlan(descriptorId, "insider-cap-exceeded", [descriptorId], `B-06: insider funding would take insider outstanding to ${insiderAfter} R against post-funding net worth ${sheet.netWorthRubars} R — above the ${INSIDER_CAP_BPS} bps insider cap (BNK-D3). The offer rests.`);
+      }
+    }
+    // The paired deposit (Appendix A): born in this same event,
+    // through the shared deposit builder (guardrail 2).
+    const depositId = `dep_${ctx.resolutionId}`;
+    createdDepositPath = bankDepositPath(depositId);
+    const doc = buildBankDepositDoc({
+      depositId,
+      bankCorporationId: bank.corporationId,
+      bankCityId: bank.cityId,
+      depositor: loan.borrower,
+      principalRubars: principal,
+      rateBpsPerKseq: loan.createdDepositRateBpsPerKseq ?? 0,
+      openedAtSeq: depositEntrySeq,
+      openingEntryId: logEntryPath(depositEntrySeq),
+      origin: "credit-created",
+      fundingLoanId: loan.loanId,
+    });
+    createdDeposit = depositRecordOf(doc);
+    planWrite(plan, ctx.snapshot, createdDepositPath, doc, "state", [
+      "principalRubars",
+      "creditedInterestRubars",
+      "status",
+      "rateBpsPerKseq",
+      "origin",
+      "fundingLoanId",
+    ]);
+    // A-B6: the created deposit is insured-liability growth when
+    // covered-class (created deposits are in the premium base,
+    // V2-§2.7).
+    const insuredChange = applyInsuredLiabilityDelta(plan, ctx, {
+      deposit: createdDeposit as BankDepositRecord,
+      deltaRubars: principal,
+      bank,
+      ruleId: descriptorId,
+    });
+    if (insuredChange) tagged.push(insuredChange);
+  }
+  if (branch === "cash" && loan.insider) {
+    // The insider cap binds cash funding identically (§3.3 reads
+    // outstanding, not branch): post-funding net worth falls by
+    // nothing in a cash loan (asset swaps cash for book), so the
+    // test reads the standing sheet.
+    const sheet = bankBalanceSheet(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {});
+    if (!sheet) {
+      return rejectedPlan(descriptorId, "bank-not-chartered", [descriptorId], "B-06: the bank's charter block vanished mid-plan — refusing.");
+    }
+    const insiderAfter = bank.bank.insiderLoansRubars + principal;
+    if (insiderAfter * 10_000 > INSIDER_CAP_BPS * sheet.netWorthRubars) {
+      return rejectedPlan(descriptorId, "insider-cap-exceeded", [descriptorId], `B-06: insider funding would take insider outstanding to ${insiderAfter} R against net worth ${sheet.netWorthRubars} R — above the ${INSIDER_CAP_BPS} bps insider cap (BNK-D3). The offer rests.`);
+    }
+    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "insiderLoansRubars", principal, descriptorId));
+  }
+  if (branch === "cash") {
+    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", principal, descriptorId));
+  }
+
+  // -- Pledge commits ----------------------------------------------
+  const pledgeChanges: SimChange[] = [];
+  if (loan.collateral.kind === "shares" && pledgeHoldingPath && pledgeHoldingDoc) {
+    const sharesCollateral = loan.collateral;
+    const before = typeof pledgeHoldingDoc.pledgedShares === "number" ? pledgeHoldingDoc.pledgedShares : 0;
+    const holdingIdStr = `${pledgor}__${sharesCollateral.corporationId}`;
+    planMutate(plan, ctx.snapshot, pledgeHoldingPath, "state", ["pledgedShares"], (current) =>
+      current ? { ...current, pledgedShares: before + sharesCollateral.quantityShares } : current
+    );
+    pledgeChanges.push(
+      fieldChange(`holdings/${holdingIdStr}.pledgedShares`, before, before + sharesCollateral.quantityShares, "B-06 pledge — the shares are committed to the loan; freeShares reads quantity − committed − pledged")
+    );
+  }
+  if (loan.collateral.kind === "structure" && structurePathForLien) {
+    planMutate(plan, ctx.snapshot, structurePathForLien, "state", ["bankLien"], (current) =>
+      current
+        ? {
+            ...current,
+            bankLien: { bankCorporationId: bank.corporationId, loanId: loan.loanId, markedAtSeq: null },
+          }
+        : current
+    );
+    pledgeChanges.push(
+      fieldChange(`structures/${loan.collateral.structureId}.bankLien`, null, { bankCorporationId: bank.corporationId, loanId: loan.loanId }, "B-06 lien — marked on the structure at funding (§3.2)")
+    );
+  }
+
+  // -- Entry seq arithmetic -----------------------------------------
+  // Entries to come: loan record (1) + created-deposit record
+  // (credit only, 1) + movement groups + summary (1). The loan
+  // activates AS OF the funding event's summary seq
+  // (originatedAtSeq), the anchor every installment requiredSeq
+  // derives from.
+  const movementGroups = groupChangesByEntryCity(tagged).size;
+  const summarySeq = loanEntrySeq + (branch === "credit" ? 1 : 0) + movementGroups + 1;
+  const originatedAtSeq = summarySeq;
+  const installmentPrincipal = installmentPrincipalOf(principal, loan.installmentCount);
+  const firstDueSeq = originatedAtSeq + loan.dueIntervalSeqs;
+
+  // -- Loan activation write ----------------------------------------
+  const fundingChanges: SimChange[] = [
+    fieldChange(`bankLoans/${loan.loanId}.status`, "offered", "active", "B-06 funding — the loan activates"),
+    fieldChange(`bankLoans/${loan.loanId}.originatedAtSeq`, null, originatedAtSeq, "B-06 — the funding event's seq (schedule anchor)"),
+    fieldChange(`bankLoans/${loan.loanId}.installmentPrincipalRubars`, null, installmentPrincipal, "B-06 — derived per-installment principal (final installment takes the remainder)"),
+    fieldChange(`bankLoans/${loan.loanId}.nextDueSeq`, null, firstDueSeq, "B-06 — first installment due seq"),
+    fieldChange(`bankLoans/${loan.loanId}.lastSettledSeq`, null, originatedAtSeq, "B-06 — interest watermark opens at funding (§3.6)"),
+  ];
+  if (branch === "cash") {
+    fundingChanges.push(fieldChange(`bankLoans/${loan.loanId}.proceedsLedger`, null, loan.borrower, "B-06 — proceeds paid to the borrower's ledger"));
+  }
+  planMutate(plan, ctx.snapshot, loanPath, "state", ["status", "originatedAtSeq", "installmentPrincipalRubars", "nextDueSeq", "lastSettledSeq", "proceedsLedger", "proceedsDepositId"], (current) => {
+    if (!current) return current;
+    return {
+      ...current,
+      status: "active",
+      originatedAtSeq,
+      installmentPrincipalRubars: installmentPrincipal,
+      nextDueSeq: firstDueSeq,
+      lastSettledSeq: originatedAtSeq,
+      ...(branch === "cash" ? { proceedsLedger: loan.borrower } : {}),
+    };
+  });
+
+  // -- Credit branch: link the loan to its paired deposit ----------
+  // (The deposit doc itself was written in the branch block above,
+  // where its insured-liability pair could join the tagged changes
+  // before the movement-group count fixed the summary seq.)
+  if (branch === "credit" && createdDeposit) {
+    planMutate(plan, ctx.snapshot, loanPath, "state", ["proceedsDepositId"], (current) =>
+      current ? { ...current, proceedsDepositId: (createdDeposit as BankDepositRecord).depositId } : current
+    );
+    fundingChanges.push(fieldChange(`bankLoans/${loan.loanId}.proceedsDepositId`, null, createdDeposit.depositId, "B-06 — the created deposit issued as proceeds (the Appendix A pair)"));
+  }
+
+  // -- Schedule pendings (§3.4) --------------------------------------
+  const addressing = situationAddressingFor(ctx.snapshot, loan.borrower, bank.cityId);
+  for (let k = 1; k <= loan.installmentCount; k += 1) {
+    const pendingId = `inst_${loan.loanId}_${k}`;
+    const dueSeq = originatedAtSeq + k * loan.dueIntervalSeqs;
+    const draft = buildSchedulePendingDraft(ctx.snapshot, {
+      pendingId,
+      kind: "loan-installment-due",
+      originResolutionId: ctx.resolutionId,
+      originActionId: ctx.action.actionId,
+      originActor: ctx.action.actor,
+      originCityId: bank.cityId,
+      originSummaryText: `Installment ${k} of loan ${loan.loanId}`,
+      targetCityId: bank.cityId,
+      sourceKind: "action",
+      generation: 1,
+      chainId: loan.loanId,
+      chainRootPendingId: null,
+      createdByResolutionId: null,
+      minSeqAdvance: k * loan.dueIntervalSeqs,
+      scheduleDerivation: {
+        loanId: loan.loanId,
+        installmentIndex: k,
+        originatedAtSeq,
+        dueIntervalSeqs: loan.dueIntervalSeqs,
+        dueSeq,
+      },
+      payloadSpec: {
+        schedule: {
+          kind: "loan-installment",
+          loanId: loan.loanId,
+          bankCorporationId: bank.corporationId,
+          bankCityId: bank.cityId,
+          installmentIndex: k,
+        },
+        occasion: {
+          kind: "loan-installment-due",
+          severity: "routine",
+          title: `Installment ${k} due — loan ${loan.loanId}`,
+          summary: `Installment ${k} of ${loan.installmentCount} on the ${principal} R loan from ${bank.corporationId} falls due at seq ${dueSeq}. Repayment (B-07) is the borrower's act; nothing auto-debits.`,
+          detail: {
+            loanId: loan.loanId,
+            bankCorporationId: bank.corporationId,
+            installmentIndex: k,
+            dueSeq,
+          },
+          cityId: bank.cityId,
+          audienceCityId: addressing.audienceCityId,
+          recipientUid: addressing.recipientUid ?? null,
+        } satisfies RipeningOccasionSpec,
+      },
+    });
+    plan.pendingCreates.push(draft.draft);
+    plan.readRefKeys.push(`pending:${pendingId}`);
+  }
+
+  // -- Entries --------------------------------------------------------
+  const closedCard = closeSituationWhere(
+    plan,
+    ctx,
+    (doc) => doc.kind === "proposal" && doc.detail?.proposalRef === loan.loanId,
+    { resolvedSeq: summarySeq, resolutionId: ctx.resolutionId }
+  );
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bank.cityId,
+      cityIds: [bank.cityId],
+      ruleIds: [descriptorId],
+      changes: [...fundingChanges, ...pledgeChanges],
+      recordsCreated: [],
+      recordsUpdated: [loanPath, ...(closedCard ? [closedCard] : [])],
+      summaryText: `B-06: loan ${loan.loanId} funded (${branch} branch) — ${principal} R at ${loan.rateBpsPerKseq} bps/kseq, ${loan.installmentCount} installments of ${installmentPrincipal} R every ${loan.dueIntervalSeqs} seqs from seq ${firstDueSeq}; payoff at funding = principal ${principal} R plus interest as it accrues (§4.1).${loan.insider ? " Insider loan — the cap was tested against post-funding net worth." : ""} The borrower's offer card is handled in this event.`,
+    })
+  );
+  if (branch === "credit" && createdDeposit && createdDepositPath) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: [
+          fieldChange(`bankDeposits/${createdDeposit.depositId}.principalRubars`, null, principal, "B-06 credit creation — the deposit claim issued as loan proceeds (Appendix A pair: ΔAssets = ΔLiabilities = principal, ΔCash = 0)"),
+          fieldChange(`bankDeposits/${createdDeposit.depositId}.origin`, null, "credit-created", "B-06 — provenance: credit-created (the claim bridge's classification)"),
+          fieldChange(`bankDeposits/${createdDeposit.depositId}.fundingLoanId`, null, loan.loanId, "B-06 — the backing loan (A-B4's pair, A-B5's group)"),
+          fieldChange(`bankDeposits/${createdDeposit.depositId}.status`, null, "active", "B-06 — status"),
+        ],
+        recordsCreated: [createdDepositPath],
+        summaryText: `B-06: deposit ${createdDeposit.depositId} created as the proceeds of loan ${loan.loanId} — a claim of ${principal} R against ${bank.corporationId} at ${loan.createdDepositRateBpsPerKseq ?? 0} bps/kseq, issued by paired posting with the loan asset. No cash moved; the bank's balance sheet grew on both sides by exactly the principal.`,
+      })
+    );
+  }
+  pushMovementEntries(plan, ctx, descriptorId, tagged, (entryCityId) =>
+    entryCityId === bank.cityId
+      ? branch === "cash"
+        ? `B-06: ${bank.corporationId} disbursed ${principal} R to ${ledgerLabel(loan.borrower)}; its loan book rose by the same figure (the cash↔book asset swap). Lendable cash after: ${Math.max(0, bankCashRubars(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {}) - liquidReserveRubars(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {}))} R.`
+        : `B-06: ${bank.corporationId}'s loan book and deposit liabilities each rose by ${principal} R (the Appendix A pair); cash unchanged. Created supply now includes this ${principal} R claim (a labeled derivation, never a stored figure).`
+      : `B-06: ${ledgerLabel(loan.borrower)} received ${principal} R of loan proceeds from ${bank.corporationId}.`
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "accept-loan",
+    scope: "bank",
+    cityId: bank.cityId,
+    summaryText: `Funded loan ${loan.loanId}: ${principal} R from ${bank.corporationId} to ${ledgerLabel(loan.borrower)} (${branch} branch) at ${loan.rateBpsPerKseq} bps/kseq — ${loan.installmentCount} installments, first due seq ${firstDueSeq}. ${loan.installmentCount} installment pendings scheduled.`,
+    major: true,
+    classificationExtra: {
+      loan: { loanId: loan.loanId, fundingMode: branch === "credit" ? "credit-created" : "cash-funded", principalRubars: principal },
+    },
+  });
+}
+
+function acceptLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId), ...situationKeyQueries(record.cityId));
+  }
+  if (typeof record.loanId === "string" && record.loanId) {
+    paths.push(bankLoanPath(record.loanId));
+  }
+  const borrower = parseLedgerRef(record.borrower);
+  if (borrower?.kind === "company") {
+    paths.push(corporationPath(borrower.cityId, borrower.corporationId));
+  }
+  if (borrower?.kind === "treasury") {
+    paths.push(cityPath(borrower.cityId), `factions/${borrower.cityId}`);
+  }
+  if (borrower?.kind === "personal") {
+    paths.push(memberAccountPath(borrower.memberId));
+  }
+  const collateral = parseCollateral(record.collateral);
+  if (collateral?.kind === "shares") {
+    queries.push({
+      id: "pledgeHoldings",
+      collectionPath: "sim_holdings",
+      filters: [{ field: "corporationId", op: "==", value: collateral.corporationId }],
+    });
+  }
+  if (collateral?.kind === "structure") {
+    paths.push(`sim_cities/${collateral.cityId}/structures/${collateral.structureId}`);
+  }
+  return { paths, queries };
+}
+
+function offerLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId), ...situationKeyQueries(record.cityId));
+  }
+  const borrower = parseLedgerRef(record.borrower);
+  if (borrower?.kind === "company") {
+    paths.push(corporationPath(borrower.cityId, borrower.corporationId));
+  }
+  if (borrower?.kind === "treasury") {
+    paths.push(cityPath(borrower.cityId), `factions/${borrower.cityId}`);
+  }
+  if (typeof record.loanId === "string" && record.loanId) {
+    paths.push(bankLoanPath(record.loanId));
+    if (borrower?.kind === "company") paths.push(corporationPath(borrower.cityId, borrower.corporationId));
+  }
+  return { paths, queries };
 }
 
 function depositTargetReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {

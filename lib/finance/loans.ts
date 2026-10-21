@@ -84,7 +84,12 @@ export interface BankLoanRecord {
    * source event; later verbs cite them from the record). */
   offerResolutionId: string | null;
   offeredAtSeq: number | null;
-  status: "offered" | "active" | "repaid" | "seized" | "written-off" | "assigned";
+  /** "cancelled" is this build's additive extension of the
+   * amendment's union: a resting offer cancelled before funding
+   * (B-05) needs a terminal status the derivations all read as
+   * inert (A-B2 counts "active" only; schedules derive only for
+   * active/assigned). Flagged in the PR-6 prep report. */
+  status: "offered" | "active" | "repaid" | "seized" | "written-off" | "assigned" | "cancelled";
   /** Interest watermark (§3.6) — the funding seq at activation. */
   lastSettledSeq: number;
   /** Σ interest settled through B-07 over the loan's life (§3.9's
