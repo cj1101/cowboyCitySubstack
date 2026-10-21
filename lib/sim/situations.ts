@@ -113,6 +113,11 @@ export interface SituationHandling {
   actionId: string | null;
   decidedAt: unknown;
   decisionNote: string | null;
+  /** The §3.3/§6.1 outcome verb the decision carries, when it
+   *  carries one ("declined" is wired today: handled-by-declining —
+   *  the decision IS the flow's resolution). Null on every other
+   *  handling record (absent ≡ null in stored pre-PR-4 docs). */
+  outcomeVerb: string | null;
 }
 
 export interface SimSituation {
@@ -480,7 +485,12 @@ export interface HandlingTransition {
  *  own resolution. */
 export function recordSelfHandling(
   doc: SimSituation,
-  decision: { decidedByUid: string; decidedAt: string; decisionNote?: string | null }
+  decision: {
+    decidedByUid: string;
+    decidedAt: string;
+    decisionNote?: string | null;
+    outcomeVerb?: string | null;
+  }
 ): HandlingTransition {
   assertActionable(doc, "record self-handling");
   const after: SimSituation = {
@@ -497,6 +507,7 @@ export function recordSelfHandling(
       actionId: null,
       decidedAt: new Date(decision.decidedAt),
       decisionNote: decision.decisionNote ?? null,
+      outcomeVerb: decision.outcomeVerb ?? null,
     },
     updatedAt: new Date(decision.decidedAt),
   };
@@ -558,6 +569,7 @@ export function recordDelegation(
       actionId: decision.actionId ?? null,
       decidedAt: new Date(decision.decidedAt),
       decisionNote: decision.decisionNote ?? null,
+      outcomeVerb: null,
     },
     updatedAt: new Date(decision.decidedAt),
   };
@@ -600,7 +612,11 @@ export function returnSituationToOpen(
         actionId: null,
         decidedAt: null,
         decisionNote: null,
+        outcomeVerb: null,
       }),
+      // A returned card carries no outcome verb: it was not decided,
+      // it came back (a stale verb would misread as a decision).
+      outcomeVerb: null,
       decidedAt: new Date(opts.decidedAt),
       decisionNote: opts.failedCheck
         ? `Escalated back to the owner (${opts.failedCheck}): ${opts.reason}`
@@ -1045,6 +1061,7 @@ export function buildSilenceCommit(input: SilenceCommitInput): SilenceCommit {
       actionId: null,
       decidedAt: new Date(input.now),
       decisionNote: null,
+      outcomeVerb: null,
     },
     resolvedSeq: input.resolvedSeq,
     resolvedByResolutionId: input.resolvedByResolutionId,

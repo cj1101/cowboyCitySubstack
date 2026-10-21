@@ -87,6 +87,7 @@ import {
 import {
   SituationError,
   buildSilenceCommit,
+  markSituationHandled,
   recordDelegation,
   recordSelfHandling,
   situationPath,
@@ -1393,6 +1394,24 @@ function delegationRuleSetHandler(ctx: HandlerContext): ResolutionPlan {
 // envelope.spawn / envelope.cancel
 // ---------------------------------------------------------------------------
 
+/** The action doc's stored creation instant as an ISO string, in
+ *  whatever representation the stored doc carries (ISO string, Date,
+ *  or a Firestore Timestamp shape). Null when the doc carries none. */
+function actionCreatedAtIso(action: SimAction): string | null {
+  const raw = (action as unknown as Record<string, unknown>).createdAt;
+  if (typeof raw === "string" && raw.length > 0) return raw;
+  if (raw instanceof Date) return raw.toISOString();
+  if (raw !== null && typeof raw === "object") {
+    const seconds = (raw as { seconds?: unknown }).seconds;
+    const nanoseconds = (raw as { nanoseconds?: unknown }).nanoseconds;
+    if (typeof seconds === "number") {
+      const ms = seconds * 1000 + Math.floor((typeof nanoseconds === "number" ? nanoseconds : 0) / 1_000_000);
+      return new Date(ms).toISOString();
+    }
+  }
+  return null;
+}
+
 export interface PlanEnvelopeSpawnOptions {
   source: EnvelopeSpawnSource;
   /** The requesting member — never a payload field. For owner-direct
@@ -1448,7 +1467,22 @@ export function planEnvelopeSpawn(
       bounds: (params.bounds as never) ?? {},
       spawnActionId: ctx.action.actionId,
       clientRequestId: opts.clientRequestId,
-      availableAt: opts.availableAt ?? str(params.availableAt) ?? ctx.snapshot.now,
+      // F-E9 (PR-4, harness-proven): the default may NOT come from
+      // the snapshot instant — preview and commit recompute at
+      // different instants, so a now-derived default made every
+      // spawn without an explicit availableAt uncommittable
+      // (planHash diverged on every recompute; the stale-preview
+      // loop never terminated). The default is the ACTION DOC's
+      // stored createdAt — a standing fact of the record, identical
+      // at preview and commit. The snapshot-instant fallback remains
+      // only for action docs carrying no createdAt at all (legacy
+      // fixtures); PR-4's wake-pass spawns always pass availableAt
+      // explicitly and never reach the fallback.
+      availableAt:
+        opts.availableAt ??
+        str(params.availableAt) ??
+        actionCreatedAtIso(ctx.action) ??
+        ctx.snapshot.now,
       nowIso: ctx.snapshot.now,
       createdSeq: summarySeq,
     });
@@ -1599,7 +1633,11 @@ function envelopeCancelHandler(ctx: HandlerContext): ResolutionPlan {
 // plan. markSituationHandled is deliberately NOT an action kind: it
 // fires inside the handling flow's own resolution (§6.3A atomicity),
 // and returnSituationToOpen belongs to the wake/escalation path
-// (PR-4) — neither is an owner decision on the card.
+// (PR-4) — neither is an owner decision on the card. PR-4's one
+// addition (F3): situation.handle carrying the outcome verb
+// "declined" completes the card in its own resolution
+// (handled-by-declining), because the decline decision is itself the
+// flow's resolution.
 // ---------------------------------------------------------------------------
 
 function situationEntryCity(situation: SimSituation): { cityId: string | null; cityIds: string[] } {
@@ -1619,14 +1657,33 @@ function situationHandleHandler(ctx: HandlerContext): ResolutionPlan {
   const actor = ctx.action.actor;
   try {
     // §6.3A: the decision is recorded; the card stays open and is
-    // marked handled only by the flow's own resolution.
+    // marked handled only by the flow's own resolution — with ONE
+    // completion wired by PR-4 (June's W4 flag F3): the outcome verb
+    // "declined". Declining is a complete outcome (handled-by-
+    // declining, brief §6.1/§11): the decline decision IS the flow's
+    // resolution — no further act exists that could mark the card —
+    // so markSituationHandled composes into this same resolution.
+    // The verb is recorded on the card (handling.outcomeVerb) and in
+    // the Log (this entry's classification); the declined draft
+    // stays inert in history and binds nothing.
+    const outcome = str(params.outcome);
+    const declined = outcome === "declined";
     const transition = recordSelfHandling(gate.situation, {
       decidedByUid: actor.memberId as string,
       decidedAt: BUILDER_EPOCH.toISOString(),
       decisionNote: str(params.decisionNote),
+      outcomeVerb: outcome,
     });
     const plan = emptyPlan(descriptorId);
     writeSituationTransition(plan, ctx, transition);
+    if (declined) {
+      const handled = markSituationHandled(transition.doc, {
+        resolvedSeq: summarySeqFor(ctx),
+        resolvedByResolutionId: ctx.resolutionId,
+        decidedAt: BUILDER_EPOCH.toISOString(),
+      });
+      writeSituationTransition(plan, ctx, handled);
+    }
     nullStamps(plan);
     const { cityId, cityIds } = situationEntryCity(gate.situation);
     plan.entries.push(
@@ -1637,9 +1694,17 @@ function situationHandleHandler(ctx: HandlerContext): ResolutionPlan {
         cityId,
         cityIds,
         ruleIds: [descriptorId],
-        classification: { verb: "situation.handle", scope: "city", ruleIds: [descriptorId], unruled: false },
+        classification: {
+          verb: "situation.handle",
+          scope: "city",
+          ruleIds: [descriptorId],
+          unruled: false,
+          ...(declined ? { outcome: "declined" } : {}),
+        },
         recordsUpdated: [situationPath(situationId)],
-        summaryText: `Situation ${situationId} (${gate.situation.kind}) taken in hand by its owner: the decision is recorded on the card, which stays open until the handling flow's own resolution marks it handled (§6.3A).`,
+        summaryText: declined
+          ? `Situation ${situationId} (${gate.situation.kind}) declined by its owner: handled-by-declining (§6.1) — the decision and its outcome verb are on the card, and the draft binds nothing.`
+          : `Situation ${situationId} (${gate.situation.kind}) taken in hand by its owner: the decision is recorded on the card, which stays open until the handling flow's own resolution marks it handled (§6.3A).`,
       })
     );
     actorCitations(plan, ctx.citations, ctx.resolutionId);
