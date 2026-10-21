@@ -690,7 +690,19 @@ export function resolveRipening(
   // the snapshot's Log head, or null pre-ratification (fail-closed —
   // attitude findings null with BASELINE_UNRATIFIED_SOURCE).
   const delivery = spec.delivery as DeliverySpec | undefined;
-  if (delivery) {
+  // E6 (Phase 4 close-out): dispatch is on the KIND's declared effect
+  // path (PENDING_KINDS), not on payload sniffing — "delivery" is a
+  // first-class effect class in the kind registry. A delivery kind
+  // whose frozen spec lacks its delivery block is a creation-fence
+  // breach and fails closed here (validatePayloadSpec fences it at
+  // creation; acquisition's manual drafts are held to the same shape
+  // by their builder).
+  if (kindConfig.effectPath === "delivery") {
+    if (!delivery) {
+      throw new RipeningPreparationError(
+        `delivery-kind pending ${pendingId} carries no delivery block (creation fence breach)`
+      );
+    }
     if (!opts.prepared) {
       throw new RipeningPreparationError(
         "generative ripening requires a prepared payload"
@@ -773,7 +785,10 @@ export function resolveRipening(
       capped = true;
     } else {
       const specs = application.childSpecs.slice(0, PENDING_FANOUT_CAP);
-      if (specs.length < application.childSpecs.length) capped = true;
+      // P4-K23 (Phase 4 close-out): generative briefs arrive
+      // pre-sliced from applyRipeningEffect, so the cap test runs
+      // against the pre-slice total, not the surviving list.
+      if (specs.length < application.childSpecsTotal) capped = true;
       specs.forEach((childSpec, i) => {
         const childId = `pend_${resolutionId}_${String(i + 1).padStart(2, "0")}`;
         const { draft } = buildPendingDraft(snapshot, {
