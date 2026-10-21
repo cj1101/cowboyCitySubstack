@@ -34,17 +34,11 @@ import {
   type RulesTestContext,
 } from "@firebase/rules-unit-testing";
 import {
-  collection,
   doc,
   getDoc,
-  getDocs,
-  limit,
-  orderBy,
-  query,
   setDoc,
   Timestamp,
   updateDoc,
-  where,
 } from "firebase/firestore";
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore as getAdminFirestore, type Firestore as AdminFirestore } from "firebase-admin/firestore";
@@ -677,149 +671,6 @@ async function main() {
   console.log("ok N3 delegationRule.set x2 (root+version, ruleHash parity in the emulator venue)");
 
   // ======================================================================
-  // DIAG (PR #45 fix round 4 — TEMPORARY, remove with the fix): THE
-  // FULL QUERY CENSUS. Round 3's seed-query hypothesis is REFUTED: its
-  // Q1 (sim_delegation_rules where cityId==cityA as fabricSvc) returned
-  // ALLOWED (size 2), controls Q2/Q3/Q4 ALLOWED, and the suite still
-  // died in N4's touch + wake on the uncaught "No matching allow
-  // statements". So the failing operation is another member of the
-  // wake's operation set. This block replicates EVERY query the
-  // touch + wake cycle performs (dispatcher, scan, passes, and the
-  // failure-isolated snapshot refresh), plus the materialization GET
-  // set no query probe can see, standalone, as the SAME identity the
-  // wake uses (committerFs — the fabricSvc committer context deps()
-  // hands to both fabricDb and committerDb), against the standing
-  // world right before N4's wake. Probes catch and log; the suite
-  // proceeds to the real failure either way. Companion bisection:
-  // DIAG STEP labels inside lib/sim/{resolver,dispatcher,wakePasses}.ts
-  // name the failing operation in situ if the census all-alloweds.
-  // ======================================================================
-  {
-    const probeQuery = async (label: string, run: () => Promise<{ size: number }>) => {
-      try {
-        const result = await run();
-        console.log(`DIAG Q-${label}: ALLOWED (size ${result.size})`);
-      } catch (error) {
-        console.log(
-          `DIAG Q-${label}: DENIED (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
-        );
-      }
-    };
-    const probeGet = async (label: string, run: () => Promise<{ exists: () => boolean }>) => {
-      try {
-        const snap = await run();
-        console.log(`DIAG Q-${label}: ALLOWED (exists ${snap.exists()})`);
-      } catch (error) {
-        console.log(
-          `DIAG Q-${label}: DENIED (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
-        );
-      }
-    };
-    const C = (name: string) => collection(committerFs, name);
-
-    // -- The dispatcher's own queries (runWake, in wake order) --------
-    await probeQuery("actions-status-confirmed", () =>
-      getDocs(query(C("sim_actions"), where("status", "==", "confirmed"), orderBy("createdAt", "asc"), limit(10)))
-    );
-    await probeQuery("undo_operations-status-in", () =>
-      getDocs(
-        query(
-          C("sim_undo_operations"),
-          where("status", "in", ["requested", "checking"]),
-          orderBy("createdAt", "asc"),
-          limit(10)
-        )
-      )
-    );
-    // -- The ripeness scan's candidate queries (scanRipeness) ---------
-    await probeQuery("pending_consequences-status-pending", () =>
-      getDocs(
-        query(
-          C("sim_pending_consequences"),
-          where("status", "==", "pending"),
-          orderBy("createdAtSeq", "asc"),
-          orderBy("pendingId", "asc"),
-          limit(25)
-        )
-      )
-    );
-    await probeQuery("pending_consequences-status-ripening-claimed", () =>
-      getDocs(query(C("sim_pending_consequences"), where("status", "==", "ripening-claimed"), limit(25)))
-    );
-    // -- The wake passes' direct queries (runWakePasses) --------------
-    await probeQuery("pending_consequences-needsAttention", () =>
-      getDocs(query(C("sim_pending_consequences"), where("needsAttention", "==", true), limit(25)))
-    );
-    await probeQuery("task_envelopes-status-QUEUED", () =>
-      getDocs(query(C("sim_task_envelopes"), where("status", "==", "QUEUED"), limit(50)))
-    );
-    await probeQuery("task_envelopes-status-RUNNING", () =>
-      getDocs(query(C("sim_task_envelopes"), where("status", "==", "RUNNING"), limit(50)))
-    );
-    // -- Read-plan queries materialized inside snapshots --------------
-    // The delegation/silence step seed query (WAKE_RULES_QUERY_ID) —
-    // round 3's Q1, folded in.
-    await probeQuery("delegation_rules-cityId", () =>
-      getDocs(query(C("sim_delegation_rules"), where("cityId", "==", "cityA")))
-    );
-    // The NPC authority stage's period-usage query (NPC_PERIOD_QUERY_ID)
-    // — declared for EVERY npc-actor action's read plan; the N4
-    // delegated action is the first npc-actor materialization in this
-    // venue. The filter field (actor.mandateId) is NOT the field the
-    // collection's member read branch keys on (actor.memberId).
-    await probeQuery("log_entries-actor.mandateId", () =>
-      getDocs(query(C("sim_log_entries"), where("actor.mandateId", "==", "mand-steward-1")))
-    );
-    // -- The snapshot refresh's queries (failure-isolated by design: --
-    // -- refreshSnapshotAfterWake never throws; censused for completeness)
-    await probeQuery("log_entries-recent", () =>
-      getDocs(query(C("sim_log_entries"), orderBy("seq", "desc"), limit(30)))
-    );
-    await probeQuery("log_entries-headline-cityA", () =>
-      getDocs(
-        query(
-          C("sim_log_entries"),
-          where("cityIds", "array-contains", "cityA"),
-          where("visibility", "==", "public"),
-          orderBy("seq", "desc"),
-          limit(1)
-        )
-      )
-    );
-    await probeQuery("factions-scan", () => getDocs(C("factions")));
-    await probeQuery("sim_cities-scan", () => getDocs(C("sim_cities")));
-
-    // -- The materialization GET set (doc reads the funnel performs) --
-    await probeGet("world-get-current", () => getDoc(doc(committerFs, "sim_world", "current")));
-    await probeGet("counters-get-log", () => getDoc(doc(committerFs, "sim_counters", "log")));
-    await probeGet("factions-get-cityA", () => getDoc(doc(committerFs, "factions", "cityA")));
-    await probeGet("sim_cities-get-cityA", () => getDoc(doc(committerFs, "sim_cities", "cityA")));
-    await probeGet("npcs-get-charA2", () => getDoc(doc(committerFs, "sim_npcs", "charA2")));
-    await probeGet("teams-get-cityA", () => getDoc(doc(committerFs, "sim_teams", "cityA")));
-    await probeGet("mandates-get-mand-steward-1", () =>
-      getDoc(doc(committerFs, "sim_mandates", "mand-steward-1"))
-    );
-    await probeGet("mandates-get-mand-steward-1-v1", () =>
-      getDoc(doc(committerFs, "sim_mandates", "mand-steward-1", "versions", "1"))
-    );
-    // The authority stage's terms read (TERMS_PATH): firestore.rules
-    // carries NO match block for sim_terms at all — there is no allow
-    // statement any identity can match. First read in this venue by
-    // the first npc-actor action (the N4 delegated action).
-    await probeGet("terms-get-current", () => getDoc(doc(committerFs, "sim_terms", "current")));
-    // Posture probes over absent docs (the paths the funnel forms for
-    // records that do not stand yet — an absent doc still needs a
-    // matching allow statement).
-    await probeGet("situations-get-absent", () =>
-      getDoc(doc(committerFs, "sim_situations", "diag-absent"))
-    );
-    await probeGet("actions-get-absent", () => getDoc(doc(committerFs, "sim_actions", "diag-absent")));
-    await probeGet("resolutions-get-absent", () =>
-      getDoc(doc(committerFs, "sim_resolutions", "diag-absent"))
-    );
-  }
-
-  // ======================================================================
   // N4 — The rule fire (P5-G1's trigger leg, P5-G2, P5-G7): a proposal
   // card carrying a delegated action spec is touched by its owner's
   // own situation.handle; the same wake's delegation pass fires
@@ -858,9 +709,7 @@ async function main() {
       now: nowIso(),
     });
     fireSituationId = card.situationId;
-    console.log("DIAG N4 stage: seeding the fixture card (Admin SDK)");
     await adminDb.doc(`sim_situations/${fireSituationId}`).set(card);
-    console.log("DIAG N4 stage: card seeded; submitting the owner's touch + wake");
 
     const treasuryBefore = await treasury("cityA");
     const cycle = wakeCounter + 1;
@@ -892,7 +741,6 @@ async function main() {
       },
       { targetCityIds: fireCityId ? [fireCityId] : [] }
     );
-    console.log("DIAG N4 stage: touch + wake returned");
     assert.equal(await actionStatus(touch.actionId), "resolved");
     const passes = touch.summary.passes;
     assert.ok(passes, "the wake ran its passes");
