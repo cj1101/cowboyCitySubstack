@@ -78,6 +78,7 @@ import {
   type TaggedChange,
   type TransferLine,
 } from "../../finance/transfer";
+import { bankBlockOf } from "../../finance/banking";
 import { buildCorporationDoc, corporationPath } from "../corporations";
 import {
   docField,
@@ -1443,6 +1444,18 @@ function corporationActionHandler(verb: CorpVerb) {
     }
 
     if (verb === "dissolve") {
+      // Chartered banks (Phase 5 PR-6 assembly, A5): a company
+      // holding an ACTIVE bank charter dissolves only through
+      // B-10 liquidation — depositor claims waterfall there ahead
+      // of shareholders, and the charter surrenders inside that
+      // event. Neither R-07 path (listed or unlisted) may dissolve
+      // a chartered bank around its deposit book. A surrendered
+      // charter (B-01, lawful only at zero live claims) restores
+      // the ordinary mechanics below, untouched.
+      const dissolveBank = bankBlockOf(corp);
+      if (dissolveBank && dissolveBank.status === "active") {
+        return rejectedPlan(descriptorId, "bank-chartered-dissolution", [descriptorId, "B-10"], `R-07 Dissolve: ${corporationId} holds an active bank charter — a chartered bank dissolves only through B-10 (liquidate_bank), where depositor claims are frozen, set off, and paid through the waterfall before any shareholder residue. Dissolve the bank there; R-07's mechanics do not reach its deposit book.`);
+      }
       if (listed) {
         return rejectedPlan(descriptorId, "liquidation-requires-market-module", [descriptorId, "M-10"], "R-07 Dissolve (listed): a listed dissolution resolves as M-10 liquidation — the waterfall pays taxes/fees payable and adjudicated amounts ahead of shareholders of record, pro-rata, uncapped. The Market module (step 7) owns that waterfall and the holdings records it pays against; neither stands in the world yet. The dissolution rejects whole rather than half-liquidating (never the unlisted ×0 book path on a listed company).");
       }

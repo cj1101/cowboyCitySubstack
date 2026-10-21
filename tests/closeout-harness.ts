@@ -741,7 +741,7 @@ section("S6 E6 — the kind registry declares effect paths; creation fences both
 {
   check("every registered kind declares an effect path; the delivery set is exactly the step-9 kinds", () => {
     for (const config of Object.values(PENDING_KINDS)) {
-      assert.ok(config.effectPath === "stat" || config.effectPath === "delivery", config.kind);
+      assert.ok(config.effectPath === "stat" || config.effectPath === "delivery" || config.effectPath === "schedule", config.kind);
     }
     const deliveryKinds = Object.values(PENDING_KINDS)
       .filter((c) => c.effectPath === "delivery")

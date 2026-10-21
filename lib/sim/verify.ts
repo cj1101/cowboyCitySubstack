@@ -31,6 +31,7 @@ import {
   checkStandingRecords,
   type ConservationEvent,
 } from "../finance/conservation";
+import { derivePremiumLadder } from "../finance/insurance";
 import {
   getBaselineVersion,
   sectionScopeCovers,
@@ -619,7 +620,13 @@ export function verifyStandingLog(input: StandingWorld): {
     "F-07",
   ]);
   const isFinancePath = (path: string) =>
-    path.startsWith("sim_member_accounts/") || path.startsWith("sim_bank_deposits/");
+    path.startsWith("sim_member_accounts/") ||
+    path.startsWith("sim_bank_deposits/") ||
+    // Phase 5 (PR-6): loan records and the DIF institution record
+    // join the finance venue — a B-05 offer (loan write only) or a
+    // premium event is a finance event even when nothing else moves.
+    path.startsWith("sim_bank_loans/") ||
+    path.startsWith("sim_deposit_insurance_fund/");
   const loanDocs: Record<string, unknown>[] = [];
   const depositDocs: Record<string, unknown>[] = [];
   const accountDocs: Record<string, unknown>[] = [];
@@ -669,12 +676,70 @@ export function verifyStandingLog(input: StandingWorld): {
       });
     }
   }
+  // Phase 5 (PR-6): A-B6's inputs — the fund record plus each bank's
+  // Log-derived suspension intervals, projected from the standing
+  // entries' premium marker / settlement classifications (the same
+  // projection the premium ladder derivation consumes everywhere).
+  const suspensionIntervalsByBank = (() => {
+    const markersByBank = new Map<
+      string,
+      { pendingId: string; seq: number; dueRubars: number; periodIndex: number }[]
+    >();
+    const settlementsByBank = new Map<string, { seq: number; settledPendingIds: string[] }[]>();
+    for (const entry of input.entries) {
+      const classification = entry.classification as
+        | {
+            premiumDue?: {
+              bankCorporationId?: unknown;
+              pendingId?: unknown;
+              dueRubars?: unknown;
+              periodIndex?: unknown;
+            };
+            premiumSettlement?: { bankCorporationId?: unknown; settledPendingIds?: unknown };
+          }
+        | undefined;
+      const seq = entry.seq as number;
+      const due = classification?.premiumDue;
+      if (due && typeof due.bankCorporationId === "string") {
+        const list = markersByBank.get(due.bankCorporationId) ?? [];
+        list.push({
+          pendingId: String(due.pendingId ?? ""),
+          seq,
+          dueRubars: typeof due.dueRubars === "number" ? due.dueRubars : 0,
+          periodIndex: typeof due.periodIndex === "number" ? due.periodIndex : 0,
+        });
+        markersByBank.set(due.bankCorporationId, list);
+      }
+      const settlement = classification?.premiumSettlement;
+      if (settlement && typeof settlement.bankCorporationId === "string") {
+        const list = settlementsByBank.get(settlement.bankCorporationId) ?? [];
+        list.push({
+          seq,
+          settledPendingIds: Array.isArray(settlement.settledPendingIds)
+            ? settlement.settledPendingIds.filter((id): id is string => typeof id === "string")
+            : [],
+        });
+        settlementsByBank.set(settlement.bankCorporationId, list);
+      }
+    }
+    const out = new Map<string, readonly { fromSeq: number; toSeq: number | null }[]>();
+    for (const [bankId, markers] of markersByBank) {
+      out.set(
+        bankId,
+        derivePremiumLadder({ markers, settlements: settlementsByBank.get(bankId) ?? [] })
+          .suspensionIntervals
+      );
+    }
+    return out;
+  })();
   for (const finding of checkStandingRecords({
     corporations: corporationDocs,
     deposits: depositDocs,
     loans: loanDocs,
     memberAccounts: accountDocs,
     cities: cityDocs,
+    fund: input.stateDocs.get("sim_deposit_insurance_fund/main") ?? null,
+    suspensionIntervalsByBank,
   }).findings) {
     push({
       code: finding.code,

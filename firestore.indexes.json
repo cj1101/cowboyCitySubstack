@@ -310,6 +310,54 @@
       ]
     },
     {
+      "collectionGroup": "sim_bank_deposits",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "bankCorporationId", "order": "ASCENDING" },
+        { "fieldPath": "depositor.memberId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_loans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "bankCorporationId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_loans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "bankCorporationId", "order": "ASCENDING" },
+        { "fieldPath": "borrower.memberId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_loans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "borrower.memberId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_loans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "borrower.cityId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_bank_loans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "borrower.corporationId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "bug_reports",
       "queryScope": "COLLECTION",
       "fields": [

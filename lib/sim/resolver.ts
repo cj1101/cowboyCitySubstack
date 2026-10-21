@@ -64,6 +64,13 @@ import {
   buildDeliveryPlan,
   type DeliverySpec,
 } from "./rules/acquisition";
+import {
+  buildScheduleRipeningPlan,
+  premiumQueries,
+  situationKeyQueries,
+} from "./rules/finance";
+import { INSURANCE_FUND_PATH, bankLoanPath } from "../finance/accounts";
+import { corporationPath } from "./corporations";
 
 export class PlanValidationError extends Error {
   code = "PLAN_INVALID";
@@ -319,19 +326,51 @@ export function collectRipeningReadPaths(pending: Record<string, unknown>): stri
       if (typeof path === "string") paths.add(path);
     }
   }
+  // Schedule pendings (Phase 5 PR-6 assembly, A1): the banking
+  // ripening composition reads the loan doc (installments), the
+  // bank's corporation doc, and the Deposit Insurance Fund
+  // singleton. Every address derives from the frozen schedule spec,
+  // which carries bankCorporationId / bankCityId (and loanId for
+  // installments) by construction at every seeding site.
+  if (pendingKindConfig(pending.kind as string).effectPath === "schedule") {
+    const schedule = spec.schedule as
+      | { bankCorporationId?: unknown; bankCityId?: unknown; loanId?: unknown }
+      | undefined;
+    if (
+      typeof schedule?.bankCorporationId === "string" &&
+      typeof schedule?.bankCityId === "string"
+    ) {
+      paths.add(corporationPath(schedule.bankCityId, schedule.bankCorporationId));
+      paths.add(INSURANCE_FUND_PATH);
+      if (typeof schedule.loanId === "string") {
+        paths.add(bankLoanPath(schedule.loanId));
+      }
+    }
+  }
   const condition = (pending.ripenCondition ?? {}) as Record<string, unknown>;
   const preconditions = (condition.preconditions ?? []) as { path: string }[];
   for (const pc of preconditions) paths.add(pc.path);
   return [...paths];
 }
 
-/** The ripening snapshot's collection queries. Only delivery
- * pendings declare one: the counter-means query, materialized
+/** The ripening snapshot's collection queries. Delivery pendings
+ * declare one: the counter-means query, materialized
  * whole-collection in Phase 4 form — discovery at delivery is
  * evaluated against the realm's standing counter-means posture
  * (design §7.3), read from this query record by the delivery
- * builder. Every other kind declares none and its snapshot
- * materializes exactly as before. */
+ * builder. Schedule pendings (Phase 5 PR-6 assembly, A1) declare
+ * the banking composition's read set, bank-scoped from the frozen
+ * schedule spec: the bank's deposit and loan books, the premium
+ * marker/settlement Log views and the assessment-marker view (the
+ * family's own spec builders, so a ripening derives ladder and
+ * obligation state from exactly the views the action read plans
+ * derive), the bank city's Situation cards for the GAP-1 occasion
+ * upserts, and the bank's standing schedule pendings — the last
+ * materializes into the snapshot's doc set, which the premium
+ * composition scans for an already-standing assessment before
+ * creating a second (one outstanding assessment per bank). Every
+ * other kind declares none and its snapshot materializes exactly
+ * as before. */
 export function collectRipeningReadQueries(
   pending: Record<string, unknown>
 ): CollectionQuerySpec[] {
@@ -344,6 +383,57 @@ export function collectRipeningReadQueries(
         filters: [],
       },
     ];
+  }
+  if (pendingKindConfig(pending.kind as string).effectPath === "schedule") {
+    const schedule = spec.schedule as
+      | { bankCorporationId?: unknown; bankCityId?: unknown }
+      | undefined;
+    if (
+      typeof schedule?.bankCorporationId === "string" &&
+      typeof schedule?.bankCityId === "string"
+    ) {
+      const bankCorporationId = schedule.bankCorporationId;
+      return [
+        {
+          id: "bankDeposits",
+          collectionPath: "sim_bank_deposits",
+          filters: [
+            { field: "bankCorporationId", op: "==", value: bankCorporationId },
+          ],
+        },
+        {
+          id: "bankLoans",
+          collectionPath: "sim_bank_loans",
+          filters: [
+            { field: "bankCorporationId", op: "==", value: bankCorporationId },
+          ],
+        },
+        ...premiumQueries(bankCorporationId),
+        {
+          id: "assessmentMarkers",
+          collectionPath: "sim_log_entries",
+          filters: [
+            {
+              field: "classification.assessmentDue.bankCorporationId",
+              op: "==",
+              value: bankCorporationId,
+            },
+          ],
+        },
+        ...situationKeyQueries(schedule.bankCityId),
+        {
+          id: "standingSchedulePendings",
+          collectionPath: "sim_pending_consequences",
+          filters: [
+            {
+              field: "payloadSpec.schedule.bankCorporationId",
+              op: "==",
+              value: bankCorporationId,
+            },
+          ],
+        },
+      ];
+    }
   }
   return [];
 }
@@ -773,6 +863,91 @@ export function resolveRipening(
       snapshot,
     });
     return finalizePlan(deliveryPlan);
+  }
+
+  // Schedule pendings (Phase 5 PR-6 assembly, A1): dispatch on the
+  // kind's declared effect path (E6), mirroring the delivery branch
+  // — the plan comes from the banking family's ripening
+  // composition, which lands, inside this Resolution Event, the
+  // schedule marker, the GAP-1 occasion Situation(s) with figures
+  // computed at ripening, the successor pending (SPEC-1: premium
+  // chains perpetuate at ripening, schedule-anchored, generation-1
+  // of a fresh chain), and any B-14 assessment the fund's derived
+  // deficiency raises. The composition's HandlerContext carries a
+  // synthetic action standing in the origin action's place (the
+  // wakeSteps delegation-fire precedent): actor and actionId are
+  // the pending's origin, copied verbatim — a schedule ripening is
+  // the origin act's own consequence coming due, never a "system"
+  // act. The Lead's branch owns the pending's transition, exactly
+  // as the R-33 path below owns its own (Felix's assembly list,
+  // A1: "commit its plan + transition the pending").
+  if (kindConfig.effectPath === "schedule") {
+    const scheduleAction: SimAction = {
+      actionId: (pending.originActionId as string | null) ?? resolutionId,
+      schemaVersion: 2,
+      clientRequestId: resolutionId,
+      idempotencyKey: resolutionId,
+      source: "ripening",
+      actor: originActor,
+      actionType: pending.kind as string,
+      actionText: null,
+      structuredAction: null,
+      targetCityIds: [targetCityId],
+      threadRef: null,
+      audienceUids: Array.isArray(pending.audienceUids)
+        ? (pending.audienceUids as string[])
+        : [],
+      preview: null,
+      previewPlanHash: null,
+      confirmation: null,
+      claim: null,
+      lastAttempt: null,
+      status: "confirmed",
+      resolutionId: null,
+      firstLogSeq: null,
+      lastLogSeq: null,
+      failure: null,
+      createdAt: null,
+      updatedAt: null,
+    };
+    const schedulePlan = buildScheduleRipeningPlan(
+      {
+        snapshot,
+        action: scheduleAction,
+        resolutionId,
+        baselineRegistry: opts.baselineRegistry,
+        citableBaseline: baselineContextFor(
+          opts.baselineRegistry,
+          snapshot.counterHead.lastSeq
+        ),
+        citations: {},
+      },
+      pending
+    );
+    // The composition's refusals (an unrecognized schedule kind; a
+    // read the wiring did not carry — "nothing ripens blind") are
+    // preparation-class failures: they ride the engine's ripening
+    // failure channel (attempts counted by the wake scan, then
+    // needsAttention), never a committed rejection event — no
+    // ripening path in this engine commits rejections.
+    if (schedulePlan.outcome === "rejected" && schedulePlan.rejection) {
+      throw new RipeningPreparationError(
+        `schedule ripening of ${pendingId} refused (${schedulePlan.rejection.code}): ${schedulePlan.rejection.summaryText}`
+      );
+    }
+    schedulePlan.pendingTransitions.push({
+      pendingId,
+      toStatus: "ripened",
+      outcomeSummary:
+        schedulePlan.entries.find((entry) => entry.summary)?.summaryText ??
+        `Schedule ripening of ${pendingId} (origin seq ${originSeq}).`,
+    });
+    validatePlan(schedulePlan, {
+      baselineRegistry: opts.baselineRegistry,
+      covertEntriesAllowed: false,
+      snapshot,
+    });
+    return finalizePlan(schedulePlan);
   }
 
   const plan: ResolutionPlan = {

@@ -3,7 +3,7 @@
  * ledgers every Phase 4 money movement reads and writes, over the shapes
  * Module 0 landed (corporation record: `lib/sim/corporations.ts`).
  *
- * Four tracked account classes (§1.1) and no fifth: characters and NPCs
+ * Four tracked account classes (§1.1) in Phase 4: characters and NPCs
  * hold no accounts (FIN-C7), guests hold none, households are the
  * Exterior (§1.3) — a flow counterparty with named scopes and NO stored
  * balance, so no Exterior stock is ever seeded from an uncounted
@@ -11,6 +11,16 @@
  * tracked: the realm's money also exists as Exterior flows, and no
  * surface built on these types may present a tracked sum as "all the
  * money there is" (guardrail: tracked-cash labeling).
+ *
+ * Phase 5 (PR-6, REC-3): a FIFTH tracked account class joins — the
+ * deposit-insurance institution's segregated account (the DIF,
+ * banking amendment §5.7 as conformed: "a fifth tracked account class
+ * in finance §1.1 — the fund is not a treasury in any sense the
+ * treasury rules govern"). The institution is a holder, never an
+ * actor; its LedgerRef kind is "institution" and its balance field is
+ * the fund record's `fundCashRubars` — one doc, one balance, no second
+ * account doc to disagree with it (A-B6 asserts the aggregate against
+ * the derivation, §5.7/V2-§1.2).
  *
  * This module owns: the LedgerRef grammar, the personal account record
  * (F-01, §1.2), and the lazy-open composer (§1.4) every money-touching
@@ -40,7 +50,18 @@ export type LedgerRef =
   | { kind: "treasury"; cityId: string }
   | { kind: "company"; corporationId: string; cityId: string }
   | { kind: "market" }
+  | { kind: "institution"; institutionId: string }
   | { kind: "exterior"; scope: string };
+
+/** The deposit-insurance institution's id and record path — the only
+ * institution holder in this build (REC-3; BNK-D17: the fund deposits
+ * nowhere and holds its own ledger cash). */
+export const DIF_INSTITUTION_ID = "dif";
+export const INSURANCE_FUND_PATH = "sim_deposit_insurance_fund/main";
+
+export function difRef(): LedgerRef {
+  return { kind: "institution", institutionId: DIF_INSTITUTION_ID };
+}
 
 export type TrackedLedgerRef = Exclude<LedgerRef, { kind: "exterior" }>;
 
@@ -83,6 +104,10 @@ export function bankDepositPath(depositId: string): string {
   return `sim_bank_deposits/${depositId}`;
 }
 
+export function bankLoanPath(loanId: string): string {
+  return `sim_bank_loans/${loanId}`;
+}
+
 /** The Market Account's record: the singleton doc of finance §1.1's
  * `sim_market_account` collection. The Market module (Phase 4 step 7)
  * owns the record's shape and its founding act (M-00); this const is
@@ -103,6 +128,8 @@ export function ledgerDocPath(ref: TrackedLedgerRef): string | null {
       return `sim_cities/${ref.cityId}/corporations/${ref.corporationId}`;
     case "market":
       return MARKET_ACCOUNT_PATH;
+    case "institution":
+      return ref.institutionId === DIF_INSTITUTION_ID ? INSURANCE_FUND_PATH : null;
   }
 }
 
@@ -117,6 +144,8 @@ export function ledgerBalanceField(ref: TrackedLedgerRef): string {
       return "companyCashRubars";
     case "market":
       return "cashRubars";
+    case "institution":
+      return "fundCashRubars";
   }
 }
 
@@ -132,6 +161,8 @@ export function ledgerChangeField(ref: TrackedLedgerRef): string {
       return `corporations/${ref.corporationId}.companyCashRubars`;
     case "market":
       return "marketAccount.cashRubars";
+    case "institution":
+      return "institutionAccount.cashRubars";
   }
 }
 
@@ -159,6 +190,8 @@ export function ledgerLabel(ref: LedgerRef): string {
       return `company ${ref.corporationId}`;
     case "market":
       return "the Market Account";
+    case "institution":
+      return "the Realm Deposit Insurance Fund";
     case "exterior":
       return `the Exterior (${ref.scope})`;
   }

@@ -64,7 +64,7 @@ import {
   type LedgerRef,
   type TrackedLedgerRef,
 } from "./accounts";
-import { bankBlockOf, unencumberedCash } from "./banking";
+import { bankBlockOf, bankCashRubars, liquidReserveRubars, unencumberedCash } from "./banking";
 
 export type ShortfallClass = "transfer" | "budget" | "custodial";
 
@@ -83,6 +83,14 @@ export interface TransferLine {
   amountRubars: number;
   ruleId: string;
   memo: string;
+  /** Source-surface override (Phase 5, B-06): a chartered bank's
+   * LOAN DISBURSEMENT validates against the liquid-reserve surface
+   * (cash − liquid reserve), not the unencumbered surface — lending
+   * is fractional-reserve business governed by the reserve test
+   * (amendment §3.2), while the unencumbered surface governs money
+   * the bank holds FOR others (custodial class). Every other line
+   * leaves this unset and validates exactly as Phase 4 built. */
+  surface?: "reserve";
 }
 
 export interface TaggedChange {
@@ -118,6 +126,8 @@ function sameLedger(a: LedgerRef, b: LedgerRef): boolean {
       return a.corporationId === (b as { corporationId: string }).corporationId;
     case "market":
       return true;
+    case "institution":
+      return a.institutionId === (b as { institutionId: string }).institutionId;
     case "exterior":
       return a.scope === (b as { scope: string }).scope;
   }
@@ -204,6 +214,44 @@ export function applyTransferLines(args: {
     // ledger below. A line naming the Market Account before its
     // founding act fails naturally at endpoint existence
     // (LEDGER_NOT_FOUND), which is the honest refusal.
+
+    // Institution (DIF) lines — the fund's rule surface is CLOSED
+    // (addendum checks M10/M11): fund cash moves OUT only as B-13
+    // payout lines inside a liquidation event, and IN only as B-12
+    // premiums, B-14 assessments, or B-07 pool distributions routed
+    // by subrogation. The fund deposits nowhere (BNK-D17) and is
+    // never the Market Account's counterparty in either direction
+    // (the operator's float is not a backstop, §5.7). These are
+    // structural properties of the primitive, not per-handler habits.
+    if (line.from.kind === "institution" || line.to.kind === "institution") {
+      const other = line.from.kind === "institution" ? line.to : line.from;
+      if (other.kind === "market") {
+        return {
+          ok: false,
+          code: "FUND_MARKET_FORBIDDEN",
+          message: `transfer line under ${line.ruleId} names the deposit-insurance fund and the Market Account as counterparties — the fund is banks' money, segregated; the Market Account is never its backstop, payer, or payee (M10).`,
+        };
+      }
+      if (line.from.kind === "institution" && line.ruleId !== "B-13") {
+        return {
+          ok: false,
+          code: "FUND_SOURCE_FORBIDDEN",
+          message: `transfer line under ${line.ruleId} spends from the deposit-insurance fund — fund cash moves out only as B-13 payout lines inside a B-10 liquidation event (M11: no lender-of-last-resort or liquidity-advance mechanic exists).`,
+        };
+      }
+      if (
+        line.to.kind === "institution" &&
+        line.ruleId !== "B-12" &&
+        line.ruleId !== "B-14" &&
+        line.ruleId !== "B-07"
+      ) {
+        return {
+          ok: false,
+          code: "FUND_DESTINATION_FORBIDDEN",
+          message: `transfer line under ${line.ruleId} pays into the deposit-insurance fund — fund inflows are the closed set: B-12 premiums, B-14 assessments, B-07 subrogated pool recoveries, and governance grants under their own rules (M10).`,
+        };
+      }
+    }
   }
 
   // -- Endpoint existence + netting (§2.1.2, §2.1.4) ----------------------
@@ -213,6 +261,8 @@ export function applyTransferLines(args: {
     before: number;
     net: number;
     grossOut: number;
+    /** A line marked this ledger's source surface "reserve" (B-06). */
+    reserveSurface?: boolean;
   }
   const work = new Map<string, LedgerWork>();
   const workFor = (ref: TrackedLedgerRef): LedgerWork | { error: TransferValidation } => {
@@ -252,6 +302,7 @@ export function applyTransferLines(args: {
       if ("error" in w) return w.error;
       w.net -= line.amountRubars;
       w.grossOut += line.amountRubars;
+      if (line.surface === "reserve") w.reserveSurface = true;
     } else {
       // Exterior -> tracked: the flow runs INTO the tracked system.
       exteriorFlows.set(line.from.scope, (exteriorFlows.get(line.from.scope) ?? 0) + line.amountRubars);
@@ -271,6 +322,24 @@ export function applyTransferLines(args: {
     if (w.net >= 0) continue;
     const doc = plannedDoc(plan, snapshot, w.path);
     const { available, surface } = spendableSurface(doc, w.ref);
+    if (w.reserveSurface && surface === "unencumbered" && doc && available !== null) {
+      // B-06 disbursement surface (amendment §3.2): the funding
+      // line validates against cash above the liquid reserve — the
+      // reserve test — instead of the unencumbered surface that
+      // governs custodial money. The handler pre-states the same
+      // test; this is the primitive keeping it honest.
+      const reserveAvailable = Math.max(0, bankCashRubars(doc) - liquidReserveRubars(doc));
+      const required = -w.net;
+      if (required > reserveAvailable) {
+        return {
+          ok: false,
+          code: "INSUFFICIENT_LENDABLE",
+          shortfall: { ref: w.ref, availableRubars: reserveAvailable, requiredRubars: required, surface },
+          message: `${ledgerLabel(w.ref)} holds ${reserveAvailable} R of lendable cash (cash above its liquid reserve); the disbursement requires ${required} R.`,
+        };
+      }
+      continue;
+    }
     if (available === null) {
       return {
         ok: false,

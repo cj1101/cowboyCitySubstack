@@ -2,9 +2,10 @@
  * Banking — the Phase 4 slice (banking-amendment-design.md §7.1, as
  * conformed by Banking Rider 1 / Addendum v2): B-01 charter + surrender,
  * B-02 deposits, B-03 withdrawals, B-04 cash-paid interest settlement.
- * Loans, credit creation, the DIF, and the failure waterfall are Phase
- * 5/7 — their record shapes are RESERVED here (types only, no handlers)
- * so Phase 5 extends live data instead of migrating it.
+ * Phase 5 (PR-6) activates the reserved half: loans (./loans.ts), the
+ * full REC-6 balance-sheet identity below, the failed-payment
+ * derivation, credit creation, and the DIF (./insurance.ts) — record
+ * shapes extend additively, so no Phase 4 record migrates.
  *
  * The five must-not-hardcode guardrails, as they bind this module:
  *  1. No no-creation invariant is asserted anywhere: conservation is
@@ -31,7 +32,13 @@
  *     insurance or credit creation "exists" as a system truth.
  */
 
-import { docField } from "../sim/state";
+import {
+  docField,
+  snapshotDoc,
+  type PendingDraft,
+  type SimActor,
+  type SimSnapshot,
+} from "../sim/state";
 import type { LedgerRef } from "./accounts";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +52,24 @@ export const CHARTER_MIN_CAPITAL_RUBARS = 100_000;
 export const RESERVE_FLOOR_BPS = 2_000;
 /** Hard cap on deposit and loan rates, bps per kseq (BNK-D2). */
 export const RATE_CAP_BPS_PER_KSEQ = 5_000;
+/** Insider lending cap: aggregate insider outstanding may not exceed
+ * this share of the bank's net worth at funding (BNK-D3, §3.3). */
+export const INSIDER_CAP_BPS = 2_500;
+/** Credit-creation capital test: post-funding derived equity must be
+ * at least this share of TOTAL RECOGNIZED ASSETS (BNK-D13 as amended
+ * by REC-1 — Vera's base, Felix's constant). */
+export const EQUITY_FLOOR_BPS = 1_000;
+/** DIF coverage cap per depositor per bank (BNK-D10). */
+export const COVERAGE_CAP_RUBARS = 250_000;
+/** DIF premium base rate (BNK-D11). */
+export const PREMIUM_BASE_BPS_PER_KSEQ = 10;
+/** DIF premium period, in resolved seqs (BNK-D11). */
+export const PREMIUM_PERIOD_SEQS = 1_000;
+/** DIF target fund ratio against realm insured liabilities (BNK-D12). */
+export const TARGET_FUND_RATIO_BPS = 500;
+/** Controller bar length after a liquidation, in resolved seqs
+ * (BNK-D15 — owner only, as built). */
+export const RECHARTER_BAR_SEQS = 2_000;
 
 // ---------------------------------------------------------------------------
 // The charter block (amendment §1.3) — written on the corporation record
@@ -67,6 +92,18 @@ export interface BankCharterBlock {
   loanBookRubars: number;
   /** Committer-maintained insider-loan aggregate (A-B3). */
   insiderLoansRubars: number;
+  /** Committer-maintained aggregate (Phase 5, B-08): the recorded
+   * satisfaction value of seized collateral currently held for the
+   * bank — REC-6's "other recognized assets" term, sourced by the
+   * seizure records and asserted against them (A-B7). Additive:
+   * absent on Phase 4-era blocks, reads as 0 (seizedAssetsOf). */
+  seizedAssetsRubars?: number;
+}
+
+/** The charter block's seized-assets aggregate, canonical-absent = 0. */
+export function seizedAssetsOf(block: BankCharterBlock | null): number {
+  const value = block?.seizedAssetsRubars;
+  return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : 0;
 }
 
 export function bankBlockOf(
@@ -100,6 +137,7 @@ export function buildBankCharterBlock(args: {
     depositLiabilitiesRubars: args.existing?.depositLiabilitiesRubars ?? 0,
     loanBookRubars: args.existing?.loanBookRubars ?? 0,
     insiderLoansRubars: args.existing?.insiderLoansRubars ?? 0,
+    seizedAssetsRubars: seizedAssetsOf(args.existing ?? null),
   };
 }
 
@@ -142,6 +180,38 @@ export interface BankDepositRecord {
   openedAtSeq: number;
   openingEntryId: string;
   lastSettledSeq: number;
+  /** Phase 5: created-claim principal extinguished by a pool
+   * closing's realized-loss write-down (Appendix C's A-B5
+   * bookkeeping). Absent ≡ 0; only ever stamped at pool closing. */
+  writtenDownRubars?: number;
+  /** Phase 5 (B-10): the liquidation block, stamped when the record
+   * sweeps into a depositor pool (status "assigned"). The frozen
+   * claim figure (REC-5) and everything the pool derivation needs
+   * live here so the pool stays a derivation over records + Log —
+   * no pool account doc exists (§5.6). Absent until liquidation. */
+  liquidation?: {
+    liquidationId: string;
+    liquidationResolutionId: string;
+    bankCorporationId: string;
+    frozenClaimRubars: number;
+    coveredRubars: number;
+    uninsuredRubars: number;
+    /** Setoff applied at liquidation (BNK-D16): the portion of the
+     * claim netted against the depositor's debt to the pool. */
+    setoffRubars: number;
+    estatePaidRubars: number;
+    fundPaidRubars: number;
+    /** Unpaid covered balance queued against the fund (REC-7's
+     * recognized-unpaid state), senior to later failures' payouts. */
+    fundShortfallRubars: number;
+    /** Σ pool distributions received on this record so far (cash
+     * from assigned-loan repayments and pool seizures). */
+    poolDistributedRubars: number;
+    /** The fund's subrogated share of pool distributions received
+     * (routed to the fund first, up to fundPaidRubars, V2-§1.5). */
+    fundRecoveredRubars: number;
+    liquidatedAtSeq: number;
+  } | null;
   stateVersion: number;
   lastChangedSeq: number | null;
   lastResolutionId: string | null;
@@ -167,6 +237,12 @@ export function buildBankDepositDoc(args: {
   rateBpsPerKseq: number;
   openedAtSeq: number;
   openingEntryId: string;
+  /** Provenance (guardrail 2): B-02 writes "cash" (the default);
+   * B-06's credit branch writes "credit-created" through THIS SAME
+   * builder with `fundingLoanId` naming the loan — creation is a
+   * committer plan effect, never a second deposit-writing path. */
+  origin?: DepositOrigin;
+  fundingLoanId?: string | null;
 }): Record<string, unknown> {
   const record: BankDepositRecord = {
     depositId: args.depositId,
@@ -177,8 +253,8 @@ export function buildBankDepositDoc(args: {
     creditedInterestRubars: 0,
     rateBpsPerKseq: args.rateBpsPerKseq,
     status: "active",
-    origin: "cash",
-    fundingLoanId: null,
+    origin: args.origin ?? "cash",
+    fundingLoanId: args.fundingLoanId ?? null,
     openedAtSeq: args.openedAtSeq,
     openingEntryId: args.openingEntryId,
     lastSettledSeq: args.openedAtSeq,
@@ -316,35 +392,183 @@ export function accruedUnsettledRubars(
 
 // ---------------------------------------------------------------------------
 // Derived bank health (amendment §5.1) — computed from standing state,
-// never stored. Phase 4 slice form: the loan book is empty by
-// construction, so net worth reads cash + loanBook(0) − deposit
-// liabilities − tax payables. The failed-payment form of failure (a
-// standing custodial rejection in the Log) is a Log-reading derivation
-// the standing verifier owns; it is unreachable-by-construction in
-// this slice (§7.1) and is NOT approximated here from state.
+// never stored. Phase 5 form (addendum item 2): the REC-6 full
+// balance-sheet identity replaces the Phase 4 slice form — one
+// identity, no divergent copies (Appendix A as replaced): validation,
+// display, and the verifier read THIS derivation.
+//   Assets      = settlement cash + outstanding loan principal
+//               + other recognized assets (seized collateral at its
+//                 recorded satisfaction value — B-08's records)
+//               + recognized insurance receivables (post-recognition
+//                 ONLY, REC-7 — contingent coverage is memo exposure,
+//                 never an asset before the claim-recognition point)
+//   Liabilities = deposit claims + tax payables + adjudicated
+//                 payables (R-23 records are Phase 7; the term is
+//                 wired and reads the corp-doc field, zero until
+//                 cases exist) + other recognized liabilities
+//   Equity      = Assets − Liabilities (derived; may be negative as
+//                 a solvency fact; never stored or spendable)
+// Terms a corp doc cannot carry (a premium payable derived from the
+// premium chain, a recognized insurance receivable) enter through
+// `extras` from the caller that derives them — the corp-doc-only
+// call below passes none, which is exactly the Phase 4 call sites'
+// behavior upgraded to the full identity over doc-carried terms.
 // ---------------------------------------------------------------------------
 
-export type BankHealth = "sound" | "liquidity-impaired" | "insolvent";
+export interface BankBalanceSheet {
+  cashRubars: number;
+  loanBookRubars: number;
+  seizedAssetsRubars: number;
+  recognizedInsuranceReceivablesRubars: number;
+  totalAssetsRubars: number;
+  depositLiabilitiesRubars: number;
+  taxPayablesRubars: number;
+  adjudicatedPayablesRubars: number;
+  otherLiabilitiesRubars: number;
+  totalLiabilitiesRubars: number;
+  /** Derived equity (REC-6/RIDER-4): may be negative. */
+  netWorthRubars: number;
+  liquidReserveRubars: number;
+}
 
-export function deriveBankHealth(
-  corporationDoc: Record<string, unknown> | null
-): BankHealth | null {
+export function bankBalanceSheet(
+  corporationDoc: Record<string, unknown> | null,
+  extras?: {
+    recognizedInsuranceReceivablesRubars?: number;
+    otherLiabilitiesRubars?: number;
+  }
+): BankBalanceSheet | null {
   const bank = bankBlockOf(corporationDoc);
-  if (!bank || bank.status !== "active") return null;
+  if (!bank || !corporationDoc) return null;
   const cash = bankCashRubars(corporationDoc);
   const payables = docField(corporationDoc, "taxPayables");
-  const payablesTotal =
+  const taxPayablesTotal =
     typeof payables === "object" && payables !== null
       ? Object.values(payables as Record<string, unknown>).reduce<number>(
           (sum, v) => sum + integerOrZero(v),
           0
         )
       : 0;
-  const netWorth =
-    cash + bank.loanBookRubars - bank.depositLiabilitiesRubars - payablesTotal;
-  if (netWorth < 0) return "insolvent";
-  if (cash < liquidReserveRubars(corporationDoc)) return "liquidity-impaired";
+  const adjudicated = integerOrZero(docField(corporationDoc, "adjudicatedPayablesRubars"));
+  const seized = seizedAssetsOf(bank);
+  const insuranceReceivables = extras?.recognizedInsuranceReceivablesRubars ?? 0;
+  const otherLiabilities = extras?.otherLiabilitiesRubars ?? 0;
+  const totalAssets = cash + bank.loanBookRubars + seized + insuranceReceivables;
+  const totalLiabilities =
+    bank.depositLiabilitiesRubars + taxPayablesTotal + adjudicated + otherLiabilities;
+  return {
+    cashRubars: cash,
+    loanBookRubars: bank.loanBookRubars,
+    seizedAssetsRubars: seized,
+    recognizedInsuranceReceivablesRubars: insuranceReceivables,
+    totalAssetsRubars: totalAssets,
+    depositLiabilitiesRubars: bank.depositLiabilitiesRubars,
+    taxPayablesRubars: taxPayablesTotal,
+    adjudicatedPayablesRubars: adjudicated,
+    otherLiabilitiesRubars: otherLiabilities,
+    totalLiabilitiesRubars: totalLiabilities,
+    netWorthRubars: totalAssets - totalLiabilities,
+    liquidReserveRubars: liquidReserveRubars(corporationDoc),
+  };
+}
+
+export type BankHealth = "sound" | "liquidity-impaired" | "insolvent";
+
+/** The arithmetic three-state derivation (§5.1): insolvent ⇔ net
+ * worth < 0 under the REC-6 identity; liquidity-impaired ⇔ solvent
+ * but cash below the liquid reserve. The FAILED-PAYMENT form of
+ * failure is a separate Log-reading derivation (deriveFailedPayment
+ * below) — §5.1's full "failed" state is insolvent OR failed-payment,
+ * composed by the consumers that can read a Log slice (the standing
+ * verifier's venue, finance prep §6); handler gates read this
+ * arithmetic form, exactly as Phase 4's call sites did, now over the
+ * full identity with no code change at those sites. */
+export function deriveBankHealth(
+  corporationDoc: Record<string, unknown> | null
+): BankHealth | null {
+  const bank = bankBlockOf(corporationDoc);
+  if (!bank || bank.status !== "active") return null;
+  const sheet = bankBalanceSheet(corporationDoc);
+  if (!sheet) return null;
+  if (sheet.netWorthRubars < 0) return "insolvent";
+  if (sheet.cashRubars < sheet.liquidReserveRubars) return "liquidity-impaired";
   return "sound";
+}
+
+// ---------------------------------------------------------------------------
+// The failed-payment derivation (§5.1's second form of failure) — a
+// pure function over a bank's Log slice. A bank that has actually
+// bounced a depositor is failed in fact whatever its paper net worth
+// says; the derivation reads the Log because the Log is where the
+// fact lives. Input contract: the caller projects standing entries
+// into the view below — rejections are identified by (ruleIds ∋
+// B-03|B-04, rejectionCode "insufficient-unencumbered") with the bank
+// taken from the rejected ACTION's record (the resolver's rejection
+// conversion carries no bank field; the action doc names the deposit,
+// whose record names the bank — the projection is mechanical, and
+// this module's venue is the standing verifier / QA harness per
+// finance prep §6, deliberately NOT an approximation from state in
+// the handler layer).
+// ---------------------------------------------------------------------------
+
+export interface BankLogEventView {
+  seq: number;
+  kind: string;
+  ruleIds: string[];
+  rejectionCode: string | null;
+  bankCorporationId: string | null;
+  /** B-09 entries stamp their cure determination here (the event's
+   * own validation recomputed the derivation, §5.4): true only when
+   * the injection cured the arithmetic state AND every
+   * failure-deriving custodial claim became coverable. */
+  curesFailedPayment?: boolean | null;
+}
+
+export interface FailedPaymentDerivation {
+  failed: boolean;
+  /** Seq of the earliest uncured custodial rejection, when failed. */
+  firstUncuredRejectionSeq: number | null;
+  /** Seq of the B-09 entry that cured the episode, when cured. */
+  curedAtSeq: number | null;
+  uncuredRejectionSeqs: number[];
+}
+
+export function deriveFailedPayment(
+  events: readonly BankLogEventView[],
+  bankCorporationId: string
+): FailedPaymentDerivation {
+  const mine = events
+    .filter((e) => e.bankCorporationId === bankCorporationId)
+    .slice()
+    .sort((a, b) => a.seq - b.seq);
+  let curedAtSeq: number | null = null;
+  const uncured: number[] = [];
+  for (const event of mine) {
+    const isRejection =
+      event.kind === "rejected" &&
+      event.rejectionCode === "insufficient-unencumbered" &&
+      (event.ruleIds.includes("B-03") || event.ruleIds.includes("B-04"));
+    if (isRejection) {
+      uncured.push(event.seq);
+      continue;
+    }
+    const isCure =
+      event.ruleIds.includes("B-09") && event.curesFailedPayment === true;
+    if (isCure) {
+      // A cure answers every rejection standing before it (§5.4's
+      // coverability condition is evaluated against those claims).
+      for (const seq of uncured.splice(0)) {
+        void seq;
+      }
+      curedAtSeq = event.seq;
+    }
+  }
+  return {
+    failed: uncured.length > 0,
+    firstUncuredRejectionSeq: uncured.length > 0 ? uncured[0] : null,
+    curedAtSeq,
+    uncuredRejectionSeqs: uncured,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +607,123 @@ export const NO_INSTITUTION_POSTURE: InsurancePosture = {
 /** Charter-flow posture lines (§7.6), generated from derived state.
  * Surfaces call this with the posture they derived at preview; the
  * text is a rendering of that state, not a claim about the world. */
+// ---------------------------------------------------------------------------
+// Schedule pendings (amendment §3.4 + V2-§1.3) — banking's due
+// occasions ride AGR pendings whose ripen condition is CONTRACTUAL,
+// not delay-derived: installment k is due at originatedAtSeq +
+// k × dueIntervalSeqs, and a premium period is due exactly
+// PREMIUM_PERIOD_SEQS after its anchor. buildPendingDraft cannot
+// express either (its requiredSeq derives from the delay formula
+// over the target city's traits), so this builder mirrors its doc
+// shape field-for-field — the acquisition family's precedent for a
+// family-held draft shape — and sets the ripen condition's
+// minSeqAdvance EXACTLY: the committer stamps requiredSeq =
+// creation summary seq + minSeqAdvance (P4-K19 anchoring), which is
+// the contractual due seq by construction. The wall floor is 0:
+// these pendings are seq-scheduled, and the seq gate alone governs
+// (eligibleAt = the creation instant). The payloadSpec is the
+// family's own (schedule data + Vera's `occasion` spec, GAP-1); the
+// ripening application is the family's composition
+// (buildScheduleRipeningPlan in rules/finance.ts), dispatched on
+// the kinds' declared effectPath "schedule".
+// ---------------------------------------------------------------------------
+
+export interface SchedulePendingArgs {
+  pendingId: string;
+  kind: "loan-installment-due" | "insurance-premium-due";
+  originResolutionId: string;
+  originActionId: string | null;
+  originActor: SimActor;
+  originCityId: string | null;
+  originSummaryText: string;
+  targetCityId: string;
+  sourceKind: "action" | "ripening";
+  generation: number;
+  chainId: string;
+  chainRootPendingId: string | null;
+  createdByResolutionId: string | null;
+  /** The exact seq advance to the contractual due seq. For
+   * generation-1 schedule pendings created inside the origin event
+   * this is (dueSeq − originEventSummarySeq); the successor
+   * mechanics in the ripening composition anchor it to the ripened
+   * pending's requiredSeq (SPEC-1 as confirmed by Vera). */
+  minSeqAdvance: number;
+  /** Recorded on the doc as the derivation of record (in place of a
+   * delay derivation): the schedule arithmetic that produced
+   * minSeqAdvance, so the due seq is recomputable from the record. */
+  scheduleDerivation: Record<string, unknown>;
+  payloadSpec: Record<string, unknown>;
+  extraAudienceUids?: string[];
+}
+
+export function buildSchedulePendingDraft(
+  snapshot: SimSnapshot,
+  args: SchedulePendingArgs
+): { draft: PendingDraft } {
+  const audience = new Set<string>(args.extraAudienceUids ?? []);
+  const actorUid = args.originActor.memberId ?? args.originActor.onBehalfOfMemberId;
+  if (actorUid) audience.add(actorUid);
+  for (const cityId of [args.originCityId, args.targetCityId]) {
+    if (!cityId) continue;
+    const faction = snapshotDoc(snapshot, `factions/${cityId}`);
+    const owners = faction?.ownerUids;
+    if (Array.isArray(owners)) {
+      for (const uid of owners) if (typeof uid === "string") audience.add(uid);
+    }
+  }
+  const targetCity = snapshotDoc(snapshot, `sim_cities/${args.targetCityId}`);
+  const doc: Record<string, unknown> = {
+    pendingId: args.pendingId,
+    schemaVersion: 2,
+    kind: args.kind,
+    status: "pending",
+    originResolutionId: args.originResolutionId,
+    originActionId: args.originActionId,
+    originActor: args.originActor,
+    originCityId: args.originCityId,
+    originSummaryText: args.originSummaryText,
+    targetCityId: args.targetCityId,
+    sourceKind: args.sourceKind,
+    generation: args.generation,
+    chainId: args.chainId,
+    chainRootPendingId: args.chainRootPendingId,
+    createdByResolutionId: args.createdByResolutionId,
+    createdBySeq: null, // committer
+    createdAtSeq: null, // committer
+    createdAt: null, // committer
+    originSeq: null, // committer (== createdAtSeq for generation-1)
+    ripenCondition: {
+      scope: "realm",
+      minSeqAdvance: args.minSeqAdvance,
+      requiredSeq: null, // committer: creation summary seq + minSeqAdvance
+      minWallElapsedHours: 0,
+      eligibleAt: null, // committer: creation instant + 0 (seq gate governs)
+      requiresActionInCities: [],
+      preconditions: [],
+    },
+    delayDerivation: { basis: "contractual-schedule", ...args.scheduleDerivation },
+    payloadSpec: args.payloadSpec,
+    creationSnapshot: {
+      targetStats: (targetCity?.stats as Record<string, unknown> | undefined) ?? null,
+      ruleInputs: { kind: args.kind, targetCityId: args.targetCityId },
+    },
+    audienceUids: [...audience].sort(),
+    claim: null,
+    attempts: 0,
+    needsAttention: false,
+    referencedByRefKeys: [],
+    stateVersion: 1,
+    ripenedAtSeq: null,
+    ripenedAt: null,
+    ripensInResolutionId: null,
+    voidedAtSeq: null,
+    voidReason: null,
+    outcomeSummary: null,
+    updatedAt: null, // committer
+  };
+  return { draft: { doc } };
+}
+
 export function describeInsurancePosture(posture: InsurancePosture): string[] {
   const lines: string[] = [];
   if (!posture.institutionExists) {

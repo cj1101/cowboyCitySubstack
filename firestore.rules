@@ -1509,10 +1509,13 @@ service cloud.firestore {
     // readable by its depositor, by the bank's owner (the corporation
     // record's ownerMemberId is the one ownership fact a rule may
     // read), and by the fabric identity; company- and treasury-sourced
-    // deposits are public records (§2.7). sim_bank_loans is a reserved
-    // block: the loan record shape and its holder-read branches land
-    // with Phase 5's loan handlers — until then only admin/fabric
-    // reads and committer writes exist (fail-closed by construction).
+    // deposits are public records (§2.7). sim_bank_loans landed with
+    // Phase 5's loan handlers (PR-6 assembly, A2): the read branches
+    // mirror the deposits matrix on the loan record's own fields —
+    // a personal borrower reads their own loans, company- and
+    // treasury-borrower loans are public as their ledgers are, and
+    // the bank's owner reads the book through the same corporation
+    // ownership fact. Writes stay committer-only throughout.
 
     match /sim_member_accounts/{memberId} {
       allow read: if isAdmin() || isFabricService()
@@ -1537,8 +1540,41 @@ service cloud.firestore {
       allow create, update, delete: if isFabricCommitter();
     }
 
+    // The deposit-insurance fund singleton (Phase 4 §7.6 posture,
+    // landed at PR-6 assembly — see the note below): an existing
+    // institution is public state (its derived posture gates every
+    // member's deposit decisions), and the record is written only
+    // by the committer inside Resolution Events (founding, premium
+    // ripenings, B-13/B-14). Before its founding the doc simply
+    // does not exist — absence is the pre-founding posture, and no
+    // client write can fake one into being.
+    //
+    // ASSEMBLY NOTE (Rafe, PR-6): the Phase 4 record (PR #30)
+    // states this block landed then ("fund singleton public-read +
+    // committer-write"), but no match for the collection stood in
+    // the rules on master — the singleton was default-denied to
+    // every rules-evaluated identity (the engine never noticed: its
+    // reads run server-side). The block below lands exactly the
+    // recorded posture, nothing wider.
+    match /sim_deposit_insurance_fund/{docId} {
+      allow read: if isViewer() && docId == 'main';
+      allow create, update, delete: if isFabricCommitter() && docId == 'main';
+    }
+
     match /sim_bank_loans/{loanId} {
-      allow read: if isAdmin() || isFabricService();
+      allow read: if isAdmin() || isFabricService()
+        || (isFullMember()
+            && resource.data.borrower is map
+            && resource.data.borrower.get('kind', '') == 'personal'
+            && resource.data.borrower.get('memberId', '') == request.auth.uid)
+        || (isViewer()
+            && resource.data.borrower is map
+            && resource.data.borrower.get('kind', '') in ['company', 'treasury'])
+        || (isFullMember()
+            && resource.data.get('bankCityId', '') is string
+            && resource.data.get('bankCorporationId', '') is string
+            && exists(/databases/$(database)/documents/sim_cities/$(resource.data.bankCityId)/corporations/$(resource.data.bankCorporationId))
+            && get(/databases/$(database)/documents/sim_cities/$(resource.data.bankCityId)/corporations/$(resource.data.bankCorporationId)).data.get('ownerMemberId', '') == request.auth.uid);
       allow create, update, delete: if isFabricCommitter();
     }
 

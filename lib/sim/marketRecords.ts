@@ -169,6 +169,13 @@ export interface ShareHoldingRecord {
    * the founder's float offer). Only FREE shares can be sold or
    * transferred (§5.4). */
   committedShares: number;
+  /** Shares pledged as loan collateral (Phase 5, B-06): stamped by
+   * the funding event's pledge commit and released at seizure /
+   * repayment. Additive — absent on pre-Phase-5 records, reads as
+   * 0. Pledged shares are not free: a sale or transfer of them
+   * would strand the loan's collateral (Felix flag F7, closed by
+   * the PR-6 assembly's freeShares amendment). */
+  pledgedShares?: number;
   /** Σ (trade price × quantity) over acquisitions, from trade Log
    * entries (coded, §5.4). Fees are not cost basis. Founding shares
    * enter at their paid-in basis (paid-in capital ÷ issued shares is
@@ -184,10 +191,17 @@ export interface ShareHoldingRecord {
 }
 
 export function freeShares(
-  holding: Pick<ShareHoldingRecord, "quantityShares" | "committedShares"> | null
+  holding: Pick<
+    ShareHoldingRecord,
+    "quantityShares" | "committedShares" | "pledgedShares"
+  > | null
 ): number {
   if (!holding) return 0;
-  return holding.quantityShares - holding.committedShares;
+  return (
+    holding.quantityShares -
+    holding.committedShares -
+    (holding.pledgedShares ?? 0)
+  );
 }
 
 export function buildHoldingDoc(args: {
