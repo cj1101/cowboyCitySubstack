@@ -82,6 +82,7 @@ import {
   MARKET_ACCOUNT_SEED_RUBARS,
   PRICE_FLOOR_RUBARS,
   applyStepCap,
+  blockProtectionCapRubars,
   computeValuation,
   constituentFromListing,
   deriveRealmIndex,
@@ -1383,11 +1384,16 @@ function settleMemberExecutions(args: {
       now: args.now,
       formula: `M-04 execution ${tradeId}: buyer receives ${execution.quantityShares} shares; cost basis += trade value ${s.tradeValueRubars} R (fees are not cost basis, §5.4)`,
     });
+    // The resting order's figures are read from the PLANNED doc: one
+    // resting order can fill in two match rounds of the same event
+    // (a cancelled-insufficient-cash interruption between them).
+    const restingPlanned = plannedDoc(plan, snapshot, orderPath(resting.orderId));
+    const restingQtyAfter =
+      intOr(restingPlanned, "quantityShares", 0) - execution.quantityShares;
     patchOrder(plan, snapshot, execAcc, resting.orderId, {
-      quantityShares: resting.quantityShares - execution.quantityShares,
-      filledShares: resting.filledShares + execution.quantityShares,
-      status:
-        resting.quantityShares - execution.quantityShares <= 0 ? "filled" : "resting",
+      quantityShares: restingQtyAfter,
+      filledShares: intOr(restingPlanned, "filledShares", 0) + execution.quantityShares,
+      status: restingQtyAfter <= 0 ? "filled" : "resting",
     }, `M-04 execution ${tradeId}: resting order consumed at its own price (§1.6 step 4)`);
 
     const tradeDoc = buildTradeDoc({
@@ -1957,6 +1963,675 @@ function listCompanyHandler(ctx: HandlerContext): ResolutionPlan {
     extraClassification: {
       listing: { branch: "full", openingPriceRubars: opening, sharesIssued, floatShares, judgment: { ...judgment, source: "prepared-payload" } },
       invokesRules: ["M-06"],
+    },
+  });
+}
+
+/** Flush accumulated changes for one entry city: returns them and
+ * clears them from the accumulator, so a long event can distribute
+ * its changes across entries without duplicating any (a field that
+ * changes again later starts a fresh record from its then-current
+ * planned value — setField/mutateHolding read planned state). */
+function accFlush(acc: ChangeAcc, entryCityId: string | null): SimChange[] {
+  const prefix = `${entryCityId ?? ""}|`;
+  const out: SimChange[] = [];
+  for (const [key, change] of acc) {
+    if (key.startsWith(prefix)) {
+      out.push(change);
+      acc.delete(key);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// M-02 — issue shares / inject capital / place or recall float.
+// ---------------------------------------------------------------------------
+
+function marketIssueHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-02";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  const branch = stringField(ctx.action, "branch");
+  if (!corporationId || !homeCityId || !branch) {
+    return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], "M-02: market_issue requires corporationId, homeCityId and branch (issue | inject | place-float | recall-float).");
+  }
+  if (!["issue", "inject", "place-float", "recall-float"].includes(branch)) {
+    return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], `M-02: branch "${branch}" is not one of issue | inject | place-float | recall-float.`);
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const ownerGate = requireOwner(ctx, descriptorId, gate.corp, corporationId);
+  if (isPlan(ownerGate)) return ownerGate;
+  const ownerId = ownerGate;
+  const { corp, corpPath, listing } = gate;
+
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const now = new Date(ctx.snapshot.now);
+  const acc: ChangeAcc = new Map();
+  const judgment = judgmentFromPrepared(ctx);
+  const reprice = (invokedBy: string): void => {
+    composeMarketRepricing({
+      plan,
+      snapshot: ctx.snapshot,
+      actor: ctx.action.actor,
+      corporationId,
+      homeCityId,
+      judgment,
+      judgmentRationale: judgmentRationaleFromPrepared(ctx),
+      judgmentInputHash: ctx.prepared?.inputHash ?? null,
+      stepCapException: null,
+      invokedByRuleId: invokedBy,
+    });
+  };
+
+  if (branch === "issue") {
+    const newShares = positiveAmount(ctx.action, "newShares");
+    if (newShares === null) {
+      return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], "M-02 issue: newShares must be a positive integer.");
+    }
+    const destination = stringField(ctx.action, "destination") ?? "founder";
+    if (destination !== "founder" && destination !== "float") {
+      return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], `M-02 issue: destination "${destination}" is not founder | float.`);
+    }
+    const liveBefore = liveShares(corp);
+    const holdersBefore = holdingDocs(ctx.snapshot)
+      .map(({ doc }) => doc as unknown as ShareHoldingRecord)
+      .filter((h) => h.corporationId === corporationId && h.quantityShares > 0);
+    mutateHolding(plan, ctx.snapshot, acc, {
+      memberId: ownerId,
+      corporationId,
+      homeCityId,
+      deltaQuantity: newShares,
+      deltaCommitted: destination === "float" ? newShares : 0,
+      deltaCostBasis: 0,
+      create: true,
+      seq,
+      resolutionId: ctx.resolutionId,
+      now,
+      formula: "M-02 issuance: new shares are issued to the founder (unpaid — cost basis unchanged); destination float commits them behind the float offer",
+    });
+    if (destination === "float") {
+      const price = positiveAmount(ctx.action, "limitPriceRubars") ?? listing.referencePriceRubars;
+      placeOrGrowFloatOffer({
+        plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+        founderMemberId: ownerId, addQuantity: newShares, priceRubars: price,
+        seq, resolutionId: ctx.resolutionId, now,
+        formula: "M-02 issuance direct to float: the new shares join the standing float offer",
+      });
+      setField(plan, ctx.snapshot, acc, {
+        path: listingPath(corporationId), docField: "committedFloatShares", entryCityId: null,
+        field: listingField(corporationId, "committedFloatShares"),
+        value: listing.committedFloatShares + newShares,
+        formula: "M-02 issuance to float: committed float grows by the issued quantity",
+      });
+    }
+    setField(plan, ctx.snapshot, acc, {
+      path: corpPath, docField: "sharesOutstanding", entryCityId: homeCityId,
+      field: corpField(corporationId, "sharesOutstanding"),
+      value: issuedShares(corp) + newShares,
+      formula: "M-02 issuance: sharesOutstanding (cumulative issued) grows by the new issuance",
+    });
+    const pct = (qty: number, total: number): string =>
+      total > 0 ? `${((qty / total) * 100).toFixed(2)}%` : "—";
+    const dilution = holdersBefore
+      .map((h) => {
+        const afterQty = h.quantityShares + (h.memberId === ownerId ? newShares : 0);
+        return `${h.memberId}: ${pct(h.quantityShares, liveBefore)} → ${pct(afterQty, liveBefore + newShares)} (${h.quantityShares} → ${afterQty} shares)`;
+      })
+      .join("; ");
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: accFlush(acc, null),
+        recordsUpdated: [holdingPath(ownerId, corporationId), listingPath(corporationId)],
+        summaryText: `M-02 issuance for ${corporationId}: ${newShares} new shares issued to the founder (destination: ${destination}); live shares ${liveBefore} → ${liveBefore + newShares}. Dilution disclosed exactly (percentages are derived; existing holders' share counts do not move): ${dilution || "no other holders"}. Minority holders cannot block an issuance in v1 — their protection is this disclosure at this seq, before any later trade can occur (M-02 spillover note).`,
+      })
+    );
+    const corpChanges = accFlush(acc, homeCityId);
+    if (corpChanges.length > 0) {
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: homeCityId,
+          cityIds: [homeCityId],
+          ruleIds: [descriptorId],
+          changes: corpChanges,
+          recordsUpdated: [corpPath],
+          summaryText: `M-02 issuance: ${corporationId}'s issued share count now stands at ${issuedShares(corp) + newShares}.`,
+        })
+      );
+    }
+    reprice(descriptorId);
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: "issue-shares",
+      scope: "company",
+      cityId: homeCityId,
+      summaryText: `Issued ${newShares} new shares of ${corporationId} to the founder (destination: ${destination}); repricing ran in-event (M-06).`,
+      major: true,
+      extraClassification: { marketIssue: { branch, newShares, destination }, invokesRules: ["M-06"] },
+    });
+  }
+
+  if (branch === "inject") {
+    const amount = positiveAmount(ctx.action, "amountRubars");
+    if (amount === null) {
+      return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], "M-02 inject: amountRubars must be a positive integer.");
+    }
+    const fundingSource = stringField(ctx.action, "fundingSource") ?? "personal";
+    if (fundingSource === "treasury") {
+      return rejectedPlan(descriptorId, "treasury-source-suspended", [descriptorId, "P4-K21"], "M-02 inject: capital sourced from a city treasury is suspended in Phase 4 (P4-K21(ii)).");
+    }
+    if (fundingSource !== "personal") {
+      return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], `M-02 inject: fundingSource "${fundingSource}" is not a lawful capital source (personal is the Phase 4 source).`);
+    }
+    composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: ownerId, viaActionKind: "market_issue" });
+    const line: TransferLine = {
+      from: personalRef(ownerId),
+      to: companyRef(homeCityId, corporationId),
+      amountRubars: amount,
+      ruleId: descriptorId,
+      memo: `capital injection into ${corporationId} (M-02)`,
+    };
+    const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+    if (!applied.ok) {
+      return rejectedPlan(
+        descriptorId,
+        applied.code === "INSUFFICIENT_FUNDS" ? "insufficient-funds" : applied.code.toLowerCase().replace(/_/g, "-"),
+        [descriptorId],
+        `M-02 inject: the injection of ${amount} R refused in full (transfer class): ${applied.message}`
+      );
+    }
+    pushMovementEntries(plan, ctx, [descriptorId], applied.changes, (entryCityId) =>
+      entryCityId === null
+        ? `M-02 inject: ${ownerId}'s personal account paid ${amount} R into ${corporationId} (funding source: founder's personal account, recorded distinctly).`
+        : `M-02 inject: ${corporationId}'s company cash received ${amount} R. The injection is a coded M-06 input — no multiplier touches valuation; repricing runs in this event.`
+    );
+    setField(plan, ctx.snapshot, acc, {
+      path: corpPath, docField: "paidInCapitalRubars", entryCityId: homeCityId,
+      field: corpField(corporationId, "paidInCapitalRubars"),
+      value: intOr(corp, "paidInCapitalRubars", 0) + amount,
+      formula: "M-02 inject: paid-in capital accumulates the injection (the step-7 composition maintains the figure F-03 leaves standing)",
+    });
+    const corpChanges = accFlush(acc, homeCityId);
+    if (corpChanges.length > 0) {
+      plan.entries.push(
+        ruleEffectDraft({
+          actor: ctx.action.actor,
+          cityId: homeCityId,
+          cityIds: [homeCityId],
+          ruleIds: [descriptorId],
+          changes: corpChanges,
+          recordsUpdated: [corpPath],
+          summaryText: `M-02 inject: ${corporationId}'s paid-in capital now stands at ${intOr(corp, "paidInCapitalRubars", 0) + amount} R.`,
+        })
+      );
+    }
+    reprice(descriptorId);
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: "inject-capital",
+      scope: "company",
+      cityId: homeCityId,
+      summaryText: `Injected ${amount} R of personal capital into ${corporationId}; repricing ran in-event (M-06).`,
+      extraClassification: { marketIssue: { branch, amountRubars: amount, fundingSource }, invokesRules: ["M-06"] },
+    });
+  }
+
+  if (branch === "place-float") {
+    const quantity = positiveAmount(ctx.action, "quantityShares");
+    if (quantity === null) {
+      return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], "M-02 place-float: quantityShares must be a positive integer.");
+    }
+    const holding = plannedHolding(plan, ctx.snapshot, ownerId, corporationId);
+    if (freeShares(holding) < quantity) {
+      return rejectedPlan(descriptorId, "insufficient-free-shares", [descriptorId], `M-02 place-float: the founder holds ${freeShares(holding)} free shares of ${corporationId}; ${quantity} cannot be committed to the float.`);
+    }
+    const price = positiveAmount(ctx.action, "limitPriceRubars") ?? listing.referencePriceRubars;
+    mutateHolding(plan, ctx.snapshot, acc, {
+      memberId: ownerId,
+      corporationId,
+      homeCityId,
+      deltaQuantity: 0,
+      deltaCommitted: quantity,
+      deltaCostBasis: 0,
+      create: false,
+      seq,
+      resolutionId: ctx.resolutionId,
+      now,
+      formula: "M-02 place-float: founder shares commit behind the float offer (custody, P4-K21 — the shares do not move)",
+    });
+    placeOrGrowFloatOffer({
+      plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+      founderMemberId: ownerId, addQuantity: quantity, priceRubars: price,
+      seq, resolutionId: ctx.resolutionId, now,
+      formula: "M-02 place-float: the standing float offer grows at the stated price",
+    });
+    setField(plan, ctx.snapshot, acc, {
+      path: listingPath(corporationId), docField: "committedFloatShares", entryCityId: null,
+      field: listingField(corporationId, "committedFloatShares"),
+      value: listing.committedFloatShares + quantity,
+      formula: "M-02 place-float: committed float grows by the placed quantity",
+    });
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: accFlush(acc, null),
+        recordsUpdated: [holdingPath(ownerId, corporationId), orderPath(floatOfferOrderId(corporationId)), listingPath(corporationId)],
+        summaryText: `M-02 place-float for ${corporationId}: ${quantity} founder shares committed to the float at ${price} R (the float offer now stands at ${listing.committedFloatShares + quantity}). No §4.3 coded input changed, so no repricing runs — the index float inputs update in this event (§3.3). ${indexNote(plan, ctx.snapshot)}`,
+      })
+    );
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: "place-float",
+      scope: "company",
+      cityId: homeCityId,
+      summaryText: `Placed ${quantity} shares of ${corporationId} into the float at ${price} R.`,
+      extraClassification: { marketIssue: { branch, quantityShares: quantity, priceRubars: price } },
+    });
+  }
+
+  // branch === "recall-float"
+  const quantity = positiveAmount(ctx.action, "quantityShares");
+  if (quantity === null) {
+    return rejectedPlan(descriptorId, "malformed-issue", [descriptorId], "M-02 recall-float: quantityShares must be a positive integer.");
+  }
+  const offerPath = orderPath(floatOfferOrderId(corporationId));
+  const offerDoc = plannedDoc(plan, ctx.snapshot, offerPath);
+  const offer = offerDoc ? (offerDoc as unknown as MarketOrderRecord) : null;
+  if (!offer || offer.status !== "resting") {
+    return rejectedPlan(descriptorId, "no-float-offer", [descriptorId], `M-02 recall-float: no standing float offer rests for ${corporationId} — there is no committed float to recall.`);
+  }
+  if (quantity > offer.quantityShares) {
+    return rejectedPlan(descriptorId, "float-recall-exceeds-offer", [descriptorId], `M-02 recall-float: the float offer for ${corporationId} stands at ${offer.quantityShares} shares; a recall of ${quantity} exceeds it and is refused whole (no silent trim).`);
+  }
+  const remainingOffer = offer.quantityShares - quantity;
+  patchOrder(plan, ctx.snapshot, acc, offer.orderId, {
+    quantityShares: remainingOffer,
+    originalQuantityShares: offer.originalQuantityShares - quantity,
+    ...(remainingOffer <= 0 ? { status: "cancelled" as const, cancelReason: "float-recall" } : {}),
+  }, "M-02 recall-float: the standing float offer shrinks by the recalled quantity (custody release, P4-K21)");
+  mutateHolding(plan, ctx.snapshot, acc, {
+    memberId: ownerId,
+    corporationId,
+    homeCityId,
+    deltaQuantity: 0,
+    deltaCommitted: -quantity,
+    deltaCostBasis: 0,
+    create: false,
+    seq,
+    resolutionId: ctx.resolutionId,
+    now,
+    formula: "M-02 recall-float: the commitment releases — the shares never moved (custody, P4-K21)",
+  });
+  setField(plan, ctx.snapshot, acc, {
+    path: listingPath(corporationId), docField: "committedFloatShares", entryCityId: null,
+    field: listingField(corporationId, "committedFloatShares"),
+    value: listing.committedFloatShares - quantity,
+    formula: "M-02 recall-float: committed float falls by the recalled quantity",
+  });
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      changes: accFlush(acc, null),
+      recordsUpdated: [offerPath, holdingPath(ownerId, corporationId), listingPath(corporationId)],
+      summaryText: `M-02 recall-float for ${corporationId}: ${quantity} shares released from the float offer (${remainingOffer} remain committed). Under custody the shares never left the founder's holding — recall is the release of a commitment, not a transfer (P4-K21). No §4.3 coded input changed, so no repricing runs. ${indexNote(plan, ctx.snapshot)}`,
+    })
+  );
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "recall-float",
+    scope: "company",
+    cityId: homeCityId,
+    summaryText: `Recalled ${quantity} shares of ${corporationId} from the float (${remainingOffer} remain offered).`,
+    extraClassification: { marketIssue: { branch, quantityShares: quantity } },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-03 — place an order (matching + settlement compose in-event as
+// M-04; expiry evaluates first as M-05). Any member may trade (§1.9);
+// shares are economic-only and no city authority is involved.
+// ---------------------------------------------------------------------------
+
+function placeOrderHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-03";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId) {
+    return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "M-03: orders are always a named member's — the actor carries no member identity.");
+  }
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  if (!corporationId || !homeCityId) {
+    return rejectedPlan(descriptorId, "malformed-order", [descriptorId], "M-03: place_order requires corporationId and homeCityId.");
+  }
+  const gate = requireListedCompany(ctx, descriptorId, homeCityId, corporationId);
+  if (isPlan(gate)) return gate;
+  const { listing } = gate;
+  if (listing.tradingStatus === "halted") {
+    return rejectedPlan(descriptorId, "listing-halted", [descriptorId], `M-03: trading in ${corporationId} is halted (${listing.haltReason ?? "coded condition"}) — orders are rejected while the halt stands (§1.8). Resting orders remain and may be cancelled.`);
+  }
+  if (listing.tradingStatus === "suspended") {
+    return rejectedPlan(descriptorId, "listing-suspended", [descriptorId], `M-03: trading in ${corporationId} is suspended by its owner (M-07) — orders are rejected while the suspension stands.`);
+  }
+  if (!snapshotDoc(ctx.snapshot, MARKET_ACCOUNT_PATH)) {
+    return rejectedPlan(descriptorId, "market-account-missing", [descriptorId], "M-03: the Market Account does not stand — the exchange's founding act (M-00) is a named gate item, and fee legs cannot settle without it. It is never lazy-invented inside a trade.");
+  }
+  const side = stringField(ctx.action, "side");
+  if (side !== "buy" && side !== "sell") {
+    return rejectedPlan(descriptorId, "malformed-order", [descriptorId], "M-03: side must be buy | sell.");
+  }
+  const orderType = stringField(ctx.action, "orderType");
+  if (orderType !== "market" && orderType !== "limit" && orderType !== "block") {
+    return rejectedPlan(descriptorId, "malformed-order", [descriptorId], "M-03: orderType must be market | limit | block (§1.5).");
+  }
+  const quantity = positiveAmount(ctx.action, "quantityShares");
+  if (quantity === null) {
+    return rejectedPlan(descriptorId, "malformed-order", [descriptorId], "M-03: quantityShares must be a positive integer.");
+  }
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const expiresAtSeq = sa(ctx.action).expiresAtSeq;
+  if (expiresAtSeq !== undefined && expiresAtSeq !== null) {
+    if (typeof expiresAtSeq !== "number" || !Number.isInteger(expiresAtSeq) || expiresAtSeq <= seq) {
+      return rejectedPlan(descriptorId, "malformed-order", [descriptorId], "M-03: expiresAtSeq, when stated, must be a future seq horizon (expiry is a seq, never a wall-clock timer, §1.5).");
+    }
+  }
+  let effectiveCap: number;
+  if (orderType === "limit") {
+    const limit = positiveAmount(ctx.action, "limitPriceRubars");
+    if (limit === null) {
+      return rejectedPlan(descriptorId, "malformed-order", [descriptorId], "M-03: a limit order states limitPriceRubars (a positive integer).");
+    }
+    effectiveCap = limit;
+  } else if (orderType === "market") {
+    const cap = positiveAmount(ctx.action, "limitPriceRubars") ?? positiveAmount(ctx.action, "protectionPriceRubars");
+    if (cap === null) {
+      return rejectedPlan(descriptorId, "protection-cap-required", [descriptorId], "M-03: a market order carries a mandatory protection cap (maximum price for a buy, minimum for a sell, §1.5) — an unprotected market order in a thin book is a blank cheque and is never accepted.");
+    }
+    effectiveCap = cap;
+  } else {
+    effectiveCap = blockProtectionCapRubars(side, listing.referencePriceRubars);
+  }
+
+  const plan = emptyPlan(descriptorId);
+  const now = new Date(ctx.snapshot.now);
+  const acc: ChangeAcc = new Map();
+
+  // Step 0 (§1.4): the actor's account lazy-opens before any line.
+  composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: actorId, viaActionKind: "place_order" });
+
+  // Expiry evaluates first (M-05 mechanism, in-event).
+  const expired = expirySweep({
+    plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+    seq, resolutionId: ctx.resolutionId, now,
+  });
+  if (expired.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId, "M-05"],
+        changes: accFlush(acc, null),
+        recordsUpdated: expired.map((o) => orderPath(o.orderId)),
+        summaryText: `M-05 expiry evaluated in this event: ${expired.map((o) => `${o.orderId} (${o.side} ${o.originalQuantityShares} by ${o.memberId}, expiresAtSeq ${o.expiresAtSeq})`).join("; ")} — status expired; committed shares released. Expiry is evaluated when an event touches the listing, never by a timer.`,
+      })
+    );
+  }
+
+  const { book, docsById, malformed } = buildEngineBook(plan, ctx.snapshot, corporationId);
+
+  // Placement validation (§1.6 step 7): sells against free shares;
+  // buys against worst-case cash (cap value + per-execution fee
+  // headroom: each crossing execution's fee rounds up, so the bound
+  // adds one Rubar of rounding per crossing resting order).
+  if (side === "sell") {
+    const holding = plannedHolding(plan, ctx.snapshot, actorId, corporationId);
+    if (freeShares(holding) < quantity) {
+      return rejectedPlan(descriptorId, "insufficient-free-shares", [descriptorId], `M-03: ${actorId} holds ${freeShares(holding)} free shares of ${corporationId} (quantity minus committed); a sell of ${quantity} is rejected at validation, never partially settled into a negative (§1.6 step 7). Short selling is out of v1 (§1.5).`);
+    }
+  } else {
+    const crossing = book.filter(
+      (o) => o.side === "sell" && o.limitPriceRubars <= effectiveCap && o.memberId !== actorId
+    ).length;
+    const worstValue = quantity * effectiveCap;
+    const worstTotal = worstValue + Math.ceil(worstValue * 0.0025) + crossing;
+    const cash = plannedBalance(plan, ctx.snapshot, personalRef(actorId));
+    if (cash === null || cash < worstTotal) {
+      return rejectedPlan(descriptorId, "insufficient-cash", [descriptorId], `M-03: a ${side} of ${quantity} shares at a cap of ${effectiveCap} R needs up to ${worstTotal} R (value + fee headroom); ${actorId}'s account holds ${cash ?? 0} R. The order is rejected at validation, never partially settled into a negative (§1.6 step 7). Resting buys carry no cash reservation in v1 — sufficiency is re-validated at crossing (prep report D-5).`);
+    }
+  }
+
+  // Counterparties settle in this event: their accounts stand ready
+  // (step 0 for the book — a resting order's owner opened theirs at
+  // placement; this covers any record gap defensively).
+  const bookOwners = [...new Set(book.map((o) => o.memberId))].sort();
+  for (const owner of bookOwners) {
+    if (owner !== actorId) {
+      composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: owner, viaActionKind: "place_order" });
+    }
+  }
+
+  // Matching (§1.6), with D-5's crossing re-validation: a resting
+  // buyer who cannot cover an execution is cancelled in-event and
+  // matching continues against the reduced book.
+  const incomingOrderId = `ord_${ctx.resolutionId}`;
+  const runningCash = new Map<string, number>();
+  const cashOf = (memberId: string): number => {
+    const cached = runningCash.get(memberId);
+    if (cached !== undefined) return cached;
+    const value = plannedBalance(plan, ctx.snapshot, personalRef(memberId)) ?? 0;
+    runningCash.set(memberId, value);
+    return value;
+  };
+  const accepted: { execution: Execution; resting: MarketOrderRecord }[] = [];
+  const cancelledResting: MarketOrderRecord[] = [];
+  let bookState = book.map((o) => ({ ...o }));
+  let remaining = quantity;
+  let selfMatchSkipped = false;
+  while (remaining > 0) {
+    const result = matchIncomingOrder(
+      {
+        orderId: incomingOrderId,
+        listingId: corporationId,
+        memberId: actorId,
+        side,
+        type: orderType === "limit" ? "limit" : "market",
+        quantityShares: remaining,
+        limitPriceRubars: effectiveCap,
+      },
+      bookState,
+      "open"
+    );
+    selfMatchSkipped = selfMatchSkipped || result.selfMatchSkipped;
+    if (result.executions.length === 0) break;
+    let failedOrderId: string | null = null;
+    for (const execution of result.executions) {
+      if (side === "sell") {
+        const value = execution.quantityShares * execution.priceRubars;
+        const cost = value + exchangeFeeRubars(value);
+        if (cashOf(execution.buyerMemberId) < cost) {
+          failedOrderId = execution.restingOrderId;
+          break;
+        }
+        runningCash.set(execution.buyerMemberId, cashOf(execution.buyerMemberId) - cost);
+      }
+      const resting = docsById.get(execution.restingOrderId);
+      if (!resting) continue;
+      accepted.push({ execution, resting });
+      remaining -= execution.quantityShares;
+      bookState = bookState
+        .map((o) =>
+          o.orderId === execution.restingOrderId
+            ? { ...o, quantityShares: o.quantityShares - execution.quantityShares }
+            : o
+        )
+        .filter((o) => o.quantityShares > 0);
+    }
+    if (failedOrderId) {
+      const failed = docsById.get(failedOrderId);
+      if (failed) cancelledResting.push(failed);
+      bookState = bookState.filter((o) => o.orderId !== failedOrderId);
+      continue;
+    }
+    break;
+  }
+
+  if (accepted.length > 0) {
+    const settledResult = settleMemberExecutions({
+      plan,
+      snapshot: ctx.snapshot,
+      acc,
+      actor: ctx.action.actor,
+      resolutionId: ctx.resolutionId,
+      corporationId,
+      homeCityId,
+      founderMemberId: listing.ownerMemberId,
+      incomingOrderId,
+      accepted,
+      seq,
+      now,
+    });
+    if (!settledResult.ok) {
+      return rejectedPlan(
+        descriptorId,
+        settledResult.code === "INSUFFICIENT_FUNDS" ? "insufficient-cash" : settledResult.code.toLowerCase().replace(/_/g, "-"),
+        [descriptorId, "M-04"],
+        `M-03/M-04: settlement refused in full: ${settledResult.message}`
+      );
+    }
+  }
+
+  // Resting buyers cancelled at crossing (D-5): commitments were cash
+  // (unreserved), so cancellation is a bookkeeping act only.
+  if (cancelledResting.length > 0) {
+    const cancelAcc: ChangeAcc = new Map();
+    for (const order of cancelledResting) {
+      patchOrder(plan, ctx.snapshot, cancelAcc, order.orderId, {
+        status: "cancelled",
+        cancelReason: "insufficient-cash-at-settlement",
+      }, "M-05/D-5: a resting buy is re-validated at crossing; insufficient cash cancels it in-event and matching continues");
+    }
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId, "M-05"],
+        changes: accFlush(cancelAcc, null),
+        recordsUpdated: cancelledResting.map((o) => orderPath(o.orderId)),
+        summaryText: `M-05 in-event cancellation: ${cancelledResting.map((o) => `${o.orderId} (buy ${o.quantityShares} at ${o.limitPriceRubars} R by ${o.memberId})`).join("; ")} — cancelled-insufficient-cash: a resting buy carries no cash reservation in v1, so crossing re-validates the buyer; their cash could not cover the execution and the order was cancelled rather than settled into a negative (§1.6 step 7).`,
+      })
+    );
+  }
+
+  // The incoming order's own record: placed in full, with its final
+  // disposition (filled | resting remainder | cancelled remainder).
+  const filled = quantity - remaining;
+  const finalStatus =
+    remaining === 0 ? "filled" : orderType === "limit" ? "resting" : "cancelled";
+  const incomingDoc: Record<string, unknown> = {
+    ...buildOrderDoc({
+      orderId: incomingOrderId,
+      corporationId,
+      homeCityId,
+      memberId: actorId,
+      side,
+      type: orderType,
+      kind: "standard",
+      quantityShares: quantity,
+      limitPriceRubars: effectiveCap,
+      placedAtSeq: seq,
+      expiresAtSeq: typeof expiresAtSeq === "number" ? expiresAtSeq : null,
+      sourceActionId: ctx.action.actionId,
+      lastResolutionId: ctx.resolutionId,
+      now,
+    }),
+    quantityShares: remaining,
+    filledShares: filled,
+    status: finalStatus,
+    cancelReason: finalStatus === "cancelled" ? "unfilled-market-remainder" : null,
+  };
+  planWrite(plan, ctx.snapshot, orderPath(incomingOrderId), incomingDoc, "state", [
+    "quantityShares",
+    "filledShares",
+    "status",
+    "limitPriceRubars",
+  ]);
+  accChange(acc, null, orderField(incomingOrderId, "status"), null, finalStatus, "M-03: the order as placed and finally disposed in this event");
+  if (finalStatus === "resting" && side === "sell" && remaining > 0) {
+    mutateHolding(plan, ctx.snapshot, acc, {
+      memberId: actorId,
+      corporationId,
+      homeCityId,
+      deltaQuantity: 0,
+      deltaCommitted: remaining,
+      deltaCostBasis: 0,
+      create: false,
+      seq,
+      resolutionId: ctx.resolutionId,
+      now,
+      formula: "M-03: the resting remainder's shares commit at placement (only free shares can ever be sold or transferred, §5.4)",
+    });
+  }
+  const placementChanges = accFlush(acc, null);
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      changes: placementChanges,
+      recordsCreated: [orderPath(incomingOrderId)],
+      recordsUpdated: [listingPath(corporationId), holdingPath(actorId, corporationId)],
+      summaryText:
+        `M-03 order ${incomingOrderId}: ${actorId} ${side} ${quantity} shares of ${corporationId}, type ${orderType}, cap/limit ${effectiveCap} R — filled ${filled}, remainder ${remaining} ${finalStatus === "resting" ? "rests in the book" : finalStatus === "cancelled" ? "cancelled (market/block remainders never rest, §1.6 step 6)" : ""}.` +
+        (selfMatchSkipped ? " Self-match skipped: the incoming order never executes against the same member's resting orders (§1.6 step 5)." : "") +
+        (malformed.length > 0 ? ` Book note: resting order(s) ${malformed.join(", ")} carry no price and were skipped by matching (corrupt record — cancellable by their owner; remedy is M-11).` : "") +
+        ` Market Maker quote at placement (reference ± half-spread, §1.7): bid ${marketMakerQuote(listing.referencePriceRubars).bidRubars} R / ask ${marketMakerQuote(listing.referencePriceRubars).askRubars} R — the quote is display and block-cap input only; under custody the Maker holds no inventory and executions run against the book (P4-K21).`,
+    })
+  );
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "place-order",
+    scope: "market",
+    cityId: homeCityId,
+    summaryText: `${actorId} placed a ${orderType} ${side} for ${quantity} shares of ${corporationId} at cap/limit ${effectiveCap} R: filled ${filled}, remainder ${remaining} ${finalStatus}.`,
+    extraClassification: {
+      marketOrder: {
+        orderId: incomingOrderId,
+        side,
+        orderType,
+        quantityShares: quantity,
+        filledShares: filled,
+        remainderShares: remaining,
+        disposition: finalStatus,
+        effectiveCapRubars: effectiveCap,
+        selfMatchSkipped,
+        expiredOrderIds: expired.map((o) => o.orderId),
+        cancelledInsufficientCashOrderIds: cancelledResting.map((o) => o.orderId),
+      },
+      ...(accepted.length > 0 ? { invokesRules: ["M-04"] } : {}),
     },
   });
 }
