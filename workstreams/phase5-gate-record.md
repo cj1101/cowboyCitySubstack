@@ -512,3 +512,81 @@ report's watch items N5 same-wake claim parity and N9(b)
 DEPENDENTS_EXIST remain ahead of it).
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 2, 2026-10-21.*
+
+---
+
+## CI fix round 3 (PR #45) — INTERIM: diagnosis + DIAG commit (fix contingent on the probe verdict)
+
+Round 2's fix landed (N0–N3 all ok on the re-run; N2's hash check and
+N3's ruleHash parity now proven in the emulator venue). N4 then died
+on an UNCAUGHT `FirebaseError: No matching allow statements`
+(`permission-denied`, no assertion frame) — the suite process exited
+inside N4's wake. Round-3 job log: `pr45-simcore-log-r3.txt`.
+
+**What the evidence says before any new code:**
+
+- The error text is the emulator's **query-denial** message. Document
+  denials in this project's CI logs carry the verbose evaluation text
+  (`false for 'get' @ L…`, `evaluation error at L…` — see the PR #44
+  rules log); the terse `No matching allow statements` is what a
+  denied `getDocs` returns. Corroborating: the run's uploaded
+  `firestore-debug.log` artifact (fetched via the Actions API) shows
+  authorizer WARNINGs for the expected document denials earlier in
+  the chain and **none at the failure second (06:57:35)** — nothing
+  was logged for a document commit denial at that moment.
+- Static enumeration of every client-SDK operation N4's wake performs
+  that N0–N3's wakes did not: the delegated-action **create** matches
+  the rules suite's PR-4 asserted shape field-for-field (the two
+  production-only extras — the body's `actionId` field and
+  `structuredAction.delegatedVia` — meet no key-enumerating branch);
+  the situations/cities/counters/world/manifest writes ride unfenced
+  committer branches exercised since N1; the log-entry validator
+  (`validNewLogEntry`) never inspects the actor, and
+  `npcActorStanding` carries **no** `characterId` (P5-K13's additive
+  field lives on the MEMBER form only) — the brief's lead (1) is dead
+  in its literal form for both the action doc and its entries.
+- The ONE operation with no prior emulator-venue precedent is the
+  delegation pass's seed query — `WAKE_RULES_QUERY_ID`:
+  `sim_delegation_rules where cityId == "cityA"`, executed by
+  `firestoreQueryReader` over the committer DB. That collection's
+  read rule is the only one among everything the engine queries whose
+  sibling branches call `get()` on resource-derived paths
+  (`ownsListedCity(resource.data.cityId)` → `exists`/`get` on
+  `faction_members`/`factions` keyed by a field the query does not
+  constrain) — the classic emulator query-authorization poison: the
+  Datastore emulator's authorizer cannot prove the query from the
+  combined expression even though the first disjunct
+  (`isFabricService()`) is auth-only and true. Every previously
+  exercised engine query runs against rules whose read branches are
+  auth-only or viewer-only (`sim_actions`, `sim_npcs`,
+  `sim_pending_consequences`, `sim_task_envelopes`) and passes.
+
+**DIAG commit (`521a762`, throwaway — removed with the fix):**
+read-only probes inserted between N3 and N4, catch-and-log, suite
+proceeds to the real failure: **Q1** the suspect query as fabricSvc;
+**Q2** control — `sim_npcs where cityId` as fabricSvc (known-good
+pattern); **Q3** control — `sim_delegation_rules where ownerUid` as
+ownerA (the member-side query on the same collection); **Q4** control
+— `sim_situations where audienceCityId` as fabricSvc (the other
+`ownsListedCity`-bearing read rule, fabric-first). Plus stage markers
+bracketing N4's card seed and its touch+wake. Local regression for
+the DIAG commit: `tsc --noEmit` clean, scoped ESLint clean (the
+emulator suites remain CI's venue).
+
+**Contingent fix (lands when the probes convict Q1):** the rules
+layer, semantics-identical — split `sim_delegation_rules`' read into
+two allow statements (the fabric/admin statement, resource-free and
+independently query-provable; the member statement unchanged), so
+the authorized (identity, doc) set is exactly today's while the
+fabric query is provable in the emulator's per-statement query
+check. Plus rules-suite assertions: the fabric cityId query succeeds
+and returns both cityA rules; a member's ownerUid query succeeds; a
+non-author member's cityId query still fails (no widening). Sibling
+flag for the record, NOT touched this round: `sim_situations`' read
+rule carries the same combined pattern, but no fabric/engine path
+queries that collection (doc gets + member UI queries only), so it
+is out of this round's indictment. If Q1 instead ALLOWS, the next
+round bisects inside `executeDelegatedAction`/`commitStep` with
+labeled catches; the stage markers bound that search.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 3 (interim), 2026-10-21.*
