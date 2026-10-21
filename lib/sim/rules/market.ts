@@ -605,3 +605,915 @@ function plannedBalance(
   if (!path) return null;
   return ledgerBalance(plannedDoc(plan, snapshot, path), ref);
 }
+
+// ---------------------------------------------------------------------------
+// Field setting with change accumulation (skip-if-equal: an unchanged
+// field produces neither a write nor a change record).
+// ---------------------------------------------------------------------------
+
+function setField(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  acc: ChangeAcc,
+  args: {
+    path: string;
+    docField: string;
+    entryCityId: string | null;
+    field: string;
+    value: unknown;
+    formula: string;
+  }
+): void {
+  const current = plannedDoc(plan, snapshot, args.path);
+  const before = current ? docField(current, args.docField) : null;
+  if (before === args.value) return;
+  planMutate(plan, snapshot, args.path, "state", [args.docField], (doc) => {
+    if (!doc) return doc;
+    return { ...doc, [args.docField]: args.value };
+  });
+  accChange(acc, args.entryCityId, args.field, before ?? null, args.value, args.formula);
+}
+
+const corpField = (corporationId: string, field: string): string =>
+  `corporations/${corporationId}.${field}`;
+const listingField = (corporationId: string, field: string): string =>
+  `marketListings/${corporationId}.${field}`;
+const holdingField = (memberId: string, corporationId: string, field: string): string =>
+  `holdings/${memberId}__${corporationId}.${field}`;
+const orderField = (orderId: string, field: string): string =>
+  `marketOrders/${orderId}.${field}`;
+
+/** Fold a patch into an order record (planned-aware), accumulating one
+ * change per touched field under the null-city `marketOrders/…`
+ * spelling. Returns the after-state. */
+function patchOrder(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  acc: ChangeAcc,
+  orderId: string,
+  patch: Partial<MarketOrderRecord>,
+  formula: string
+): MarketOrderRecord | null {
+  const path = orderPath(orderId);
+  const current = plannedDoc(plan, snapshot, path);
+  if (!current) return null;
+  const after: Record<string, unknown> = { ...current };
+  const changedFields: string[] = [];
+  for (const [field, value] of Object.entries(patch)) {
+    if (current[field] === value) continue;
+    accChange(acc, null, orderField(orderId, field), current[field] ?? null, value, formula);
+    after[field] = value;
+    changedFields.push(field);
+  }
+  if (changedFields.length > 0) planWrite(plan, snapshot, path, after, "state", changedFields);
+  return after as unknown as MarketOrderRecord;
+}
+
+/** Fold share deltas into a holding record (planned-aware), creating
+ * it when `create` is set (first acquisition / issuance / backfill).
+ * Cost basis moves only on acquisitions (§5.4: Σ trade price × qty
+ * over acquisitions; sales never reduce it). Returns the after-state,
+ * or null when the holding does not stand and may not be created. */
+function mutateHolding(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  acc: ChangeAcc,
+  args: {
+    memberId: string;
+    corporationId: string;
+    homeCityId: string;
+    deltaQuantity: number;
+    deltaCommitted: number;
+    deltaCostBasis: number;
+    create: boolean;
+    seq: number;
+    resolutionId: string;
+    now: Date;
+    formula: string;
+  }
+): ShareHoldingRecord | null {
+  const path = holdingPath(args.memberId, args.corporationId);
+  const current = plannedDoc(plan, snapshot, path);
+  if (!current && !args.create) return null;
+  const base: Record<string, unknown> =
+    current ??
+    buildHoldingDoc({
+      memberId: args.memberId,
+      corporationId: args.corporationId,
+      homeCityId: args.homeCityId,
+      quantityShares: 0,
+      committedShares: 0,
+      costBasisRubars: 0,
+      sourceActionId: args.resolutionId,
+      sourceSeq: args.seq,
+      lastResolutionId: args.resolutionId,
+      now: args.now,
+    });
+  const beforeQty = intOr(base, "quantityShares", 0);
+  const beforeCommitted = intOr(base, "committedShares", 0);
+  const beforeBasis = intOr(base, "costBasisRubars", 0);
+  const after: Record<string, unknown> = {
+    ...base,
+    quantityShares: beforeQty + args.deltaQuantity,
+    committedShares: beforeCommitted + args.deltaCommitted,
+    costBasisRubars: beforeBasis + args.deltaCostBasis,
+    lastChangedSeq: args.seq,
+    lastResolutionId: args.resolutionId,
+    updatedAt: args.now,
+  };
+  planWrite(plan, snapshot, path, after, "state", [
+    "quantityShares",
+    "committedShares",
+    "costBasisRubars",
+  ]);
+  if (args.deltaQuantity !== 0) {
+    accChange(acc, null, holdingField(args.memberId, args.corporationId, "quantityShares"), current ? beforeQty : null, after.quantityShares, args.formula);
+  }
+  if (args.deltaCommitted !== 0) {
+    accChange(acc, null, holdingField(args.memberId, args.corporationId, "committedShares"), current ? beforeCommitted : null, after.committedShares, args.formula);
+  }
+  if (args.deltaCostBasis !== 0) {
+    accChange(acc, null, holdingField(args.memberId, args.corporationId, "costBasisRubars"), current ? beforeBasis : null, after.costBasisRubars, args.formula);
+  }
+  return after as unknown as ShareHoldingRecord;
+}
+
+// ---------------------------------------------------------------------------
+// M-06 coded inputs — the CLOSED list (§4.3). Assembled from the
+// PLANNED corporation doc (post the invoking event's own writes) and
+// the home city's structure records. `legacyBookRubars` is never read
+// here — it is structurally absent from CodedValuationInputs (P4-G6),
+// and the harness proves the absence against this assembly.
+// ---------------------------------------------------------------------------
+
+export function assembleCodedInputs(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  corp: Record<string, unknown>,
+  homeCityId: string
+): { inputs: CodedValuationInputs; notes: string[] } {
+  const notes: string[] = [];
+  const linkedIds = strList(corp.linkedStructureIds);
+  const structuresById = new Map<string, Record<string, unknown>>();
+  for (const { path, doc } of structureDocs(snapshot, homeCityId)) {
+    const planned = plannedDoc(plan, snapshot, path) ?? doc;
+    if (planned && typeof planned.structureId === "string") {
+      structuresById.set(planned.structureId, planned);
+    }
+  }
+  let operatingStructureValueRubars = 0;
+  let functioningCount = 0;
+  for (const structureId of linkedIds) {
+    const structure = structuresById.get(structureId);
+    if (!structure) {
+      notes.push(`linked structure ${structureId} not readable in this event's read plan — contributes 0`);
+      continue;
+    }
+    if (isStructureFunctioning(structure)) {
+      functioningCount += 1;
+      const budget = num(structure, "totalBudgetRubars");
+      if (budget === null || !Number.isInteger(budget)) {
+        notes.push(`structure ${structureId} carries no recorded totalBudgetRubars — contributes 0`);
+      } else {
+        operatingStructureValueRubars += budget;
+      }
+    }
+  }
+  const downtimeFlag = linkedIds.length > 0 && functioningCount === 0;
+  const earningsRaw = num(corp, "earningsProxyRubars");
+  const earningsProxyRubars =
+    earningsRaw !== null && Number.isInteger(earningsRaw) ? earningsRaw : null;
+  const tierRaw = num(corp, "legalExposureTier");
+  const legalExposureTier = (tierRaw === 0 || tierRaw === 1 || tierRaw === 2
+    ? tierRaw
+    : 0) as 0 | 1 | 2;
+  const inputs: CodedValuationInputs = {
+    companyCashRubars: intOr(corp, "companyCashRubars", 0),
+    operatingStructureValueRubars,
+    earningsProxyRubars,
+    legalExposureTier,
+    downtimeFlag,
+    sharesOutstanding: liveShares(corp),
+    operatingCitiesCount: strList(corp.marketCityIds).length + 1,
+  };
+  return { inputs, notes };
+}
+
+// ---------------------------------------------------------------------------
+// Realm index (derived, never stored — §3). The divisor anchor is the
+// one stored input, written once by the first positive-float listing.
+// ---------------------------------------------------------------------------
+
+function indexConstituents(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot
+): { corporationId: string; officialPriceRubars: number; floatShares: number; tradingStatus: MarketListingRecord["tradingStatus"] }[] {
+  const out = [];
+  for (const { doc } of allListingDocs(snapshot)) {
+    const planned = plannedDoc(plan, snapshot, listingPath(String(doc.corporationId))) ?? doc;
+    const listing = planned as unknown as MarketListingRecord;
+    out.push({
+      corporationId: listing.corporationId,
+      officialPriceRubars: listing.officialPriceRubars,
+      floatShares: listingFloatShares(listing),
+      tradingStatus: listing.tradingStatus,
+    });
+  }
+  return out;
+}
+
+/** The derived index as a Log note — level, float cap, concentration
+ * warnings (§3.4: warns, never trades). Null when no divisor anchor
+ * stands (the level is then not a number anyone may quote). */
+function indexNote(plan: ResolutionPlan, snapshot: SimSnapshot): string {
+  const marketDoc = plannedDoc(plan, snapshot, MARKET_ACCOUNT_PATH);
+  const anchor = num(marketDoc, "indexDivisorBaseRubars");
+  if (anchor === null || anchor <= 0) {
+    return "RCI: divisor unanchored (no positive-float listing has anchored the index) — no level is quoted.";
+  }
+  const constituents = indexConstituents(plan, snapshot).map((c) => ({
+    corporationId: c.corporationId,
+    officialPriceRubars: c.officialPriceRubars,
+    floatShares: c.floatShares,
+    tradingStatus: c.tradingStatus,
+  }));
+  const index = deriveRealmIndex(constituents, anchor);
+  const warnings =
+    index.concentrationWarnings.length > 0
+      ? ` Concentration warning (>50% weight): ${index.concentrationWarnings.map((w) => `${w.corporationId} at ${(w.weight * 100).toFixed(1)}%`).join(", ")} — the cap warns; it does not trade, trim, or reweight (§3.4).`
+      : "";
+  return `RCI ${index.level.toFixed(2)} (total float market cap ${index.totalFloatMarketCapRubars} R over divisor base ${anchor} R).${warnings}`;
+}
+
+/** Anchor the index divisor on the first listing whose float makes the
+ * total float market cap positive (§3.2: the genesis float cap IS the
+ * divisor base, so the index reads exactly 1000.00 at that seq).
+ * Returns a Log note when the anchor was set or deferred, else null. */
+function maybeAnchorIndexDivisor(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  acc: ChangeAcc,
+  genesisCorporationId: string
+): string | null {
+  const marketDoc = plannedDoc(plan, snapshot, MARKET_ACCOUNT_PATH);
+  if (!marketDoc) {
+    return "Index divisor not anchored: the Market Account does not stand (M-00 has not founded it) — the anchor waits for the first listing after it does.";
+  }
+  const existing = num(marketDoc, "indexDivisorBaseRubars");
+  if (existing !== null && existing > 0) return null;
+  const constituents = indexConstituents(plan, snapshot).filter(
+    (c) => c.tradingStatus !== "delisted"
+  );
+  const total = constituents.reduce((sum, c) => sum + c.officialPriceRubars * c.floatShares, 0);
+  if (total <= 0) {
+    return "Index divisor not anchored: total float market cap is 0 (no positive float yet) — the anchor waits for the first positive-float listing (§3.2).";
+  }
+  const base = divisorBaseForGenesis(
+    constituents.map((c) => ({
+      corporationId: c.corporationId,
+      officialPriceRubars: c.officialPriceRubars,
+      floatShares: c.floatShares,
+      tradingStatus: c.tradingStatus,
+    }))
+  );
+  setField(plan, snapshot, acc, {
+    path: MARKET_ACCOUNT_PATH,
+    docField: "indexDivisorBaseRubars",
+    entryCityId: null,
+    field: "marketAccount.indexDivisorBaseRubars",
+    value: base,
+    formula: "M-01/§3.2: the genesis float market cap becomes the RCI divisor base",
+  });
+  setField(plan, snapshot, acc, {
+    path: MARKET_ACCOUNT_PATH,
+    docField: "genesisListingCorporationId",
+    entryCityId: null,
+    field: "marketAccount.genesisListingCorporationId",
+    value: genesisCorporationId,
+    formula: "M-01/§3.2: the listing whose event anchored the index divisor",
+  });
+  return `RCI divisor anchored at ${base} R (the genesis float market cap, §3.2) — the index reads 1000.00 at this seq.`;
+}
+
+// ---------------------------------------------------------------------------
+// M-06 — repricing (resolver step; no action kinds). Composed in-event
+// by the rules that change a listed company's coded inputs or invoke
+// judgment: M-01 (opening), M-02, M-08, M-09 in this family, and — by
+// Lead wiring — R-07's listed branches and structure/case events.
+// Valuation discipline (P4-K18): this composer is the ONLY writer of
+// a listed company's reference price and `valuationRubars` cache.
+// ---------------------------------------------------------------------------
+
+export interface MarketRepricingOutcome {
+  status: "repriced" | "skipped";
+  note: string;
+  /** The closed coded-input list the formula consumed (null when
+   * skipped before assembly). `legacyBookRubars` is structurally
+   * absent from this object (P4-G6). */
+  inputs: CodedValuationInputs | null;
+  scoresUsed: JudgmentScores | null;
+  judgmentSource: "prepared" | "carried" | null;
+  uncappedPriceRubars: number | null;
+  appliedPriceRubars: number | null;
+  capApplied: boolean;
+  officialPriceRubars: number | null;
+  haltTransition: "halted-downtime" | "resumed" | null;
+}
+
+export function composeMarketRepricing(args: {
+  plan: ResolutionPlan;
+  snapshot: SimSnapshot;
+  actor: HandlerContext["action"]["actor"];
+  corporationId: string;
+  homeCityId: string;
+  /** Fresh judgment from the citing event's prepared payload, already
+   * validated by the caller (integers 0..100). Null = not invoked:
+   * carried scores stand (§4.7 step 2). */
+  judgment: JudgmentScores | null;
+  judgmentRationale: string | null;
+  judgmentInputHash: string | null;
+  stepCapException: StepCapException;
+  invokedByRuleId: string;
+}): MarketRepricingOutcome {
+  const { plan, snapshot } = args;
+  const corpPath = corporationPath(args.homeCityId, args.corporationId);
+  const skipped = (note: string): MarketRepricingOutcome => {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: args.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [args.invokedByRuleId, "M-06"],
+        changes: [],
+        summaryText: `M-06 repricing for ${args.corporationId} skipped: ${note}`,
+      })
+    );
+    return {
+      status: "skipped",
+      note,
+      inputs: null,
+      scoresUsed: null,
+      judgmentSource: null,
+      uncappedPriceRubars: null,
+      appliedPriceRubars: null,
+      capApplied: false,
+      officialPriceRubars: null,
+      haltTransition: null,
+    };
+  };
+
+  const corp = plannedDoc(plan, snapshot, corpPath);
+  const listing = plannedListing(plan, snapshot, args.corporationId);
+  if (!corp || corp.listed !== true || !listing || listing.status === "delisted") {
+    return skipped("no standing listing record — repricing has nothing to price (never invented).");
+  }
+  const live = liveShares(corp);
+  if (live <= 0) {
+    return skipped("no live shares stand (issued − retired ≤ 0) — a per-share price cannot be computed.");
+  }
+  const carried = carriedJudgment(corp);
+  const scores = args.judgment ?? carried;
+  if (!scores) {
+    return skipped("no judgment stands for this company (no prepared-payload judgment in the invoking event and no carried lastJudgment on the record) — the AI-as-market has never scored it, and scores are never invented.");
+  }
+  const judgmentSource: "prepared" | "carried" = args.judgment ? "prepared" : "carried";
+
+  const { inputs, notes: inputNotes } = assembleCodedInputs(plan, snapshot, corp, args.homeCityId);
+  const valuation = computeValuation(inputs, scores);
+  const priorReference = listing.referencePriceRubars;
+  const cap = applyStepCap(priorReference, valuation.uncappedReferencePriceRubars, args.stepCapException);
+  const newReference = cap.appliedPriceRubars;
+  const newOfficial = officialPriceRubars({
+    referencePriceRubars: newReference,
+    lastTradePriceRubars: listing.lastTradePriceRubars,
+    tradedSinceLastRepricing: listing.tradedSinceLastRepricing,
+  });
+
+  const acc: ChangeAcc = new Map();
+  const formula = `M-06 repricing invoked by ${args.invokedByRuleId} (§4.4 formula, §4.7 step cap ±25%)`;
+  setField(plan, snapshot, acc, {
+    path: listingPath(args.corporationId),
+    docField: "referencePriceRubars",
+    entryCityId: null,
+    field: listingField(args.corporationId, "referencePriceRubars"),
+    value: newReference,
+    formula,
+  });
+  setField(plan, snapshot, acc, {
+    path: listingPath(args.corporationId),
+    docField: "officialPriceRubars",
+    entryCityId: null,
+    field: listingField(args.corporationId, "officialPriceRubars"),
+    value: newOfficial,
+    formula: "M-06/§4.1: official = last trade price if a trade occurred since the last repricing (a print in the invoking event supersedes), else the reference price",
+  });
+  if (listing.tradedSinceLastRepricing) {
+    setField(plan, snapshot, acc, {
+      path: listingPath(args.corporationId),
+      docField: "tradedSinceLastRepricing",
+      entryCityId: null,
+      field: listingField(args.corporationId, "tradedSinceLastRepricing"),
+      value: false,
+      formula: "M-06: the repricing consumes the trade flag — the next official-price evaluation measures trades from this event",
+    });
+  }
+
+  // Halt evaluation (§1.8): downtime halts; its clearing resumes. A
+  // suspended listing is the owner's choice and is never auto-moved.
+  let haltTransition: MarketRepricingOutcome["haltTransition"] = null;
+  if (listing.tradingStatus === "open" && inputs.downtimeFlag) {
+    setField(plan, snapshot, acc, {
+      path: listingPath(args.corporationId),
+      docField: "tradingStatus",
+      entryCityId: null,
+      field: listingField(args.corporationId, "tradingStatus"),
+      value: "halted",
+      formula: "M-06/§1.8: downtime — the company has linked structures and none is functioning",
+    });
+    setField(plan, snapshot, acc, {
+      path: listingPath(args.corporationId),
+      docField: "haltReason",
+      entryCityId: null,
+      field: listingField(args.corporationId, "haltReason"),
+      value: "downtime",
+      formula: "M-06/§1.8: coded halt cause",
+    });
+    haltTransition = "halted-downtime";
+  } else if (
+    listing.tradingStatus === "halted" &&
+    listing.haltReason === "downtime" &&
+    !inputs.downtimeFlag
+  ) {
+    setField(plan, snapshot, acc, {
+      path: listingPath(args.corporationId),
+      docField: "tradingStatus",
+      entryCityId: null,
+      field: listingField(args.corporationId, "tradingStatus"),
+      value: "open",
+      formula: "M-06/§1.8: the downtime condition has cleared (a linked structure functions again)",
+    });
+    setField(plan, snapshot, acc, {
+      path: listingPath(args.corporationId),
+      docField: "haltReason",
+      entryCityId: null,
+      field: listingField(args.corporationId, "haltReason"),
+      value: null,
+      formula: "M-06/§1.8: halt cause cleared",
+    });
+    haltTransition = "resumed";
+  }
+
+  // The corporation-side cache + carried judgment (home-city entry).
+  setField(plan, snapshot, acc, {
+    path: corpPath,
+    docField: "valuationRubars",
+    entryCityId: args.homeCityId,
+    field: corpField(args.corporationId, "valuationRubars"),
+    value: newOfficial * live,
+    formula: "M-06/§4.1: valuationRubars cache = official price × live shares (issued − retired)",
+  });
+  if (args.judgment) {
+    const beforeJudgment = (corp.lastJudgment as Record<string, unknown> | null) ?? null;
+    const afterJudgment = {
+      quality: args.judgment.quality,
+      scale: args.judgment.scale,
+      importance: args.judgment.importance,
+      inputHash: args.judgmentInputHash,
+    };
+    planMutate(plan, snapshot, corpPath, "state", ["lastJudgment"], (doc) =>
+      doc ? { ...doc, lastJudgment: afterJudgment } : doc
+    );
+    accChange(
+      acc,
+      args.homeCityId,
+      corpField(args.corporationId, "lastJudgment"),
+      beforeJudgment,
+      afterJudgment,
+      "M-06/§4.5: the invoking event's prepared-payload judgment becomes the carried scores"
+    );
+  }
+
+  // Disclosure (§6 M-06 Log line: every input, scores moved/held,
+  // uncapped beside applied, official before/after, halt, index).
+  const scoreLine = (name: keyof JudgmentScores): string => {
+    if (!args.judgment) return `${name} ${scores[name]} (held — judgment not invoked; carried scores stand)`;
+    const before = carried ? carried[name] : null;
+    const moved = before === null || before !== args.judgment[name];
+    return `${name} ${before ?? "—"} → ${args.judgment[name]} (${moved ? "moved" : "held"})`;
+  };
+  const disclosure = [
+    `M-06 repricing for ${args.corporationId} (invoked by ${args.invokedByRuleId}): coded inputs — companyCash ${inputs.companyCashRubars} R; operatingStructureValue ${inputs.operatingStructureValueRubars} R; earningsProxy ${inputs.earningsProxyRubars === null ? "skipped: unset (term skipped, §4.3 null-honesty)" : `${inputs.earningsProxyRubars} R`}; legalExposureTier ${inputs.legalExposureTier}; downtime ${inputs.downtimeFlag ? "set (earnings term zeroed)" : "clear"}; live shares ${live} (issued ${issuedShares(corp)} − retired ${retiredShares(corp)}); operatingCities ${inputs.operatingCitiesCount ?? 1} (evidence only).`,
+    `Judgment (${judgmentSource}): ${scoreLine("quality")}; ${scoreLine("scale")}; ${scoreLine("importance")} — multiplier ${valuation.judgmentMultiplier.toFixed(4)}.${args.judgment ? ` Rationale: ${args.judgmentRationale ?? "not supplied with the prepared payload"}.` : ""}`,
+    `Formula: fundamental ${valuation.fundamentalRubars} R (earnings term ${valuation.earningsTermRubars} R; open-case discount ${valuation.openCaseDiscountRubars} R) → uncapped reference ${valuation.uncappedReferencePriceRubars} R/share${valuation.atFloor ? " (fundamental ≤ 0 — priced at the 1 R floor, §4.4)" : ""}; step cap ${cap.capApplied ? `APPLIED (±25% of prior reference ${priorReference} R)` : "not binding"}${cap.exceptionApplied ? ` (exception: ${cap.exceptionApplied} — the formula result stands, §4.7)` : ""} → reference ${priorReference} → ${newReference} R; official ${listing.officialPriceRubars} → ${newOfficial} R (§4.1).`,
+    `legacyBookRubars is not an input to this repricing (P4-G6 — provenance only, never priced from).${inputNotes.length > 0 ? ` Input notes: ${inputNotes.join("; ")}.` : ""}${valuation.skippedInputs.length > 0 ? ` Skipped inputs: ${valuation.skippedInputs.join("; ")}.` : ""}`,
+    haltTransition === "halted-downtime"
+      ? "Trading HALTED in this event (§1.8): downtime — no linked structure is functioning. Resting orders remain, unexecutable, and their owners may cancel them."
+      : haltTransition === "resumed"
+        ? "Trading RESUMED in this event (§1.8): the downtime condition cleared."
+        : `Trading status stands: ${plannedListing(plan, snapshot, args.corporationId)?.tradingStatus ?? listing.tradingStatus}.`,
+    indexNote(plan, snapshot),
+  ].join(" ");
+
+  const marketChanges = accChangesFor(acc, null);
+  const corpChanges = accChangesFor(acc, args.homeCityId);
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: args.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [args.invokedByRuleId, "M-06"],
+      changes: marketChanges,
+      recordsUpdated: marketChanges.length > 0 ? [listingPath(args.corporationId)] : [],
+      summaryText: disclosure,
+    })
+  );
+  if (corpChanges.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: args.actor,
+        cityId: args.homeCityId,
+        cityIds: [args.homeCityId],
+        ruleIds: [args.invokedByRuleId, "M-06"],
+        changes: corpChanges,
+        recordsUpdated: [corpPath],
+        summaryText: `M-06: ${args.corporationId}'s valuationRubars cache now ${newOfficial * live} R (official ${newOfficial} R × ${live} live shares)${args.judgment ? "; the invoking event's judgment is recorded as lastJudgment" : ""}.`,
+      })
+    );
+  }
+  return {
+    status: "repriced",
+    note: disclosure,
+    inputs,
+    scoresUsed: scores,
+    judgmentSource,
+    uncappedPriceRubars: valuation.uncappedReferencePriceRubars,
+    appliedPriceRubars: newReference,
+    capApplied: cap.capApplied,
+    officialPriceRubars: newOfficial,
+    haltTransition,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Book maintenance + settlement core (M-03/M-04/M-05 machinery).
+// ---------------------------------------------------------------------------
+
+/** M-05's expiry mechanism, run in-event by every rule that touches a
+ * listing's book (§1.5: expiry is evaluated when a later event touches
+ * the listing, and the evaluation is logged in that event — never by a
+ * timer). Expired sells release their share commitment; an expired
+ * float offer releases the listing's committed float with it. */
+function expirySweep(args: {
+  plan: ResolutionPlan;
+  snapshot: SimSnapshot;
+  acc: ChangeAcc;
+  corporationId: string;
+  homeCityId: string;
+  seq: number;
+  resolutionId: string;
+  now: Date;
+}): MarketOrderRecord[] {
+  const expired: MarketOrderRecord[] = [];
+  for (const { doc } of bookDocs(args.snapshot)) {
+    const planned = plannedDoc(args.plan, args.snapshot, orderPath(String(doc.orderId))) ?? doc;
+    const order = planned as unknown as MarketOrderRecord;
+    if (order.status !== "resting") continue;
+    if (order.expiresAtSeq === null || order.expiresAtSeq > args.seq) continue;
+    const after = patchOrder(
+      args.plan,
+      args.snapshot,
+      args.acc,
+      order.orderId,
+      { status: "expired" },
+      `M-05: expiry evaluated in this event — expiresAtSeq ${order.expiresAtSeq} has passed at seq ${args.seq}`
+    );
+    if (!after) continue;
+    expired.push(after);
+    if (order.side === "sell" && order.quantityShares > 0) {
+      mutateHolding(args.plan, args.snapshot, args.acc, {
+        memberId: order.memberId,
+        corporationId: args.corporationId,
+        homeCityId: args.homeCityId,
+        deltaQuantity: 0,
+        deltaCommitted: -order.quantityShares,
+        deltaCostBasis: 0,
+        create: false,
+        seq: args.seq,
+        resolutionId: args.resolutionId,
+        now: args.now,
+        formula: "M-05: expiry releases the order's committed shares",
+      });
+      if (order.kind === "float-offer") {
+        const listing = plannedListing(args.plan, args.snapshot, args.corporationId);
+        if (listing) {
+          setField(args.plan, args.snapshot, args.acc, {
+            path: listingPath(args.corporationId),
+            docField: "committedFloatShares",
+            entryCityId: null,
+            field: listingField(args.corporationId, "committedFloatShares"),
+            value: listing.committedFloatShares - order.quantityShares,
+            formula: "M-05: the expired float offer's shares leave the committed float",
+          });
+        }
+      }
+    }
+  }
+  return expired;
+}
+
+/** The engine's book for a listing: resting orders from the read
+ * plan's materialization, planned-aware, in placement order. Resting
+ * orders always carry a price (placement invariant); a priceless
+ * resting order is a corrupt record — skipped here, cancellable by
+ * its owner, and noted by the caller via `malformed`. */
+function buildEngineBook(
+  plan: ResolutionPlan,
+  snapshot: SimSnapshot,
+  corporationId: string
+): { book: RestingOrder[]; docsById: Map<string, MarketOrderRecord>; malformed: string[] } {
+  const book: RestingOrder[] = [];
+  const docsById = new Map<string, MarketOrderRecord>();
+  const malformed: string[] = [];
+  for (const { doc } of bookDocs(snapshot)) {
+    const planned = plannedDoc(plan, snapshot, orderPath(String(doc.orderId))) ?? doc;
+    const order = planned as unknown as MarketOrderRecord;
+    if (order.status !== "resting" || order.corporationId !== corporationId) continue;
+    docsById.set(order.orderId, order);
+    if (typeof order.limitPriceRubars !== "number") {
+      malformed.push(order.orderId);
+      continue;
+    }
+    book.push({
+      orderId: order.orderId,
+      listingId: corporationId,
+      memberId: order.memberId,
+      side: order.side,
+      quantityShares: order.quantityShares,
+      limitPriceRubars: order.limitPriceRubars,
+      placedAtSeq: order.placedAtSeq,
+      expiresAtSeq: order.expiresAtSeq,
+    });
+  }
+  book.sort((a, b) => a.placedAtSeq - b.placedAtSeq);
+  return { book, docsById, malformed };
+}
+
+export interface SettledExecution {
+  execution: Execution;
+  tradeId: string;
+  tradeValueRubars: number;
+  buyerFeeRubars: number;
+  sellerFeeRubars: number;
+}
+
+/** Settle accepted member-vs-member executions (M-04): one transfer
+ * call for the whole event (the primitive nets per ledger; the
+ * placement/crossing pre-checks have already proven every leg), then
+ * the share-side writes — holdings, resting order consumption, trade
+ * records — and one Log entry per execution carrying that execution's
+ * own cash legs (chained on running balances) and share changes.
+ * Listing price/counter updates accumulate into the caller's `acc`. */
+function settleMemberExecutions(args: {
+  plan: ResolutionPlan;
+  snapshot: SimSnapshot;
+  acc: ChangeAcc;
+  actor: HandlerContext["action"]["actor"];
+  resolutionId: string;
+  corporationId: string;
+  homeCityId: string;
+  founderMemberId: string;
+  incomingOrderId: string;
+  accepted: { execution: Execution; resting: MarketOrderRecord }[];
+  seq: number;
+  now: Date;
+}): { ok: true; settled: SettledExecution[] } | { ok: false; code: string; message: string } {
+  const { plan, snapshot } = args;
+  const lines: TransferLine[] = [];
+  const settlements = args.accepted.map(({ execution }) => {
+    const tradeValueRubars = execution.quantityShares * execution.priceRubars;
+    const buyerFeeRubars = exchangeFeeRubars(tradeValueRubars);
+    const sellerFeeRubars = exchangeFeeRubars(tradeValueRubars);
+    return { execution, tradeValueRubars, buyerFeeRubars, sellerFeeRubars };
+  });
+  for (const s of settlements) {
+    lines.push({
+      from: personalRef(s.execution.buyerMemberId),
+      to: personalRef(s.execution.sellerMemberId),
+      amountRubars: s.tradeValueRubars,
+      ruleId: "M-04",
+      memo: `trade value — ${s.execution.quantityShares} shares of ${args.corporationId} at ${s.execution.priceRubars} R`,
+    });
+    lines.push({
+      from: personalRef(s.execution.buyerMemberId),
+      to: MARKET_REF,
+      amountRubars: s.buyerFeeRubars,
+      ruleId: "M-04",
+      memo: "exchange fee — buyer side (§5.3)",
+    });
+    lines.push({
+      from: personalRef(s.execution.sellerMemberId),
+      to: MARKET_REF,
+      amountRubars: s.sellerFeeRubars,
+      ruleId: "M-04",
+      memo: "exchange fee — seller side (§5.3)",
+    });
+  }
+  // Running balances for the per-execution Log legs, captured BEFORE
+  // the primitive folds its writes (the legs chain off these).
+  const running = new Map<string, number>();
+  const balanceOf = (memberId: string): number => {
+    const cached = running.get(memberId);
+    if (cached !== undefined) return cached;
+    const value = plannedBalance(plan, snapshot, personalRef(memberId)) ?? 0;
+    running.set(memberId, value);
+    return value;
+  };
+  let marketRunning = plannedBalance(plan, snapshot, MARKET_REF) ?? 0;
+
+  const applied = applyTransferLines({ plan, snapshot, lines, shortfallClass: "transfer" });
+  if (!applied.ok) return { ok: false, code: applied.code, message: applied.message };
+
+  const settled: SettledExecution[] = [];
+  settlements.forEach((s, index) => {
+    const { execution } = s;
+    const tradeId = `trade_${args.resolutionId}_${String(index + 1).padStart(2, "0")}`;
+    const execAcc: ChangeAcc = new Map();
+    const buyerBefore = balanceOf(execution.buyerMemberId);
+    const buyerAfter = buyerBefore - (s.tradeValueRubars + s.buyerFeeRubars);
+    running.set(execution.buyerMemberId, buyerAfter);
+    const sellerBefore = balanceOf(execution.sellerMemberId);
+    const sellerAfter = sellerBefore + (s.tradeValueRubars - s.sellerFeeRubars);
+    running.set(execution.sellerMemberId, sellerAfter);
+    const marketBefore = marketRunning;
+    marketRunning += s.buyerFeeRubars + s.sellerFeeRubars;
+
+    // Share side: a RESTING seller's shares were committed behind
+    // their order (placement invariant) and the fill consumes the
+    // commitment; an INCOMING seller delivers from free shares (they
+    // were validated at placement and never committed). The buyer's
+    // holding gains quantity and cost basis (price × qty — fees are
+    // not basis).
+    const resting = args.accepted[index].resting;
+    const sellerWasResting = resting.side === "sell";
+    mutateHolding(plan, snapshot, execAcc, {
+      memberId: execution.sellerMemberId,
+      corporationId: args.corporationId,
+      homeCityId: args.homeCityId,
+      deltaQuantity: -execution.quantityShares,
+      deltaCommitted: sellerWasResting ? -execution.quantityShares : 0,
+      deltaCostBasis: 0,
+      create: false,
+      seq: args.seq,
+      resolutionId: args.resolutionId,
+      now: args.now,
+      formula: sellerWasResting
+        ? `M-04 execution ${tradeId}: seller delivers ${execution.quantityShares} shares (committed behind resting order ${execution.restingOrderId})`
+        : `M-04 execution ${tradeId}: incoming seller delivers ${execution.quantityShares} free shares`,
+    });
+    mutateHolding(plan, snapshot, execAcc, {
+      memberId: execution.buyerMemberId,
+      corporationId: args.corporationId,
+      homeCityId: args.homeCityId,
+      deltaQuantity: execution.quantityShares,
+      deltaCommitted: 0,
+      deltaCostBasis: s.tradeValueRubars,
+      create: true,
+      seq: args.seq,
+      resolutionId: args.resolutionId,
+      now: args.now,
+      formula: `M-04 execution ${tradeId}: buyer receives ${execution.quantityShares} shares; cost basis += trade value ${s.tradeValueRubars} R (fees are not cost basis, §5.4)`,
+    });
+    patchOrder(plan, snapshot, execAcc, resting.orderId, {
+      quantityShares: resting.quantityShares - execution.quantityShares,
+      filledShares: resting.filledShares + execution.quantityShares,
+      status:
+        resting.quantityShares - execution.quantityShares <= 0 ? "filled" : "resting",
+    }, `M-04 execution ${tradeId}: resting order consumed at its own price (§1.6 step 4)`);
+
+    const tradeDoc = buildTradeDoc({
+      tradeId,
+      corporationId: args.corporationId,
+      homeCityId: args.homeCityId,
+      buyerMemberId: execution.buyerMemberId,
+      sellerMemberId: execution.sellerMemberId,
+      quantityShares: execution.quantityShares,
+      priceRubars: execution.priceRubars,
+      buyerFeeRubars: s.buyerFeeRubars,
+      sellerFeeRubars: s.sellerFeeRubars,
+      incomingOrderId: args.incomingOrderId,
+      restingOrderId: execution.restingOrderId,
+      seq: args.seq,
+      sourceActionId: args.resolutionId,
+      lastResolutionId: args.resolutionId,
+      now: args.now,
+    });
+    planWrite(plan, snapshot, tradePath(tradeId), tradeDoc, "state", [
+      "quantityShares",
+      "priceRubars",
+    ]);
+
+    // Listing state: the print moves last-trade + official (§4.1);
+    // float counters follow the parties (custody accounting).
+    setField(plan, snapshot, args.acc, {
+      path: listingPath(args.corporationId),
+      docField: "lastTradePriceRubars",
+      entryCityId: null,
+      field: listingField(args.corporationId, "lastTradePriceRubars"),
+      value: execution.priceRubars,
+      formula: `M-04 execution ${tradeId}: trade print (§1.4 mechanism 1)`,
+    });
+    setField(plan, snapshot, args.acc, {
+      path: listingPath(args.corporationId),
+      docField: "officialPriceRubars",
+      entryCityId: null,
+      field: listingField(args.corporationId, "officialPriceRubars"),
+      value: execution.priceRubars,
+      formula: "M-04/§4.1: a trade print since the last repricing makes the last trade price the official price",
+    });
+    setField(plan, snapshot, args.acc, {
+      path: listingPath(args.corporationId),
+      docField: "tradedSinceLastRepricing",
+      entryCityId: null,
+      field: listingField(args.corporationId, "tradedSinceLastRepricing"),
+      value: true,
+      formula: "M-04: a trade occurred since the last repricing",
+    });
+    const listingNow = plannedListing(plan, snapshot, args.corporationId);
+    if (listingNow) {
+      let publicDelta = 0;
+      if (execution.buyerMemberId !== args.founderMemberId) publicDelta += execution.quantityShares;
+      if (execution.sellerMemberId !== args.founderMemberId) publicDelta -= execution.quantityShares;
+      if (publicDelta !== 0) {
+        setField(plan, snapshot, args.acc, {
+          path: listingPath(args.corporationId),
+          docField: "publicHeldShares",
+          entryCityId: null,
+          field: listingField(args.corporationId, "publicHeldShares"),
+          value: listingNow.publicHeldShares + publicDelta,
+          formula: `M-04 execution ${tradeId}: shares moving between founder and public hands re-count the public float`,
+        });
+      }
+      if (resting.kind === "float-offer") {
+        setField(plan, snapshot, args.acc, {
+          path: listingPath(args.corporationId),
+          docField: "committedFloatShares",
+          entryCityId: null,
+          field: listingField(args.corporationId, "committedFloatShares"),
+          value: listingNow.committedFloatShares - execution.quantityShares,
+          formula: `M-04 execution ${tradeId}: the float offer filled — committed float falls by the filled quantity (custody, P4-K21)`,
+        });
+      }
+    }
+
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: args.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: ["M-03", "M-04"],
+        changes: [
+          fieldChange(
+            `memberAccounts/${execution.buyerMemberId}.cashRubars`,
+            buyerBefore,
+            buyerAfter,
+            `M-04 execution ${tradeId}: buyer pays value ${s.tradeValueRubars} R + buyer fee ${s.buyerFeeRubars} R`
+          ),
+          fieldChange(
+            `memberAccounts/${execution.sellerMemberId}.cashRubars`,
+            sellerBefore,
+            sellerAfter,
+            `M-04 execution ${tradeId}: seller receives value ${s.tradeValueRubars} R − seller fee ${s.sellerFeeRubars} R`
+          ),
+          fieldChange(
+            "marketAccount.cashRubars",
+            marketBefore,
+            marketRunning,
+            `M-04 execution ${tradeId}: exchange fees ${s.buyerFeeRubars} R (buyer) + ${s.sellerFeeRubars} R (seller) credit the Market Account (§5.3)`
+          ),
+          ...accChangesFor(execAcc, null),
+          fieldChange(
+            `marketTrades/${tradeId}.priceRubars`,
+            null,
+            execution.priceRubars,
+            `M-04 execution ${tradeId}: the tape record — ${execution.quantityShares} shares at the resting order's price ${execution.priceRubars} R (§1.6 step 4)`
+          ),
+        ],
+        recordsCreated: [tradePath(tradeId)],
+        recordsUpdated: [
+          orderPath(resting.orderId),
+          holdingPath(execution.sellerMemberId, args.corporationId),
+          holdingPath(execution.buyerMemberId, args.corporationId),
+        ],
+        summaryText: `M-04 execution ${tradeId}: ${execution.buyerMemberId} bought ${execution.quantityShares} shares of ${args.corporationId} from ${execution.sellerMemberId} at ${execution.priceRubars} R (resting order ${execution.restingOrderId} × incoming ${args.incomingOrderId}); value ${s.tradeValueRubars} R; fees ${s.buyerFeeRubars} R buyer / ${s.sellerFeeRubars} R seller to the Market Account. Official price now ${execution.priceRubars} R (trade print, §4.1).`,
+      })
+    );
+    settled.push({
+      execution,
+      tradeId,
+      tradeValueRubars: s.tradeValueRubars,
+      buyerFeeRubars: s.buyerFeeRubars,
+      sellerFeeRubars: s.sellerFeeRubars,
+    });
+  });
+  return { ok: true, settled };
+}
