@@ -121,6 +121,40 @@ function assembleSnapshot(
   };
 }
 
+// DIAG (PR #45 fix round 4 — TEMPORARY, remove with the fix): the
+// materialization funnel. Every doc get and collection query the
+// resolver's read plans perform passes through buildSnapshot /
+// materializeSnapshot; on a rules denial these wrappers print the
+// EXACT path or query spec being executed, then rethrow unchanged.
+// Print-only: no behavior change on any path.
+async function diagFunnelGet(
+  reader: DocReader,
+  path: string
+): Promise<Record<string, unknown> | null> {
+  try {
+    return await reader.get(path);
+  } catch (error) {
+    console.log(
+      `DIAG STEP materialize: DENIED get ${path} (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
+    );
+    throw error;
+  }
+}
+
+async function diagFunnelQuery(
+  queryReader: QueryReader,
+  spec: CollectionQuerySpec
+): Promise<{ path: string; doc: Record<string, unknown> }[]> {
+  try {
+    return await queryReader.query(spec);
+  } catch (error) {
+    console.log(
+      `DIAG STEP materialize: DENIED query ${spec.id} ${spec.collectionPath} ${JSON.stringify(spec.filters)} (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
+    );
+    throw error;
+  }
+}
+
 export async function buildSnapshot(
   reader: DocReader,
   paths: readonly string[],
@@ -129,7 +163,7 @@ export async function buildSnapshot(
   const unique = [...new Set(paths)];
   const docs = new Map<string, Record<string, unknown> | null>();
   for (const path of unique) {
-    docs.set(path, await reader.get(path));
+    docs.set(path, await diagFunnelGet(reader, path)); // DIAG round 4 funnel
   }
   return assembleSnapshot(docs, now, []);
 }
@@ -188,7 +222,7 @@ export async function materializeSnapshot(
 ): Promise<SimSnapshot> {
   const docs = new Map<string, Record<string, unknown> | null>();
   for (const path of [...new Set(plan.paths)]) {
-    docs.set(path, await reader.get(path));
+    docs.set(path, await diagFunnelGet(reader, path)); // DIAG round 4 funnel
   }
   const queryRecords: SnapshotQueryRecord[] = [];
   for (const spec of plan.queries) {
@@ -198,7 +232,7 @@ export async function materializeSnapshot(
         `read plan declares collection query "${spec.id}" (${spec.collectionPath}) but no query reader was supplied`
       );
     }
-    const results = await queryReader.query(spec);
+    const results = await diagFunnelQuery(queryReader, spec); // DIAG round 4 funnel
     const hashed: { path: string; hash: string }[] = [];
     for (const result of results) {
       docs.set(result.path, result.doc);

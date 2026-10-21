@@ -89,6 +89,20 @@ function queryReaderOf(deps: DispatcherDeps): QueryReader {
   return deps.queryReader ?? firestoreQueryReader(deps.committerDb);
 }
 
+// DIAG (PR #45 fix round 4 — TEMPORARY, remove with the fix): labeled
+// bisection. Wraps one wake operation; on any throw it prints the
+// step label, then rethrows unchanged. Print-only.
+async function diagStep<T>(label: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    console.log(
+      `DIAG STEP ${label}: DENIED (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
+    );
+    throw error;
+  }
+}
+
 /** The snapshot an action resolves against (F-01): the base doc paths
  * are read first (the seed docs), the classifying descriptor's
  * read-plan hook derives any further doc paths + collection queries
@@ -260,14 +274,16 @@ export async function runWake(
   // against a world the same wake is about to change: a dependent
   // action landing in the op's own wake must be visible to the op's
   // execution-time dependency revalidation (TC-U07's race).
-  const actionsSnap = await getDocs(
-    query(
-      collection(deps.fabricDb, "sim_actions"),
-      where("status", "==", "confirmed"),
-      orderBy("createdAt", "asc"),
-      limit(opts.maxActions ?? 10)
+  const actionsSnap = await diagStep("dispatcher.actions-query", () =>
+    getDocs(
+      query(
+        collection(deps.fabricDb, "sim_actions"),
+        where("status", "==", "confirmed"),
+        orderBy("createdAt", "asc"),
+        limit(opts.maxActions ?? 10)
+      )
     )
-  );
+  ); // DIAG round 4
 
   for (const actionDoc of actionsSnap.docs) {
     const action = actionDoc.data() as SimAction;
@@ -418,7 +434,7 @@ export async function runWake(
         passFollowups.push({ situationId: action.threadRef.id, actionId: action.actionId });
       }
       // Exactly one ripeness scan pass per committed player action.
-      const scan = await scanRipeness(
+      const scan = await diagStep("dispatcher.scan", () => scanRipeness(
         { committerDb: deps.committerDb, baselineRegistry: deps.baselineRegistry, reader },
         {
           now: opts.now,
@@ -428,7 +444,7 @@ export async function runWake(
           preparedPayloads: opts.preparedPayloads,
           wakeState: wakeScanState,
         }
-      );
+      )); // DIAG round 4 (closes dispatcher.scan)
       summary.scans.push(scan);
     } else if (outcome.status === "stale-preview") {
       const { snapshot: freshSnapshot } = await snapshotForAction(deps, claimed, opts.now);
@@ -445,14 +461,16 @@ export async function runWake(
 
   // Queued undo operations, after the action phase (§8.4 step 2).
   // Processing an op never triggers a ripeness scan (§1.3/§8.2).
-  const opsSnap = await getDocs(
-    query(
-      collection(deps.committerDb, "sim_undo_operations"),
-      where("status", "in", ["requested", "checking"]),
-      orderBy("createdAt", "asc"),
-      limit(10)
+  const opsSnap = await diagStep("dispatcher.undo-query", () =>
+    getDocs(
+      query(
+        collection(deps.committerDb, "sim_undo_operations"),
+        where("status", "in", ["requested", "checking"]),
+        orderBy("createdAt", "asc"),
+        limit(10)
+      )
     )
-  );
+  ); // DIAG round 4
   for (const opDoc of opsSnap.docs) {
     await processUndoOperation(deps.committerDb, opDoc.id, { now: opts.now });
     summary.undoOpsProcessed += 1;
@@ -493,7 +511,7 @@ export async function runWake(
     const situationIds = [...touched.entries()]
       .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]))
       .map(([id]) => id);
-    const passes = await runWakePasses(
+    const passes = await diagStep("dispatcher.passes", () => runWakePasses(
       {
         fabricDb: deps.fabricDb,
         committerDb: deps.committerDb,
@@ -504,7 +522,7 @@ export async function runWake(
         cycleId: opts.cycleId,
       },
       { situationIds, followups: passFollowups }
-    );
+    )); // DIAG round 4 (closes dispatcher.passes)
     summary.passes = passes;
     if (passes.aborted && !summary.aborted) summary.aborted = passes.aborted;
   }

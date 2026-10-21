@@ -152,6 +152,20 @@ function emptySummary(): WakePassSummary {
 // Step materialization + commit plumbing.
 // ---------------------------------------------------------------------------
 
+// DIAG (PR #45 fix round 4 — TEMPORARY, remove with the fix): labeled
+// bisection. Wraps one wake operation; on any throw it prints the
+// step label, then rethrows unchanged. Print-only.
+async function diagStep<T>(label: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    console.log(
+      `DIAG STEP ${label}: DENIED (${(error as { code?: string }).code ?? "?"}) ${(error as Error).message}`
+    );
+    throw error;
+  }
+}
+
 async function materializeStepSnapshot(
   deps: WakePassDeps,
   step: WakePassStep
@@ -187,7 +201,9 @@ async function commitStep(
   summary: WakePassSummary,
   step: WakePassStep
 ): Promise<boolean> {
-  const materialized = await materializeStepSnapshot(deps, step);
+  const materialized = await diagStep(`commitStep-${step.kind}-materialize`, () =>
+    materializeStepSnapshot(deps, step)
+  ); // DIAG round 4
   if (!materialized) {
     summary.notes.push(`step ${step.kind}: read plan did not close — skipped`);
     return false;
@@ -282,7 +298,9 @@ async function executeDelegatedAction(
     summary.delegatedActions.push({ actionId, situationId: input.situationId, outcome });
     return outcome;
   };
-  const npcSnap = await getDoc(doc(deps.committerDb, "sim_npcs", input.npcId));
+  const npcSnap = await diagStep("delegatedAction.npc-get", () =>
+    getDoc(doc(deps.committerDb, "sim_npcs", input.npcId))
+  ); // DIAG round 4
   const npc = npcFromDoc(npcSnap.exists() ? (npcSnap.data() as Record<string, unknown>) : null);
   if (!npc) {
     summary.notes.push(`delegated action ${actionId}: handler NPC ${input.npcId} not readable — deferred`);
@@ -332,9 +350,11 @@ async function executeDelegatedAction(
     updatedAt: new Date(deps.now),
   };
   const actionRef = doc(deps.committerDb, "sim_actions", actionId);
-  const existing = await getDoc(actionRef);
+  const existing = await diagStep("delegatedAction.existing-get", () => getDoc(actionRef)); // DIAG round 4
   if (!existing.exists()) {
-    await setDoc(actionRef, action as unknown as Record<string, unknown>);
+    await diagStep("delegatedAction.create", () =>
+      setDoc(actionRef, action as unknown as Record<string, unknown>)
+    ); // DIAG round 4
   } else if ((existing.data() as SimAction).status === "resolved") {
     return finish("resolved");
   } else if ((existing.data() as SimAction).status === "rejected") {
@@ -343,7 +363,9 @@ async function executeDelegatedAction(
 
   const leaseId = `lease_${deps.cycleId}_${actionId.slice(0, 16)}`;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const { snapshot, paths } = await snapshotForActionLike(deps, action);
+    const { snapshot, paths } = await diagStep("delegatedAction.snapshot", () =>
+      snapshotForActionLike(deps, action)
+    ); // DIAG round 4
     const computation = computePreview(snapshot, action, {
       baselineRegistry: deps.baselineRegistry,
       mode: "commit",
@@ -352,20 +374,23 @@ async function executeDelegatedAction(
     // IS the confirmation — no member confirmation step exists for a
     // delegated action, and the rules' member-confirmation clause is
     // not what carries this: the fabric update branch does).
-    await updateDoc(doc(deps.fabricDb, "sim_actions", actionId), {
-      preview: { ...computation.preview, previewHash: computation.previewHash },
-      previewPlanHash: computation.plan.planHash,
-      audienceUids: computation.audienceUids,
-      confirmation: {
-        confirmedByUid: input.ownerUid,
-        confirmedAt: new Date(deps.now),
-        previewHash: computation.previewHash,
-        authorityType: "mandate",
-      },
-      status: "confirmed",
-      updatedAt: new Date(deps.now),
-    });
-    const claimed = await runTransaction(deps.fabricDb, async (tx) => {
+    await diagStep("delegatedAction.preview-update", () =>
+      updateDoc(doc(deps.fabricDb, "sim_actions", actionId), {
+        preview: { ...computation.preview, previewHash: computation.previewHash },
+        previewPlanHash: computation.plan.planHash,
+        audienceUids: computation.audienceUids,
+        confirmation: {
+          confirmedByUid: input.ownerUid,
+          confirmedAt: new Date(deps.now),
+          previewHash: computation.previewHash,
+          authorityType: "mandate",
+        },
+        status: "confirmed",
+        updatedAt: new Date(deps.now),
+      })
+    ); // DIAG round 4
+    const claimed = await diagStep("delegatedAction.claim-tx", () =>
+      runTransaction(deps.fabricDb, async (tx) => {
       const ref = doc(deps.fabricDb, "sim_actions", actionId);
       const snap = await tx.get(ref);
       if (!snap.exists()) return null;
@@ -385,7 +410,8 @@ async function executeDelegatedAction(
       };
       tx.set(ref, claimedDoc as unknown as Record<string, unknown>);
       return claimedDoc;
-    });
+      })
+    ); // DIAG round 4 (closes delegatedAction.claim-tx)
     if (!claimed) return finish("deferred");
     let outcome: CommitOutcome;
     try {
@@ -541,13 +567,15 @@ export async function runWakePasses(
   let ruleFires = 0;
 
   // -- 3½. Attention conversions -------------------------------------
-  const flaggedSnap = await getDocs(
-    query(
-      collection(deps.committerDb, "sim_pending_consequences"),
-      where("needsAttention", "==", true),
-      limit(ATTENTION_QUERY_LIMIT)
+  const flaggedSnap = await diagStep("passes.attention-query", () =>
+    getDocs(
+      query(
+        collection(deps.committerDb, "sim_pending_consequences"),
+        where("needsAttention", "==", true),
+        limit(ATTENTION_QUERY_LIMIT)
+      )
     )
-  );
+  ); // DIAG round 4
   const flaggedIds = flaggedSnap.docs.map((d) => d.id).sort();
   const attentionSituationIds: string[] = [];
   for (const pendingId of flaggedIds) {
@@ -560,7 +588,9 @@ export async function runWakePasses(
       // The conversion's card is itself a this-wake creation: it joins
       // the delegation candidate set below (deterministic id from the
       // pending's stamp — re-derived from the committed step's plan).
-      const materialized = await materializeStepSnapshot(deps, step);
+      const materialized = await diagStep("passes.attention-readback-materialize", () =>
+        materializeStepSnapshot(deps, step)
+      ); // DIAG round 4
       const sitId = materialized
         ? (situationIdFromAttention(materialized.snapshot, pendingId) ?? null)
         : null;
@@ -574,7 +604,9 @@ export async function runWakePasses(
   for (const situationId of candidates) {
     if (summary.aborted) break;
     const step: WakePassStep = { kind: "delegation", situationId };
-    const materialized = await materializeStepSnapshot(deps, step);
+    const materialized = await diagStep("passes.delegation-materialize", () =>
+      materializeStepSnapshot(deps, step)
+    ); // DIAG round 4
     if (!materialized) continue;
     const { situation, evaluation, plan } = evaluateDelegationStep(materialized.snapshot, situationId, {
       resolutionId: wakeStepResolutionId(step, deps.cycleId),
@@ -662,7 +694,9 @@ export async function runWakePasses(
     if (summary.aborted) break;
     if (delegationOutcome.get(situationId) !== "no-match") continue;
     const step: WakePassStep = { kind: "trigger", situationId };
-    const materialized = await materializeStepSnapshot(deps, step);
+    const materialized = await diagStep("passes.trigger-materialize", () =>
+      materializeStepSnapshot(deps, step)
+    ); // DIAG round 4
     if (!materialized) continue;
     const situation = situationFromSnapshot(materialized.snapshot, situationId);
     if (!situation) continue;
@@ -752,13 +786,15 @@ export async function runWakePasses(
   if (!summary.aborted) {
     const records: TaskEnvelopeRecord[] = [];
     for (const status of ["QUEUED", "RUNNING"] as const) {
-      const snap = await getDocs(
-        query(
-          collection(deps.committerDb, "sim_task_envelopes"),
-          where("status", "==", status),
-          limit(ENVELOPE_QUERY_LIMIT)
+      const snap = await diagStep(`passes.claims-query-${status}`, () =>
+        getDocs(
+          query(
+            collection(deps.committerDb, "sim_task_envelopes"),
+            where("status", "==", status),
+            limit(ENVELOPE_QUERY_LIMIT)
+          )
         )
-      );
+      ); // DIAG round 4
       for (const d of snap.docs) records.push(d.data() as TaskEnvelopeRecord);
     }
     const decisions = planEnvelopeClaims(records, { nowIso: deps.now });
