@@ -168,6 +168,9 @@ export function buildSimCountersDoc(
 ): Record<string, unknown> {
   return {
     lastSeq: 1,
+    // P4-K24 (Phase 4 close-out, E4): the resolved-seq progress tally.
+    // Genesis is a resolved event at seq 1, so the tally starts at 1.
+    lastResolvedSeq: 1,
     lastEntryHash: genesisEntryHash,
     lastResolutionId: "genesis",
     updatedAt: now,

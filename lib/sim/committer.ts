@@ -33,6 +33,7 @@ import {
   MAX_MANIFEST_BYTES,
   MAX_WRITES_PER_RESOLUTION,
   RESOLVER_RULES_VERSION,
+  snapshotDoc,
   type ResolutionPlan,
   type SimAction,
   type SimSnapshot,
@@ -41,6 +42,11 @@ import {
 import { citableBaselineVersion, type BaselineRegistry } from "./baseline/registry";
 import { RULE_DESCRIPTORS } from "./rules/registry";
 import { ruleEffectDraft } from "./rules/planHelpers";
+import {
+  buildRipenessView,
+  evaluateRipeness,
+  type RipenessVerdict,
+} from "./rules/pendingRules";
 import {
   buildChronicleDraftDoc,
   chronicleDraftIdForResolution,
@@ -68,7 +74,14 @@ export type CommitOutcome =
   | { status: "committed"; manifest: Record<string, unknown> }
   | { status: "already-committed"; manifest: Record<string, unknown> }
   | { status: "stale-preview" }
-  | { status: "aborted"; code: string; message: string };
+  | { status: "aborted"; code: string; message: string }
+  /** P4-K20 (Phase 4 close-out, E2): the in-transaction AGR guard
+   * re-evaluated the pending's ripeness on this transaction's snapshot
+   * and the verdict FLIPPED against the dispatched source kind —
+   * nothing was written. The scan executes the flipped outcome
+   * (ripen <-> void <-> wait) in a fresh commit; a stale verdict is
+   * never committed. */
+  | { status: "verdict-flip"; verdict: RipenessVerdict };
 
 export interface CommitRequest {
   resolutionId: string;
@@ -368,6 +381,28 @@ export async function commitResolution(
       });
     }
 
+    // -- Step 4b: P4-K20 in-transaction AGR guard (Phase 4 close-out,
+    // E2). For pending resolutions, the ripeness predicate is
+    // re-evaluated HERE, on this transaction's snapshot — scan-time
+    // evaluation was scheduling only, never the decision. A verdict
+    // that flipped since the scan (a void-clause precondition died,
+    // or revived) aborts this commit with the flipped verdict and
+    // ZERO writes; the scan executes the flipped outcome instead.
+    // This closes the resolve->commit window the scan-side
+    // re-evaluation (pending.ts) cannot see.
+    if (req.sourceKind !== "action" && txPending) {
+      const guardView = buildRipenessView(txPending, {
+        counter,
+        nowIso: now,
+        docByPath: (path) => snapshotDoc(txSnapshot, path),
+      });
+      const guardVerdict = evaluateRipeness(txPending, guardView);
+      const expectedState = req.sourceKind === "pending-ripening" ? "ripe" : "void";
+      if (guardVerdict.state !== expectedState) {
+        return { status: "verdict-flip", verdict: guardVerdict } as CommitOutcome;
+      }
+    }
+
     const authorityRejection =
       plan.outcome === "rejected" &&
       plan.rejection?.code === "AUTHORITY_REVOKED" &&
@@ -491,8 +526,15 @@ export async function commitResolution(
       docOut.createdAt = new Date(now);
       docOut.updatedAt = new Date(now);
       const condition = { ...(docOut.ripenCondition as Record<string, unknown>) };
+      // P4-K19 anchoring (Phase 4 close-out, E1): requiredSeq anchors
+      // to the pending's CREATION seq (this event's summary seq) —
+      // originSeq stays purely the attribution/cause field. Anchoring
+      // a child to its chain origin let requiredSeq land at or before
+      // the child's own createdAtSeq, so only its wall floor delayed
+      // it; a generation-1 pending is unaffected (its originSeq IS
+      // its creation seq).
       condition.requiredSeq =
-        originSeq + (condition.minSeqAdvance as number);
+        summarySeq + (condition.minSeqAdvance as number);
       condition.eligibleAt = new Date(
         Date.parse(now) + (condition.minWallElapsedHours as number) * 3_600_000
       );
@@ -590,9 +632,18 @@ export async function commitResolution(
       lastCommittedSeq: lastSeq,
       updatedAt: new Date(now),
     };
+    // P4-K24 tally (Phase 4 close-out, E4): lastResolvedSeq advances
+    // ONLY on a resolved outcome — a rejected resolution is fully
+    // logged but mints no delay progress. A counter predating the
+    // tally bootstraps at 0 (conservative: ripenings wait for the
+    // next resolved event rather than inheriting head-space credit).
+    const resolvedSeqBefore =
+      typeof counter.lastResolvedSeq === "number" ? (counter.lastResolvedSeq as number) : 0;
+    const resolvedSeqAfter = plan.outcome === "resolved" ? lastSeq : resolvedSeqBefore;
     const counterAfter: Record<string, unknown> = {
       ...counter,
       lastSeq,
+      lastResolvedSeq: resolvedSeqAfter,
       lastResolutionId: req.resolutionId,
       updatedAt: new Date(now),
     };
@@ -794,11 +845,16 @@ export async function commitResolution(
       baselineDocHash: citable?.docHash ?? null,
       counterBefore: {
         lastSeq: counter.lastSeq,
+        lastResolvedSeq:
+          typeof counter.lastResolvedSeq === "number"
+            ? (counter.lastResolvedSeq as number)
+            : null,
         lastEntryHash: counter.lastEntryHash,
         lastResolutionId: counter.lastResolutionId ?? null,
       },
       counterAfter: {
         lastSeq,
+        lastResolvedSeq: resolvedSeqAfter,
         lastEntryHash: summaryHash,
         lastResolutionId: req.resolutionId,
       },
