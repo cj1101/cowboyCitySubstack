@@ -833,3 +833,137 @@ from the gate build: N5 same-wake claim parity, N7 trigger candidacy,
 N9(b) `DEPENDENTS_EXIST`.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 5, 2026-10-21.*
+
+## CI fix round 6 (PR #45) — N4: the executor built the delegated action without its §3.2 trigger citation; the stage refused it NO_TRIGGER_ROOT
+
+**Post-wake state evidence (what the wake actually did, before any
+theory).** The round-5 CI log (`pr45-simcore-log-r5.txt`) shows the
+assertion BEFORE :751 passing: `passes.delegation.fired` contains
+`{ situationId: fireSituationId, kind: "delegated-action" }` — the
+rule fired in the touch's own wake, off the REAL dispatcher manifest.
+The wake returned a summary (no throw — the terms fix holds), and the
+delegated action was created and committed, but its summary record
+was outcome `"rejected"`, not `"resolved"`: :751's
+`passes.delegatedActions.some(d => d.actionId === fireActionId &&
+d.outcome === "resolved")` is `false`. The card therefore never
+completed through a resolved action (a rejected delegated action's
+follow-up returns the card to its owner). Discrimination against the
+assignment's three seams: **(a) candidacy is REFUTED by CI itself** —
+the collector and the real `situation.handle` manifest agree; the
+pure venues' hand-built manifests were not the gap. **(b) matcher
+inputs are lawful** — the probe below shows the stage's checks 1–4
+(identity, ownership, mandate currency, mode, scope/caps) and the
+fairness fence ALL passing on the suite's exact fixtures. **(c)
+execution shape is CONVICTED.**
+
+**Root cause (probe-convicted, pure venue).** `executeDelegatedAction`
+(`lib/sim/wakePasses.ts`) built the delegated action's
+`structuredAction` with `delegatedVia` only — no `trigger` field —
+and the NPC standing actor carries `envelopeId: null`. So
+`entryTriggerOf` (`lib/sim/authorityStage.ts`) returns null,
+`authorityTriggerOf` finds neither a rooted entry trigger nor
+`ownerConfirmedDelegated`, and `evaluateDelegatedAction` check 5
+(`lib/authority/evaluate.ts`) rejects: **NO_TRIGGER_ROOT** — "nothing
+in the committed world asked for this act (causality rule)". A pure
+tsx probe rebuilt the action field-for-field as the executor builds
+it, over standing docs mirroring N4's world (steward charA2,
+mand-steward-1 v1 built with the real `buildMandateVersion` from the
+suite's own N2 inputs, cityA treasury 1,000,000), and ran the real
+pipeline (`collectActionReadPaths/Plan` → `snapshotFromDocs` →
+`resolveAction`, commit mode): stage verdict **reject
+NO_TRIGGER_ROOT** with checks 1–4 + fairness passing and check 5
+failing; plan rejected, no writes. The same action with the §3.2
+citation stamped — `{ kind: "situation", sourceId: situationId,
+sourceSeq: the card's createdSeq, deliberation: null }` — verdict
+**resolve**, plan resolved, summary classification carrying exactly
+the `{mandate, trigger}` stamps of Vera's §3.2 vocabulary. This is
+an ENGINE bug, production-shaped: in production every act-for-me
+delegation fire (and every standing-team act, same construction)
+would have committed as a NO_TRIGGER_ROOT rejection while the touch
+itself resolved — a silent no-op rule engine. Why no earlier venue
+caught it: the governance harness hand-authors every NPC action WITH
+a trigger (its `TRIGGER` constant), the wake harness drives only the
+pure step resolvers and never the DB-bound executor construction,
+and this gate suite is the first end-to-end exercise of that
+construction. Completeness: `executeDelegatedAction` is the only
+`lib/` construction site of a resolved NPC mandate action
+(wakeSteps' `stageMandateVersionRecord` action is projection-only
+and never resolved).
+
+**The fix (engine layer, one construction site).** The construction
+moved verbatim into a pure exported builder,
+`buildDelegatedActionDoc` in `lib/sim/wakeSteps.ts` (beside
+`delegatedActionId`), which stamps the citation; the executor now
+(1) reads the card doc for its `createdSeq` — an unreadable card
+defers, the same posture as an unreadable NPC — and (2) persists
+the builder's output. Citation design: kind `"situation"` is the
+mandate's contemplated trigger kind (the steward's `triggerKinds:
+["situation"]`) and §3.2's vocabulary for exactly this route;
+`sourceSeq` is the card's `createdSeq`, defined in
+`lib/sim/situations.ts` as the creating event's summary seq — the
+committed record that asked for the act, always < the action's own
+seq. A null `createdSeq` stamps as null and the stage's fail-closed
+verdict governs; the citation is never fabricated from the wake's
+position. `ownerConfirmedDelegated` was NOT used: it maps to
+authority kind `"delegated-action"`, outside the steward's
+contemplated kinds (it would escalate, not resolve), and belongs to
+owner-direct tasking (P5-K4).
+
+**Second defect, same scenario (suite fixture layer).** The probe's
+resolved run also printed the city write: treasury
+1,000,000 → **1,000**. `fixture_adjust` writes are absolute and
+clamped to [0, 1000] (the FIXTURE-ADJUST handler, Phase 2's fixture
+contract) — N4's expectation `treasuryBefore + 5000` was
+arithmetically unreachable from any standing value, the
+fixture-economy lesson's sixth bite. The suite's card spec now
+adjusts `stats.infrastructure` (+5 from a standing 50, inside the
+clamp) and asserts `infrastructureBefore + 5`, with the derivation
+stated in the scenario header (sim-core CK6's discipline). The
+handler's clamp is untouched — sim-core's expectations derive from
+it across the suite. No gate-relevant assertion changed: fire,
+mandate citation, exactly-once landing, traceability, and the
+verifier all stand as written.
+
+**Durable pin (same joint).** W24 in `tests/wake-harness.ts`
+(23 → 24 checks): builds standing docs, takes the card's spec
+through the real `readSituationActionSpec`, constructs the action
+with the REAL `buildDelegatedActionDoc`, and runs the real resolver
+— asserts the citation's shape (kind/sourceId/sourceSeq = the
+card's createdSeq), plan resolved, the summary classification
+carrying the §3.2 trigger stamp, and the act landing (infrastructure
+50 → 55). Falsifiability half: the identical action with the
+citation stripped rejects `NO_TRIGGER_ROOT`. The harness no longer
+hand-authors what the engine is responsible for stamping.
+
+**Sibling disposition.** **N5 (ask-first fire): NOT affected** — an
+ask-first handler routes to an envelope; `executeDelegatedAction`
+is never called, and N5's touch already shares the round-2
+production form. **N8 (revocation): NOT affected** — the
+post-revocation fire blocks at evaluation
+(blocked-handler-authority-changed) upstream of execution; its card
+spec never runs, so the clamp is moot there as well. **Trigger pass
+(`via: "trigger"`): SAME root cause, same fix** — it shares the one
+construction site, so standing-team acts carried the identical
+defect; the suite exercises trigger postures as draft/silence only
+(N7), so that caller's end-to-end act path is pinned at the builder
+joint by W24 (route-independent: `via` is an input), not by a
+second emulator scenario.
+
+**Local regression (branch tip after this round):** `tsc --noEmit`
+clean · scoped ESLint on the four touched files
+(`lib/sim/wakeSteps.ts`, `lib/sim/wakePasses.ts`,
+`tests/wake-harness.ts`, `tests/npc-core.test.ts`) 0 errors · full
+pure battery green (governance 59, situations 32, banking 54, wake
+**24** incl. W24, acq 14, cat1 all, cat2 34, chains 34, closeout 29,
+defense 12, lore 27, market 27; npc-core harness 37) · `next build`
+green. The diagnosis probe lived in the clone's `tmp/` and was
+deleted after conviction — no DIAG entered the tree this round,
+and no test was weakened: the suite's only changes are the N4 card
+spec/expectation (clamp-derived, above) — the :751 assertion stands
+exactly as written. Emulator suites are CI's venue on this push;
+watch items for the run: N4 runs through (fire → resolved →
+follow-up → handled, verifier over the trigger-stamped entries);
+N5 same-wake claim parity, N7 trigger candidacy, N9(b)
+`DEPENDENTS_EXIST` unchanged from the gate build.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 6, 2026-10-21.*
