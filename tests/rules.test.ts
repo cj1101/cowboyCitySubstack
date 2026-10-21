@@ -1953,6 +1953,35 @@ async function main() {
   }
   console.log("ok sim acquisition collections posture (P4 Acquisition assembly)");
 
+  // ----------------------------------------------------------------------
+  // Phase 4 step 7 assembly (P4 Market): the five market collections
+  // carry the sim_cases posture — committer-only writes, viewer reads.
+  // Per collection: the committer seeds; owner/member/guest read;
+  // anon does not; member and fabric-worker writes fail (the worker
+  // denial is the discriminative half of committer-only).
+  // ----------------------------------------------------------------------
+  {
+    const marketSeeds: Array<[string, string, Record<string, unknown>]> = [
+      ["sim_market_account", "main", { kind: "market-account", cashRubars: 1000000 }],
+      ["sim_market_listings", "corp_seed1", { corporationId: "corp_seed1", status: "listed" }],
+      ["sim_holdings", "memberA__corp_seed1", { memberId: "memberA", corporationId: "corp_seed1", quantityShares: 10 }],
+      ["sim_market_orders", "ord_seed1", { orderId: "ord_seed1", corporationId: "corp_seed1", status: "resting" }],
+      ["sim_market_trades", "trade_seed1_01", { tradeId: "trade_seed1_01", corporationId: "corp_seed1", seq: 1 }],
+    ];
+    for (const [collection, id, seed] of marketSeeds) {
+      await assertSucceeds(setDoc(doc(committerFs, collection, id), seed));
+      const ref = (actor: typeof ownerA) => doc(actor.firestore(), collection, id);
+      await assertSucceeds(getDoc(ref(ownerA)));
+      await assertSucceeds(getDoc(ref(memberC)));
+      await assertSucceeds(getDoc(ref(guestG)));
+      await assertFails(getDoc(ref(anon)));
+      await assertFails(setDoc(doc(memberC.firestore(), collection, `${id}_forged`), seed));
+      await assertFails(setDoc(doc(fabricWorker.firestore(), collection, `${id}_worker`), seed));
+      await assertFails(deleteDoc(doc(memberC.firestore(), collection, id)));
+    }
+  }
+  console.log("ok sim market collections posture (P4 Market assembly)");
+
   // ======================================================================
   // Sim layer (Phase 2) — P2-G9: the rules amendment surface (brief §9).
   // Fixtures here are seeded after genesis (the Phase 1 ordering lesson)

@@ -1495,6 +1495,41 @@ service cloud.firestore {
       allow create, update, delete: if isFabricCommitter();
     }
 
+    // --- Sim layer: market (Phase 4, step 7) ------------------------------
+    // The exchange's records: the Market Account singleton, listings,
+    // member holdings, the order book, and the trade tape. All are
+    // resolver-written market state, so the posture is the sim_cases
+    // posture: the fabric committer is the only writer (settlement,
+    // repricing, and liquidation are resolution events, never client
+    // writes), and any viewer may read — the book and the tape are
+    // public market data by design (the exchange is an operator, and
+    // its records are the market's published state).
+
+    match /sim_market_account/{accountId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    match /sim_market_listings/{corporationId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    match /sim_holdings/{holdingId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    match /sim_market_orders/{orderId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    match /sim_market_trades/{tradeId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
     // --- Sim layer: trust (publications + intel) --------------------------
 
     match /sim_publications/{publicationId} {
