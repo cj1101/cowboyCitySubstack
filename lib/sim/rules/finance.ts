@@ -51,6 +51,7 @@ import {
   type SimAction,
   type SimChange,
   type SimSnapshot,
+  type CollectionQuerySpec,
 } from "../state";
 import {
   fieldChange,
@@ -283,18 +284,29 @@ function rejectTierBNpc(ctx: HandlerContext, descriptorId: string): ResolutionPl
   );
 }
 
-/** Rows of a declared collection query (the market family's
- * pattern): snapshot.queries records keyed by query id, each row
- * carrying its materialized path. */
+/** Rows of a declared collection query (the structures/defensive
+ * local idiom): the snapshot's materialized query record for the
+ * id, its result docs read back from the snapshot's doc map.
+ * Returns [] when the snapshot carries no such query — every
+ * banking read plan in this file declares the queries its handler
+ * consumes, and the harness exercises the real read-plan path, so
+ * an absent query here is an assembly defect the tests catch, not
+ * a runtime state to price in. */
 function queryDocs(
   snapshot: SimSnapshot,
   queryId: string,
   collectionPath: string
 ): { path: string; doc: Record<string, unknown> }[] {
-  const records = snapshot.queries?.[queryId] ?? [];
-  return records
-    .filter((record) => record.path.startsWith(`${collectionPath}/`))
-    .map((record) => ({ path: record.path, doc: record.data }));
+  const record = snapshot.queries.find(
+    (q) => q.spec.id === queryId && q.spec.collectionPath === collectionPath
+  );
+  if (!record) return [];
+  const out: { path: string; doc: Record<string, unknown> }[] = [];
+  for (const path of record.resultPaths) {
+    const doc = snapshotDoc(snapshot, path);
+    if (doc) out.push({ path, doc });
+  }
+  return out;
 }
 
 /** Project the premium marker/settlement views for one bank from
@@ -348,7 +360,7 @@ function premiumLogViews(
 /** The premium Log queries every banking read plan that derives
  * ladder/coverage state declares (filters on the classification
  * stamps' dotted paths — the F-01 query machinery walks them). */
-function premiumQueries(bankCorporationId: string): DescriptorReadPlan["queries"] {
+function premiumQueries(bankCorporationId: string): CollectionQuerySpec[] {
   return [
     {
       id: "premiumMarkers",
@@ -501,27 +513,45 @@ export function findSituation(
   ctx: HandlerContext,
   predicate: (doc: SimSituation) => boolean
 ): SimSituation | null {
-  for (const [queryId, records] of Object.entries(ctx.snapshot.queries ?? {})) {
-    if (!queryId.startsWith("situationsByKey")) continue;
-    for (const record of records) {
-      const doc = record.data as unknown as SimSituation;
+  for (const query of ctx.snapshot.queries) {
+    if (!query.spec.id.startsWith("situationsByKey")) continue;
+    for (const path of query.resultPaths) {
+      const raw = snapshotDoc(ctx.snapshot, path);
+      if (!raw) continue;
+      const doc = raw as unknown as SimSituation;
       if (predicate(doc)) return doc;
     }
   }
   return null;
 }
 
-/** Mint or upsert one banking Situation inside the caller's plan.
- * Returns the record ids the caller's entry claims
- * (recordsCreated/recordsUpdated). */
+/** Mint or upsert one banking Situation inside the caller's plan,
+ * from a producer-built doc (the situations module's builders
+ * return docs; the upsert machinery consumes create inputs — the
+ * conversion is field-for-field, and the doc's own dedupeKey is
+ * what the standing card is matched by). Returns the record ids
+ * the caller's entry claims (recordsCreated/recordsUpdated). */
 export function mintSituation(
   plan: ResolutionPlan,
   ctx: HandlerContext,
-  input: Parameters<typeof buildProposalSituation>[0] | Parameters<typeof buildIncidentSituation>[0]
+  doc: SimSituation
 ): { created: string[]; updated: string[] } {
-  const key = dedupeKeyFor(input);
-  const existing = findSituation(ctx, (doc) => doc.dedupeKey === key);
-  const decision = planSituationUpsert(existing, input);
+  const existing = findSituation(ctx, (d) => d.dedupeKey === doc.dedupeKey);
+  const decision = planSituationUpsert(existing, {
+    situationId: doc.situationId,
+    cityId: doc.cityId,
+    audienceCityId: doc.audienceCityId,
+    audienceOwnerUidsSnapshot: doc.audienceOwnerUidsSnapshot,
+    recipientUid: doc.recipientUid,
+    kind: doc.kind,
+    severity: doc.severity,
+    title: doc.title,
+    summary: doc.summary,
+    detail: doc.detail,
+    source: doc.source,
+    createdSeq: doc.createdSeq,
+    now: ctx.snapshot.now,
+  });
   const applied = applySituationUpsert(plan, ctx.snapshot, decision);
   return {
     created: applied.created.map((id) => situationPath(id)),
@@ -553,7 +583,7 @@ export function closeSituationWhere(
 
 /** The read-plan query that materializes a bank city's situation
  * cards for in-memory matching (see findSituation). */
-export function situationKeyQueries(cityId: string): NonNullable<DescriptorReadPlan["queries"]> {
+export function situationKeyQueries(cityId: string): CollectionQuerySpec[] {
   return [
     {
       id: "situationsByKey0",
@@ -1239,7 +1269,7 @@ function charterReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
     paths.push(corporationPath(record.cityId, record.corporationId));
   }
   const actorId = actorMemberId(seeds.action.actor);
-  const queries: DescriptorReadPlan["queries"] = [];
+  const queries: CollectionQuerySpec[] = [];
   if (actorId && seeds.action.actionType === "charter_bank") {
     // The controller bar's inputs (BNK-D15): the actor's liquidation
     // summaries + their loan records (obligations read per-bank in
@@ -1640,7 +1670,7 @@ function depositHandler(ctx: HandlerContext): ResolutionPlan {
 function depositReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
   const paths: string[] = [INSURANCE_FUND_PATH];
-  const queries: DescriptorReadPlan["queries"] = [];
+  const queries: CollectionQuerySpec[] = [];
   if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
     paths.push(corporationPath(record.cityId, record.corporationId));
     queries.push(...premiumQueries(record.corporationId));
@@ -2051,7 +2081,7 @@ function settleInterestCredited(
 function depositTargetReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
   const paths: string[] = [INSURANCE_FUND_PATH];
-  const queries: DescriptorReadPlan["queries"] = [];
+  const queries: CollectionQuerySpec[] = [];
   if (typeof record.depositId === "string" && record.depositId) {
     paths.push(bankDepositPath(record.depositId));
   }
