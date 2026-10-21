@@ -248,7 +248,8 @@ export interface MarketOrderRecord {
   limitPriceRubars: number | null;
   status: MarketOrderStatus;
   /** owner-cancel | seq-expiry | insufficient-cash-at-settlement |
-   * listing-liquidated. Null while resting/filled. */
+   * listing-liquidated | float-recall | unfilled-market-remainder.
+   * Null while resting/filled. */
   cancelReason: string | null;
   placedAtSeq: number;
   expiresAtSeq: number | null;
