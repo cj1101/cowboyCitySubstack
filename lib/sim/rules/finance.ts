@@ -115,6 +115,8 @@ import {
   distributeProRata,
   frozenClaimOf,
   fundingSourceOf,
+  installmentDueSeq,
+  installmentPrincipalAt,
   installmentPrincipalOf,
   isInsiderBorrower,
   loanRecordOf,
@@ -1200,7 +1202,7 @@ function charterBankHandler(ctx: HandlerContext): ResolutionPlan {
           severity: "routine",
           title: `Deposit-insurance premium due — ${corporationId}`,
           summary: `A premium period for ${corporationId} has ripened; the due figure is computed at ripening from the bank's standing insured liabilities (B-12).`,
-          detail: { bankCorporationId: corporationId, periodIndex: 0 },
+          detail: { bankCorporationId: corporationId, periodIndex: 0, premiumChain: true },
           cityId,
           audienceCityId: cityId,
           recipientUid: ownerId,
@@ -4860,6 +4862,848 @@ function liquidateBankReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
     paths.push(bankDepositPath(record.depositId));
   }
   return { paths, queries };
+}
+
+// ---------------------------------------------------------------------------
+// B-12 — pay_insurance_premium (amendment V2-§1.3, Tier A). Premiums
+// are the bank owner's obligation, payable in full against the
+// ripened markers the Log carries — never auto-debited (M5): the
+// chain ripens, the marker lands, the Situation accumulates, and
+// only this act moves money. The settlement summary's
+// classification is the ladder derivation's input: what was settled
+// (pending ids), how much, under which rule. Paying arrears in
+// full cures delinquency/suspension BY DERIVATION — the ladder
+// walk closes the interval at this event's seq; no flag flips.
+// ---------------------------------------------------------------------------
+
+function insurancePaymentHandler(ctx: HandlerContext, citesRule: "B-12" | "B-14"): ResolutionPlan {
+  const descriptorId = citesRule;
+  const bankOrPlan = parseBankTarget(ctx, descriptorId);
+  if ("outcome" in bankOrPlan) return bankOrPlan;
+  const cityId = stringField(ctx.action, "cityId") as string;
+  const corporationId = stringField(ctx.action, "corporationId") as string;
+  const bank: BankTarget & { cityId: string; corporationId: string } = { ...bankOrPlan, cityId, corporationId };
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId || actorId !== bank.corp.ownerMemberId) {
+    return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], `${descriptorId}: insurance obligations are paid by the bank's owner (or their mandated NPC — the authority stage is the mandate's venue; the handler still requires the principal to be the owner).`);
+  }
+  const fund = snapshotDoc(ctx.snapshot, INSURANCE_FUND_PATH);
+  if (!fund) {
+    return rejectedPlan(descriptorId, "no-insurance-fund", [descriptorId], `${descriptorId}: no Deposit Insurance Fund stands — there is nothing to pay premiums into. Founding is an adoption act (BNK-D18).`);
+  }
+  let dueRubars = 0;
+  let settledPendingIds: string[] = [];
+  let obligationText = "";
+  const ladderBefore = bankPremiumLadder(ctx.snapshot, corporationId);
+  if (citesRule === "B-12") {
+    dueRubars = ladderBefore.arrearsRubars;
+    settledPendingIds = ladderBefore.unsettled.map((m) => m.pendingId);
+    if (dueRubars <= 0 || settledPendingIds.length === 0) {
+      return rejectedPlan(descriptorId, "no-premium-due", [descriptorId], "B-12: no ripened premium arrears stand for this bank — premiums are payable against ripened markers, never in advance and never by estimate.");
+    }
+    obligationText = `${settledPendingIds.length} ripened period(s) totaling ${dueRubars} R`;
+  } else {
+    const pendingId = stringField(ctx.action, "pendingId");
+    if (!pendingId) {
+      return rejectedPlan(descriptorId, "malformed-action", [descriptorId], "B-14: the action names pendingId — the assessment obligation it settles (assessments are per-obligation records, each settled by name).");
+    }
+    const outstanding = assessmentObligations(ctx.snapshot, corporationId);
+    const obligation = outstanding.find((o) => o.pendingId === pendingId);
+    if (!obligation) {
+      return rejectedPlan(descriptorId, "assessment-not-due", [descriptorId], `B-14: no outstanding assessment obligation ${pendingId} stands for this bank — either it has not ripened (the obligation arises at ripening, not at creation) or it already stands settled in the Log.`);
+    }
+    dueRubars = obligation.dueRubars;
+    settledPendingIds = [pendingId];
+    obligationText = `the supplemental assessment of ${dueRubars} R arising from the fund's standing deficiency`;
+  }
+  const amount = positiveAmount(ctx.action);
+  if (amount === null || amount !== dueRubars) {
+    return rejectedPlan(descriptorId, "insurance-amount-mismatch", [descriptorId], `${descriptorId}: the payment must be the full standing obligation — ${dueRubars} R (${obligationText}). Partial premium payments are not a state the ladder knows; arrears settle whole or stand.`);
+  }
+  const plan = emptyPlan(descriptorId);
+  const line: TransferLine = {
+    from: corporationRef(cityId, corporationId),
+    to: difRef(),
+    amountRubars: amount,
+    ruleId: citesRule,
+    memo:
+      citesRule === "B-12"
+        ? `deposit-insurance premium — ${settledPendingIds.length} period(s) in full`
+        : "B-14 supplemental assessment — paid in full",
+  };
+  const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+  if (!applied.ok) {
+    return rejectedPlan(descriptorId, applied.code.toLowerCase().replace(/_/g, "-"), [descriptorId], `${descriptorId}: payment refused: ${applied.message}`);
+  }
+  // K3/K4: the bank's accumulated premium card terminals in this
+  // event when the settlement clears what the card carries.
+  const situationClaims = { created: [] as string[], updated: [] as string[] };
+  const standingCard = findSituation(
+    ctx,
+    (doc) =>
+      doc.status === "open" &&
+      doc.kind === "system" &&
+      (doc.detail as Record<string, unknown> | null)?.premiumChain === true &&
+      (doc.detail as Record<string, unknown> | null)?.bankCorporationId === corporationId
+  );
+  const summarySeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + groupChangesByEntryCity(applied.changes).size + 1;
+  if (standingCard) {
+    const closedPath = closeSituationWhere(plan, ctx, (doc) => doc.situationId === standingCard.situationId, {
+      resolvedSeq: summarySeq,
+      resolutionId: ctx.resolutionId,
+    });
+    if (closedPath) situationClaims.updated.push(closedPath);
+  }
+  pushMovementEntries(
+    plan,
+    ctx,
+    descriptorId,
+    applied.changes,
+    (entryCityId) =>
+      entryCityId === null
+        ? `${descriptorId}: the Deposit Insurance Fund received ${amount} R from ${corporationId} — an inflow of the closed set (premiums, assessments, subrogated recoveries, governance grants; M10). Fund cash and the premium ladder both derive from these lines.`
+        : `${descriptorId}: ${corporationId} paid its standing insurance obligation of ${amount} R in full. Ladder before: ${ladderBefore.state}; the derivation after this settlement reads current (arrears settled whole).`,
+    { created: situationClaims.created, updated: situationClaims.updated }
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: citesRule === "B-12" ? "pay-insurance-premium" : "pay-supplemental-assessment",
+    scope: "bank",
+    cityId,
+    summaryText:
+      citesRule === "B-12"
+        ? `B-12: ${corporationId} paid ${amount} R of deposit-insurance premiums in full (${obligationText}). Ladder: ${ladderBefore.state} → current by derivation at this settlement. The fund's cash rose by the same figure — the pair is this entry and the fund's movement entry.`
+        : `B-14: ${corporationId} paid its supplemental assessment of ${amount} R in full. The fund's deficiency position re-derives from its standing sheet.`,
+    classificationExtra: {
+      premiumSettlement: {
+        bankCorporationId: corporationId,
+        settledPendingIds,
+        totalPaidRubars: amount,
+        citesRule,
+        ladderBefore: ladderBefore.state,
+      },
+    },
+  });
+}
+
+function payInsurancePremiumHandler(ctx: HandlerContext): ResolutionPlan {
+  return insurancePaymentHandler(ctx, "B-12");
+}
+
+function paySupplementalAssessmentHandler(ctx: HandlerContext): ResolutionPlan {
+  return insurancePaymentHandler(ctx, "B-14");
+}
+
+/** Outstanding B-14 assessment obligations for a bank, derived
+ * from the standing Log: ripened assessment markers minus the
+ * settlements citing B-14. */
+function assessmentObligations(
+  snapshot: SimSnapshot,
+  bankCorporationId: string
+): { pendingId: string; dueRubars: number; deficitRubars: number | null }[] {
+  const markers = queryDocs(snapshot, "assessmentMarkers", "sim_log_entries");
+  const settlements = queryDocs(snapshot, "premiumSettlements", "sim_log_entries");
+  const settled = new Set<string>();
+  for (const { doc } of settlements) {
+    const classification = (doc.classification ?? {}) as Record<string, unknown>;
+    const settlement = classification.premiumSettlement as
+      | { settledPendingIds?: unknown; citesRule?: unknown }
+      | undefined;
+    if (settlement?.citesRule === "B-14" && Array.isArray(settlement.settledPendingIds)) {
+      for (const id of settlement.settledPendingIds) if (typeof id === "string") settled.add(id);
+    }
+  }
+  const out: { pendingId: string; dueRubars: number; deficitRubars: number | null }[] = [];
+  for (const { doc } of markers) {
+    const classification = (doc.classification ?? {}) as Record<string, unknown>;
+    const due = classification.assessmentDue as
+      | { bankCorporationId?: unknown; pendingId?: unknown; dueRubars?: unknown; deficitRubars?: unknown }
+      | undefined;
+    if (
+      due?.bankCorporationId === bankCorporationId &&
+      typeof due.pendingId === "string" &&
+      typeof due.dueRubars === "number" &&
+      !settled.has(due.pendingId)
+    ) {
+      out.push({
+        pendingId: due.pendingId,
+        dueRubars: due.dueRubars,
+        deficitRubars: typeof due.deficitRubars === "number" ? due.deficitRubars : null,
+      });
+    }
+  }
+  return out;
+}
+
+function insurancePaymentReadPlan(citesRule: "B-12" | "B-14") {
+  return (seeds: ReadPlanSeeds): DescriptorReadPlan => {
+    const record = seeds.action.structuredAction ?? {};
+    const paths: string[] = [INSURANCE_FUND_PATH];
+    const queries: CollectionQuerySpec[] = [];
+    if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+      paths.push(corporationPath(record.cityId, record.corporationId));
+      queries.push(
+        ...premiumQueries(record.corporationId),
+        ...situationKeyQueries(record.cityId),
+        {
+          id: "assessmentMarkers",
+          collectionPath: "sim_log_entries",
+          filters: [
+            {
+              field: "classification.assessmentDue.bankCorporationId",
+              op: "==",
+              value: record.corporationId,
+            },
+          ],
+        }
+      );
+    }
+    return { paths, queries };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DIF founding (V2-§1.1, BNK-D18) — an ADOPTION ACT, exported for
+// the Lead to wire to the Town Hall / genesis route. The act: the
+// singleton record is created exactly once (a second act rejects
+// fund-exists); the grandfathering election is NONE (pre-founding
+// deposits derive uninsured for life — M12's only lawful
+// alternative would have been an election stated here, and this
+// build elects none); premium chains seed for every bank chartered
+// at founding. The act moves NO money and changes NO posture copy
+// (G5: surfaces derive the founded posture from this record
+// through the one describeInsurancePosture path).
+// ---------------------------------------------------------------------------
+
+export function buildDifFoundingPlan(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-12";
+  if (snapshotDoc(ctx.snapshot, INSURANCE_FUND_PATH)) {
+    return rejectedPlan(descriptorId, "fund-exists", [descriptorId], "The Deposit Insurance Fund already stands — founding is a once-ever act (BNK-D18). A second founding is not a top-up; fund inflows are the closed set of B-12/B-14 settlements, subrogated recoveries, and governance grants.");
+  }
+  const plan = emptyPlan(descriptorId);
+  const summarySeq = ctx.snapshot.counterHead.lastSeq + 2;
+  // Insured aggregate at founding, derived honestly: under the
+  // none election every pre-founding deposit is uninsured, so the
+  // derivation over the standing book is 0 — computed, not assumed,
+  // wherever the snapshot carries the book.
+  const allDeposits = queryDocs(ctx.snapshot, "allDeposits", "sim_bank_deposits")
+    .map(({ doc }) => depositRecordOf(doc))
+    .filter((d): d is BankDepositRecord => d !== null);
+  const charteredBanks: { corporationId: string; cityId: string; ownerMemberId: string }[] = [];
+  for (const [path, doc] of ctx.snapshot.docs) {
+    const match = /^sim_cities\/([^/]+)\/corporations\/([^/]+)$/.exec(path);
+    if (!match || !doc) continue;
+    const block = bankBlockOf(doc);
+    if (block && block.status === "active" && typeof doc.ownerMemberId === "string") {
+      charteredBanks.push({ corporationId: match[2], cityId: match[1], ownerMemberId: doc.ownerMemberId });
+    }
+  }
+  const foundingRecord = fundRecordOf(
+    buildDifFundDoc({
+      establishedAtSeq: summarySeq,
+      establishingEntryId: ctx.resolutionId,
+      totalInsuredLiabilitiesRubars: 0,
+    })
+  );
+  const aggregate = totalInsuredLiabilities({
+    deposits: allDeposits,
+    banks: charteredBanks.map((b) => ({ corporationId: b.corporationId, ownerMemberId: b.ownerMemberId })),
+    fund: foundingRecord,
+    suspensionIntervalsByBank: new Map(),
+  });
+  const fundDoc = buildDifFundDoc({
+    establishedAtSeq: summarySeq,
+    establishingEntryId: ctx.resolutionId,
+    totalInsuredLiabilitiesRubars: aggregate,
+  });
+  planWrite(plan, ctx.snapshot, INSURANCE_FUND_PATH, fundDoc, "state", [
+    "fundCashRubars",
+    "totalInsuredLiabilitiesRubars",
+    "establishedAtSeq",
+  ]);
+  for (const bank of charteredBanks) {
+    const pendingId = `prem_${bank.corporationId}_0`;
+    if (snapshotDoc(ctx.snapshot, `sim_pending_consequences/${pendingId}`)) continue;
+    const draft = buildSchedulePendingDraft(ctx.snapshot, {
+      pendingId,
+      kind: "insurance-premium-due",
+      originResolutionId: ctx.resolutionId,
+      originActionId: ctx.action.actionId,
+      originActor: ctx.action.actor,
+      originCityId: bank.cityId,
+      originSummaryText: `Deposit-insurance premium period 0 for ${bank.corporationId} (seeded at founding)`,
+      targetCityId: bank.cityId,
+      sourceKind: "action",
+      generation: 1,
+      chainId: pendingId,
+      chainRootPendingId: null,
+      createdByResolutionId: null,
+      minSeqAdvance: PREMIUM_PERIOD_SEQS,
+      scheduleDerivation: {
+        bankCorporationId: bank.corporationId,
+        periodIndex: 0,
+        anchor: "dif-founding",
+        periodSeqs: PREMIUM_PERIOD_SEQS,
+      },
+      payloadSpec: {
+        schedule: {
+          kind: "insurance-premium",
+          bankCorporationId: bank.corporationId,
+          bankCityId: bank.cityId,
+          periodIndex: 0,
+        },
+        occasion: {
+          kind: "insurance-premium-due",
+          severity: "routine",
+          title: `Deposit-insurance premium due — ${bank.corporationId}`,
+          summary: `A premium period for ${bank.corporationId} has ripened; the due figure is computed at ripening from the bank's standing insured liabilities (B-12).`,
+          detail: { bankCorporationId: bank.corporationId, periodIndex: 0, premiumChain: true },
+          cityId: bank.cityId,
+          audienceCityId: bank.cityId,
+          recipientUid: bank.ownerMemberId,
+        } satisfies RipeningOccasionSpec,
+      },
+    });
+    plan.pendingCreates.push(draft.draft);
+  }
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      major: true,
+      changes: [
+        fieldChange("institutionAccount.cashRubars", null, 0, "The Deposit Insurance Fund is founded by adoption act (BNK-D18) — its segregated balance opens at 0 R; premiums, assessments, subrogated recoveries, and governance grants are its only inflows (M10)"),
+        fieldChange("institutionAccount.totalInsuredLiabilitiesRubars", null, aggregate, `Insured aggregate at founding, derived over the standing book under the grandfathering election: NONE — pre-founding deposits derive uninsured for life (M12); the derivation over the book gives ${aggregate} R`),
+      ],
+      recordsCreated: [INSURANCE_FUND_PATH],
+      recordsUpdated: [],
+      summaryText: `The Realm Deposit Insurance Fund is founded by adoption act. Grandfathering election: NONE. Premium chains seeded for ${charteredBanks.length} chartered bank(s). The fund insures nothing retroactively and holds no one's money yet.`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "found-deposit-insurance-fund",
+    scope: "bank",
+    cityId: null,
+    summaryText: `Founded the Realm Deposit Insurance Fund (adoption act, BNK-D18): grandfathering NONE, insured aggregate ${aggregate} R at founding, premium chains seeded for ${charteredBanks.map((b) => b.corporationId).join(", ") || "no chartered banks"}.`,
+    major: true,
+    classificationExtra: {
+      difFounding: {
+        grandfathering: "none",
+        establishedAtSeq: summarySeq,
+        seededBankCorporationIds: charteredBanks.map((b) => b.corporationId),
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Schedule ripening composition (addendum §4 items 6/12/13; SPEC-1
+// as Vera confirmed it). Exported for the Lead's resolver dispatch:
+// ONE branch routes pendings of the two schedule kinds here. The
+// composition lands, inside the ripening Resolution Event: the
+// marker (the event's summary classification — premiumDue /
+// assessmentDue are Log facts), the occasion Situation(s) via
+// Vera's GAP-1 producer (occasion figures are computed HERE, at
+// ripening, from standing state — a seed-time spec carries
+// addressing and fallback text only), the successor pending
+// (premium chains: schedule-anchored requiredSeq, generation-1 of
+// a FRESH chain), and B-14 assessment creation when the fund
+// derives deficient. Charter-ended banks end their chains: no
+// successor, stated on the marker.
+// ---------------------------------------------------------------------------
+
+export function buildScheduleRipeningPlan(
+  ctx: HandlerContext,
+  pendingDoc: Record<string, unknown>
+): ResolutionPlan {
+  const pendingId = typeof pendingDoc.pendingId === "string" ? pendingDoc.pendingId : "";
+  const payloadSpec = (pendingDoc.payloadSpec ?? {}) as Record<string, unknown>;
+  const schedule = (payloadSpec.schedule ?? {}) as Record<string, unknown>;
+  const scheduleKind = typeof schedule.kind === "string" ? schedule.kind : "";
+  if (scheduleKind === "loan-installment") return ripenInstallment(ctx, pendingDoc, schedule);
+  if (scheduleKind === "insurance-premium") return ripenPremium(ctx, pendingDoc, schedule);
+  if (scheduleKind === "insurance-assessment") return ripenAssessment(ctx, pendingDoc, schedule);
+  return rejectedPlan("B-12", "ripening-kind-unrecognized", ["B-12"], `Schedule ripening: pending ${pendingId} carries no recognized banking schedule kind ("${scheduleKind}") — the composition refuses rather than improvises.`);
+}
+
+function ripenInstallment(
+  ctx: HandlerContext,
+  pendingDoc: Record<string, unknown>,
+  schedule: Record<string, unknown>
+): ResolutionPlan {
+  const descriptorId = "B-07";
+  const pendingId = pendingDoc.pendingId as string;
+  const loanId = typeof schedule.loanId === "string" ? schedule.loanId : "";
+  const installmentIndex = typeof schedule.installmentIndex === "number" ? schedule.installmentIndex : 0;
+  const loan = loanRecordOf(snapshotDoc(ctx.snapshot, bankLoanPath(loanId)));
+  if (!loan) {
+    return rejectedPlan(descriptorId, "ripening-read-incomplete", [descriptorId], `Installment ripening for ${pendingId}: the loan record ${loanId} is not in the ripening read set — the Lead's ripening read wiring must carry the loan (assembly item). Nothing ripens blind.`);
+  }
+  const plan = emptyPlan(descriptorId);
+  const markerSeq = ctx.snapshot.counterHead.lastSeq + 2; // card entry, then summary
+  const standing = deriveLoanStanding(loan, markerSeq);
+  const missedIndices: number[] = [];
+  for (let k = 1; k <= loan.installmentCount; k += 1) {
+    const dueSeq = installmentDueSeq(loan, k);
+    if (dueSeq !== null && markerSeq > dueSeq && k > loan.installmentsSettled) missedIndices.push(k);
+  }
+  const installmentPrincipal = installmentPrincipalAt(loan.principalRubars, loan.installmentCount, installmentIndex);
+  const addressing = situationAddressingFor(ctx.snapshot, loan.borrower, loan.bankCityId);
+  const defaultNote = standing.inDefault
+    ? ` The loan stands in DERIVED DEFAULT (${standing.missedCount} missed installments ≥ the ${loan.defaultMissedCount} its terms require): the bank's remedies are armed — seizure (B-08) and write-off (B-11) read this same derivation. Cure by repaying the missed installments (B-07); cure un-happens default.`
+    : "";
+  const spec: RipeningOccasionSpec = {
+    kind: "system",
+    severity: "routine",
+    title: `Installment ${installmentIndex} due — loan ${loan.loanId}`,
+    summary: `Installment ${installmentIndex} of ${loan.installmentCount} on the ${loan.principalRubars} R loan from ${loan.bankCorporationId} is due: ${installmentPrincipal} R of principal plus interest as it stands (${standing.accruedInterestRubars} R unsettled at seq ${markerSeq}). Repayment is your act (B-07) — nothing auto-debits.${defaultNote}`,
+    detail: {
+      loanId: loan.loanId,
+      bankCorporationId: loan.bankCorporationId,
+      installmentIndex,
+      dueRubars: installmentPrincipal,
+      inDefault: standing.inDefault,
+      missedCount: standing.missedCount,
+    },
+    cityId: loan.bankCityId,
+    audienceCityId: addressing.audienceCityId,
+    recipientUid: addressing.recipientUid ?? null,
+  };
+  const card = mintSituation(
+    plan,
+    ctx,
+    buildRipeningOccasionSituation({
+      pending: { pendingId, originSeq: typeof pendingDoc.originSeq === "number" ? pendingDoc.originSeq : null },
+      spec,
+      ripeningSeq: markerSeq,
+      ripeningResolutionId: ctx.resolutionId,
+      audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+      createdSeq: markerSeq - 1,
+      now: ctx.snapshot.now,
+    })
+  );
+  const claims = { created: [...card.created], updated: [...card.updated] };
+  // K1: remedies-armed card for the bank, once per crossing — its
+  // dedupe key derives from (loan, crossing installment), so a
+  // re-driven ripening supersedes rather than duplicates.
+  if (standing.inDefault && missedIndices.length >= loan.defaultMissedCount) {
+    const crossingIndex = missedIndices[loan.defaultMissedCount - 1];
+    if (installmentIndex === crossingIndex) {
+      const bankCorp = snapshotDoc(ctx.snapshot, corporationPath(loan.bankCityId, loan.bankCorporationId));
+      const ownerId = typeof bankCorp?.ownerMemberId === "string" ? bankCorp.ownerMemberId : null;
+      const k1Addressing = situationAddressingFor(ctx.snapshot, personalRef(ownerId ?? ""), loan.bankCityId);
+      const k1 = mintSituation(
+        plan,
+        ctx,
+        buildRipeningOccasionSituation({
+          pending: { pendingId: `k1_${loan.loanId}_${crossingIndex}`, originSeq: typeof pendingDoc.originSeq === "number" ? pendingDoc.originSeq : null },
+          spec: {
+            kind: "system",
+            severity: "important",
+            title: `Remedies armed — loan ${loan.loanId} in default`,
+            summary: `Loan ${loan.loanId} (borrower ${ledgerLabel(loan.borrower)}) crossed into derived default at installment ${crossingIndex}: ${standing.missedCount} missed installments stand due-and-unsettled. Your remedies are armed on this same derivation: seize the collateral (B-08) or write the loan off (B-11). If the bank itself fails, write-off closes — the book becomes the pool's.`,
+            detail: { loanId: loan.loanId, crossingInstallmentIndex: crossingIndex, remediesArmed: true },
+            cityId: loan.bankCityId,
+            audienceCityId: loan.bankCityId,
+            recipientUid: ownerId,
+          },
+          ripeningSeq: markerSeq,
+          ripeningResolutionId: ctx.resolutionId,
+          audienceOwnerUidsSnapshot: k1Addressing.audienceOwnerUidsSnapshot,
+          createdSeq: markerSeq - 1,
+          now: ctx.snapshot.now,
+        })
+      );
+      claims.created.push(...k1.created);
+      claims.updated.push(...k1.updated);
+    }
+  }
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: loan.bankCityId,
+      cityIds: [loan.bankCityId],
+      ruleIds: [descriptorId],
+      changes: [],
+      recordsCreated: claims.created,
+      recordsUpdated: claims.updated,
+      summaryText: `Installment ripening: installment ${installmentIndex} of loan ${loan.loanId} falls due at seq ${markerSeq} (${installmentPrincipal} R principal; unsettled interest ${standing.accruedInterestRubars} R; missed ${standing.missedCount}${standing.inDefault ? ` — the loan derives in DEFAULT; remedies armed` : ""}). The borrower's B2 card stands; no money moved and nothing auto-debits (M5).`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "ripen-installment",
+    scope: "bank",
+    cityId: loan.bankCityId,
+    summaryText: `Ripened installment ${installmentIndex} of loan ${loan.loanId} — due ${installmentPrincipal} R${standing.inDefault ? ", loan in derived default, remedies armed (K1)" : ""}.`,
+    classificationExtra: {
+      ripening: { pendingId, kind: "loan-installment-due", installmentIndex, inDefault: standing.inDefault },
+    },
+  });
+}
+
+function ripenPremium(
+  ctx: HandlerContext,
+  pendingDoc: Record<string, unknown>,
+  schedule: Record<string, unknown>
+): ResolutionPlan {
+  const descriptorId = "B-12";
+  const pendingId = pendingDoc.pendingId as string;
+  const bankCorporationId = typeof schedule.bankCorporationId === "string" ? schedule.bankCorporationId : "";
+  const bankCityId = typeof schedule.bankCityId === "string" ? schedule.bankCityId : "";
+  const periodIndex = typeof schedule.periodIndex === "number" ? schedule.periodIndex : 0;
+  const corpPath = corporationPath(bankCityId, bankCorporationId);
+  const corp = snapshotDoc(ctx.snapshot, corpPath);
+  const block = corp ? bankBlockOf(corp) : null;
+  const fund = snapshotDoc(ctx.snapshot, INSURANCE_FUND_PATH);
+  const fundRec = fundRecordOf(fund);
+  if (!corp || !block || !fundRec) {
+    return rejectedPlan(descriptorId, "ripening-read-incomplete", [descriptorId], `Premium ripening for ${pendingId}: the bank corporation or the fund record is not in the ripening read set — the Lead's ripening read wiring must carry both (assembly item).`);
+  }
+  const depositQuery = ctx.snapshot.queries.find((q) => q.spec.id === "bankDeposits");
+  if (!depositQuery) {
+    return rejectedPlan(descriptorId, "ripening-read-incomplete", [descriptorId], `Premium ripening for ${pendingId}: the bank's deposit book is not in the ripening read set — premiums compute from standing insured liabilities, never from a guess (assembly item: the ripening read wiring carries the bankDeposits query).`);
+  }
+  const deposits = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
+    .map(({ doc }) => depositRecordOf(doc))
+    .filter((d): d is BankDepositRecord => d !== null && d.bankCorporationId === bankCorporationId);
+  const ownerId = corp.ownerMemberId as string;
+  const ladderBefore = bankPremiumLadder(ctx.snapshot, bankCorporationId);
+  const insured = insuredLiabilitiesForBank({
+    deposits,
+    bankCorporationId,
+    fund: fundRec,
+    suspensionIntervals: ladderBefore.suspensionIntervals,
+    bankOwnerMemberId: ownerId,
+  });
+  const grade = bankRiskGradeOf(corp);
+  const multiplier = premiumRiskMultiplier(grade);
+  const due = premiumDueRubars({ insuredLiabilitiesRubars: insured, riskMultiplier: multiplier, periodSeqs: PREMIUM_PERIOD_SEQS });
+  const charterEnded = block.status !== "active" || corp.status === "dissolved";
+  const plan = emptyPlan(descriptorId);
+  const cardSeq = ctx.snapshot.counterHead.lastSeq + 1;
+  const summarySeq = cardSeq + 1;
+  const arrearsAfter = ladderBefore.arrearsRubars + due;
+  const unsettledAfter = ladderBefore.unsettled.length + (due > 0 ? 1 : 0);
+  const ladderAfter = unsettledAfter >= 2 ? "suspended" : unsettledAfter === 1 ? "delinquent" : "current";
+
+  // B-14: while the fund derives deficient, an outstanding
+  // assessment obligation is created for this bank at its premium
+  // ripening — the venue where the bank's own insured liabilities
+  // (the assessment's numerator) and the fund's aggregate (its
+  // denominator) are both exactly readable.
+  let assessmentDueCreated = 0;
+  let assessmentPendingId: string | null = null;
+  const aggregate = fundRec.totalInsuredLiabilitiesRubars;
+  if (
+    fundDeficient({ fund: fundRec, insuredLiabilitiesRubars: aggregate, atSeq: summarySeq }) &&
+    !charterEnded
+  ) {
+    const outstanding = assessmentObligations(ctx.snapshot, bankCorporationId);
+    const standingAssessmentPendings = [...ctx.snapshot.docs.entries()].filter(([, doc]) => {
+      if (!doc) return false;
+      const spec = (doc.payloadSpec ?? {}) as Record<string, unknown>;
+      const sched = (spec.schedule ?? {}) as Record<string, unknown>;
+      return (
+        sched.kind === "insurance-assessment" &&
+        sched.bankCorporationId === bankCorporationId &&
+        (doc.status === "pending" || doc.status === "ripe")
+      );
+    });
+    // One outstanding assessment per bank at a time: a ripened-
+    // unpaid obligation (marker standing, no settlement) or an
+    // unripened assessment pending both block a second creation.
+    const alreadyOwed = outstanding.length > 0 || standingAssessmentPendings.length > 0;
+    if (!alreadyOwed) {
+      const amounts = supplementalAssessments({
+        fundCashRubars: fundRec.fundCashRubars,
+        insuredLiabilitiesRubars: aggregate,
+        survivingBanks: [
+          { bankCorporationId, insuredLiabilitiesRubars: insured },
+          { bankCorporationId: "__realm-rest__", insuredLiabilitiesRubars: Math.max(0, aggregate - insured) },
+        ],
+      });
+      const dueAsm = amounts.get(bankCorporationId) ?? 0;
+      if (dueAsm > 0) {
+        assessmentDueCreated = dueAsm;
+        assessmentPendingId = `asm_${bankCorporationId}_${summarySeq}`;
+        const draft = buildSchedulePendingDraft(ctx.snapshot, {
+          pendingId: assessmentPendingId,
+          kind: "insurance-premium-due",
+          originResolutionId: ctx.resolutionId,
+          originActionId: ctx.action.actionId,
+          originActor: ctx.action.actor,
+          originCityId: bankCityId,
+          originSummaryText: `B-14 supplemental assessment for ${bankCorporationId} — ${dueAsm} R toward the fund's deficiency`,
+          targetCityId: bankCityId,
+          sourceKind: "action",
+          generation: 1,
+          chainId: assessmentPendingId,
+          chainRootPendingId: null,
+          createdByResolutionId: null,
+          minSeqAdvance: 0,
+          scheduleDerivation: {
+            bankCorporationId,
+            assessment: true,
+            deficitRubars: Math.max(0, fundTargetBalanceRubars(aggregate) - fundRec.fundCashRubars),
+            anchor: "premium-ripening",
+          },
+          payloadSpec: {
+            schedule: {
+              kind: "insurance-assessment",
+              bankCorporationId,
+              bankCityId,
+              dueRubars: dueAsm,
+              deficitRubars: Math.max(0, fundTargetBalanceRubars(aggregate) - fundRec.fundCashRubars),
+            },
+            occasion: {
+              kind: "insurance-premium-due",
+              severity: "important",
+              title: `Supplemental assessment due — ${bankCorporationId}`,
+              summary: `The Deposit Insurance Fund derives deficient; a supplemental assessment of ${dueAsm} R stands against ${bankCorporationId} (B-14), payable in full under that rule.`,
+              detail: { bankCorporationId, premiumChain: true, assessment: true },
+              cityId: bankCityId,
+              audienceCityId: bankCityId,
+              recipientUid: ownerId,
+            } satisfies RipeningOccasionSpec,
+          },
+        });
+        plan.pendingCreates.push(draft.draft);
+        plan.readRefKeys.push(`pending:${assessmentPendingId}`);
+      }
+    }
+  }
+
+  // K3: the accumulated premium card (never two open cards per
+  // bank — the standing card supersedes into the new one, which
+  // carries the accumulated figures).
+  const claims = { created: [] as string[], updated: [] as string[] };
+  if (due > 0 || assessmentDueCreated > 0) {
+    const supersededPath = supersedeSituationWhere(
+      plan,
+      ctx,
+      (doc) =>
+        doc.kind === "system" &&
+        (doc.detail as Record<string, unknown> | null)?.premiumChain === true &&
+        (doc.detail as Record<string, unknown> | null)?.bankCorporationId === bankCorporationId,
+      { resolvedSeq: cardSeq, resolutionId: ctx.resolutionId }
+    );
+    if (supersededPath) claims.updated.push(supersededPath);
+    const addressing = situationAddressingFor(ctx.snapshot, personalRef(ownerId), bankCityId);
+    const card = mintSituation(
+      plan,
+      ctx,
+      buildRipeningOccasionSituation({
+        pending: { pendingId, originSeq: typeof pendingDoc.originSeq === "number" ? pendingDoc.originSeq : null },
+        spec: {
+          kind: "system",
+          severity: assessmentDueCreated > 0 ? "important" : "routine",
+          title: `Deposit-insurance premium due — ${bankCorporationId}`,
+          summary: `Premium period ${periodIndex} for ${bankCorporationId} ripened: ${due} R due on insured liabilities of ${insured} R (risk multiplier ${multiplier}×, ${grade ?? "unassessed"} grade). Accumulated arrears: ${arrearsAfter} R; ladder state: ${ladderAfter}${ladderAfter === "suspended" ? " — new deposits are REJECTED while suspended (B-02), and deposits opened during suspension derive uninsured for life" : ""}.${assessmentDueCreated > 0 ? ` A supplemental assessment of ${assessmentDueCreated} R also stands (B-14) — it ripens as its own obligation and is stated separately on this card.` : ""} Pay premiums under B-12 in full; nothing auto-debits.`,
+          detail: {
+            bankCorporationId,
+            premiumChain: true,
+            periodIndex,
+            dueRubars: due,
+            arrearsRubars: arrearsAfter,
+            ladderState: ladderAfter,
+            assessmentPendingId,
+            assessmentDueRubars: assessmentDueCreated,
+          },
+          cityId: bankCityId,
+          audienceCityId: bankCityId,
+          recipientUid: ownerId,
+        },
+        ripeningSeq: summarySeq,
+        ripeningResolutionId: ctx.resolutionId,
+        audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+        createdSeq: cardSeq,
+        now: ctx.snapshot.now,
+      })
+    );
+    claims.created.push(...card.created);
+    claims.updated.push(...card.updated);
+  }
+
+  // Successor (SPEC-1): schedule-anchored, generation-1 fresh chain.
+  let successorNote = "";
+  if (!charterEnded) {
+    const parentRequiredSeq =
+      typeof (pendingDoc.ripenCondition as Record<string, unknown> | undefined)?.requiredSeq === "number"
+        ? ((pendingDoc.ripenCondition as Record<string, unknown>).requiredSeq as number)
+        : summarySeq;
+    const anchor = parentRequiredSeq + PREMIUM_PERIOD_SEQS;
+    const nextPeriod = periodIndex + 1;
+    const successorId = `prem_${bankCorporationId}_${nextPeriod}`;
+    const draft = buildSchedulePendingDraft(ctx.snapshot, {
+      pendingId: successorId,
+      kind: "insurance-premium-due",
+      originResolutionId: ctx.resolutionId,
+      originActionId: ctx.action.actionId,
+      originActor: ctx.action.actor,
+      originCityId: bankCityId,
+      originSummaryText: `Deposit-insurance premium period ${nextPeriod} for ${bankCorporationId}`,
+      targetCityId: bankCityId,
+      sourceKind: "action",
+      generation: 1,
+      chainId: successorId,
+      chainRootPendingId: null,
+      createdByResolutionId: null,
+      minSeqAdvance: anchor - summarySeq,
+      scheduleDerivation: {
+        bankCorporationId,
+        periodIndex: nextPeriod,
+        anchor: "schedule",
+        anchorRequiredSeq: anchor,
+        previousPendingId: pendingId,
+        periodSeqs: PREMIUM_PERIOD_SEQS,
+      },
+      payloadSpec: {
+        schedule: {
+          kind: "insurance-premium",
+          bankCorporationId,
+          bankCityId,
+          periodIndex: nextPeriod,
+        },
+        occasion: {
+          kind: "insurance-premium-due",
+          severity: "routine",
+          title: `Deposit-insurance premium due — ${bankCorporationId}`,
+          summary: `A premium period for ${bankCorporationId} has ripened; the due figure is computed at ripening from the bank's standing insured liabilities (B-12).`,
+          detail: { bankCorporationId, periodIndex: nextPeriod, premiumChain: true },
+          cityId: bankCityId,
+          audienceCityId: bankCityId,
+          recipientUid: ownerId,
+        } satisfies RipeningOccasionSpec,
+      },
+    });
+    plan.pendingCreates.push(draft.draft);
+    plan.readRefKeys.push(`pending:${successorId}`);
+    successorNote = ` Successor period ${nextPeriod} scheduled at the anchored seq ${anchor} (generation-1 of a fresh chain, SPEC-1).`;
+  } else {
+    successorNote = " The bank's charter has ended — the premium chain ends here; no successor is created (SPEC-1).";
+  }
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bankCityId,
+      cityIds: [bankCityId],
+      ruleIds: [descriptorId],
+      changes: [],
+      recordsCreated: claims.created,
+      recordsUpdated: claims.updated,
+      summaryText: `Premium ripening (period ${periodIndex}) for ${bankCorporationId}: insured liabilities ${insured} R × 10 bps × ${multiplier}× risk multiplier = ${due} R due.${due === 0 ? " A zero-due period lands its marker only — no card, the chain unbroken (K3)." : ""} Arrears stand at ${arrearsAfter} R; ladder derives ${ladderAfter}.${assessmentDueCreated > 0 ? ` The fund derives deficient; a B-14 assessment obligation of ${assessmentDueCreated} R was created for this bank.` : ""}${successorNote}`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "ripen-premium",
+    scope: "bank",
+    cityId: bankCityId,
+    summaryText: `Ripened premium period ${periodIndex} for ${bankCorporationId}: ${due} R due (insured ${insured} R, ${multiplier}×); arrears ${arrearsAfter} R, ladder ${ladderAfter}.${charterEnded ? " Chain ended with the charter." : ""}`,
+    classificationExtra: {
+      premiumDue: {
+        bankCorporationId,
+        periodIndex,
+        pendingId,
+        dueRubars: due,
+        insuredLiabilitiesRubars: insured,
+        multiplier,
+      },
+      ripening: { pendingId, kind: "insurance-premium-due", periodIndex },
+    },
+  });
+}
+
+function ripenAssessment(
+  ctx: HandlerContext,
+  pendingDoc: Record<string, unknown>,
+  schedule: Record<string, unknown>
+): ResolutionPlan {
+  const descriptorId = "B-12";
+  const pendingId = pendingDoc.pendingId as string;
+  const bankCorporationId = typeof schedule.bankCorporationId === "string" ? schedule.bankCorporationId : "";
+  const bankCityId = typeof schedule.bankCityId === "string" ? schedule.bankCityId : "";
+  const dueRubars = typeof schedule.dueRubars === "number" ? schedule.dueRubars : 0;
+  const deficitRubars = typeof schedule.deficitRubars === "number" ? schedule.deficitRubars : null;
+  const corp = snapshotDoc(ctx.snapshot, corporationPath(bankCityId, bankCorporationId));
+  const ownerId = typeof corp?.ownerMemberId === "string" ? corp.ownerMemberId : "";
+  const ladder = bankPremiumLadder(ctx.snapshot, bankCorporationId);
+  const plan = emptyPlan(descriptorId);
+  const cardSeq = ctx.snapshot.counterHead.lastSeq + 1;
+  const summarySeq = cardSeq + 1;
+  // K4 rides the bank's premium card machinery: supersede the
+  // standing card into one that states the assessment separately.
+  const claims = { created: [] as string[], updated: [] as string[] };
+  const supersededPath = supersedeSituationWhere(
+    plan,
+    ctx,
+    (doc) =>
+      doc.kind === "system" &&
+      (doc.detail as Record<string, unknown> | null)?.premiumChain === true &&
+      (doc.detail as Record<string, unknown> | null)?.bankCorporationId === bankCorporationId,
+    { resolvedSeq: cardSeq, resolutionId: ctx.resolutionId }
+  );
+  if (supersededPath) claims.updated.push(supersededPath);
+  const addressing = situationAddressingFor(ctx.snapshot, personalRef(ownerId), bankCityId);
+  const card = mintSituation(
+    plan,
+    ctx,
+    buildRipeningOccasionSituation({
+      pending: { pendingId, originSeq: typeof pendingDoc.originSeq === "number" ? pendingDoc.originSeq : null },
+      spec: {
+        kind: "system",
+        severity: "important",
+        title: `Supplemental assessment due — ${bankCorporationId}`,
+        summary: `A supplemental assessment of ${dueRubars} R stands against ${bankCorporationId} (B-14): the Deposit Insurance Fund derives deficient${deficitRubars !== null ? ` by ${deficitRubars} R against its target balance` : ""}, and surviving banks are assessed pro-rata by insured liabilities. Premium arrears stand separately at ${ladder.arrearsRubars} R. Pay the assessment under B-14, naming this obligation; premiums under B-12. Nothing auto-debits.`,
+        detail: {
+          bankCorporationId,
+          premiumChain: true,
+          assessment: true,
+          assessmentPendingId: pendingId,
+          assessmentDueRubars: dueRubars,
+          arrearsRubars: ladder.arrearsRubars,
+        },
+        cityId: bankCityId,
+        audienceCityId: bankCityId,
+        recipientUid: ownerId || null,
+      },
+      ripeningSeq: summarySeq,
+      ripeningResolutionId: ctx.resolutionId,
+      audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+      createdSeq: cardSeq,
+      now: ctx.snapshot.now,
+    })
+  );
+  claims.created.push(...card.created);
+  claims.updated.push(...card.updated);
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bankCityId,
+      cityIds: [bankCityId],
+      ruleIds: ["B-14"],
+      changes: [],
+      recordsCreated: claims.created,
+      recordsUpdated: claims.updated,
+      summaryText: `Assessment ripening: the B-14 obligation of ${dueRubars} R against ${bankCorporationId} is now DUE (marker: this event). It settles only by the owner's B-14 payment naming ${pendingId}; the K4 card rides the bank's premium card. No successor — assessments do not perpetuate.`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "ripen-assessment",
+    scope: "bank",
+    cityId: bankCityId,
+    summaryText: `Ripened the B-14 supplemental assessment against ${bankCorporationId}: ${dueRubars} R due.`,
+    classificationExtra: {
+      assessmentDue: { bankCorporationId, pendingId, dueRubars, deficitRubars },
+      ripening: { pendingId, kind: "insurance-assessment" },
+    },
+  });
 }
 
 function offerLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
