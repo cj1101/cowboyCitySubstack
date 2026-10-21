@@ -967,3 +967,143 @@ N5 same-wake claim parity, N7 trigger candidacy, N9(b)
 `DEPENDENTS_EXIST` unchanged from the gate build.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 6, 2026-10-21.*
+
+---
+
+## CI fix round 7 (PR #45) — N4 attribution: the fire entry's mandate citation
+
+**The failure.** Round 6's engine fix held: the :751 assertion (the
+delegated action resolved in the same wake) passed, and the suite
+advanced to `tests/npc-core.test.ts:803` — `strictEqual` actual
+**null** vs expected **`'mand-steward-1'`**. The field is the
+delegation-fire Log entry's **`actor.mandateId`** (the entry the
+suite finds by `classification.delegationFire === true`), following
+P5-G2's traceability requirement: every NPC-attributed entry cites
+the mandate in force.
+
+**Diagnosis — the seam is the evaluator's adoption gate, not the
+stage and not the executor.** The suite's rule-fire-1 authors its
+handler `{ npcId: "charA2", mode: "act-for-me", mandateId: null }`
+— a lawful shape (brief §7.1: `handler.mandateId: string | null`;
+the composer and the governance fences alike admit an uncited
+handler, meaning "the handler NPC's standing mandate").
+`buildRuleFireEntry` (lib/sim/delegation.ts) builds the entry's
+actor from `DelegationFire.mandateId/mandateVersion`, and
+`evaluateDelegation` composed that pair from the rule alone: its
+local `mandateVersion` was adopted from the authority view **only
+when the rule cited a mandate**, and `fire.mandateId` was
+`rule.handler.mandateId` verbatim — null here, version null with it.
+The production authority view had already resolved the standing
+mandate: `handlerAuthorityView` (wakeSteps.ts) implements the
+§6.3B cited-or-standing doctrine (`rule.handler.mandateId ??
+npc.currentMandateId`) and returns mand-steward-1's root + current
+version as `authority.mandate`. The evaluator dropped that
+resolution on the floor for uncited rules. Two consequences beyond
+the citation itself: `resolveDelegationAuthority` ran with
+`mandateVersion: null`, so the standing mandate's mode and caps
+never entered the §7.3 narrower-of for an uncited fire (brief §7.2
+step 4: "**the handler's mandate** caps and Tier B escalation
+override every rule" — the handler's mandate, cited or standing;
+in the suite's world the mode coincided and the amount was null,
+so routing was unaffected — the citation was the visible half).
+
+The neighbouring paths do the resolution the fire path omitted:
+`executeDelegatedAction` fills the delegated ACTION's actor via
+`input.mandateId ?? npc.currentMandateId` before
+`buildDelegatedActionDoc` (which is why the action resolved and
+its records cite mand-steward-1), and the authority stage stamps
+its `{mandate, trigger}` classification from its own verified
+verdict citation. The stage never sees the fire entry — no stage
+fix was available or needed; the round-6 construction site stands
+as built. The suite's expectation is the design's (brief §3:
+exactly one authority root per NPC entry; §7.1 as carried in the
+view's own doc: "the Log cites rule id/version and mandate
+id/version"; situations harness S6d pins the same completeness for
+cited rules) — no suite change.
+
+**Verifier disposition — no tolerance exists, and none was
+relying on it.** `verify.ts` runs `validateNpcActorForm` over
+EVERY standing NPC entry before traceability (a)/(b)/(c): the
+pre-fix fire entry's actor (mandateId null, mandateVersion null,
+envelopeId null) is an orphan — "actor cites NO authority root" →
+`NPC_ACTOR_FORM`, and the entry is skipped for the remaining
+checks. Traceability (b)'s `mandateId !== null && mandateVersion
+!== null` guard is never reached for such an entry, so the null
+was not an absent≡null case (that doctrine governs P5-K13's
+`characterId` key form, not an authority root's presence): in
+production the standing Log FAILS verification on every
+uncited-handler fire entry. Ordering in-suite: N4's `verifyOk()`
+is the section's last step, after :803, so CI never got to print
+it — the finding was queued behind the assertion, not absent.
+
+**Why no pure venue caught it.** Every fire fixture in the pure
+venues CITES its mandate: the wake harness's `ruleDoc` handler
+carries `mandateId: "mandate1"`, the situations harness's `rule()`
+carries `"mand-1"`, and W1 asserts the fire entry's classification
+and the transition but never its actor. The gate suite's
+rule-fire-1 is the first uncited-handler fire exercised end-to-end
+anywhere.
+
+**The fix (engine, lib/sim/delegation.ts + the view's one
+producer).** `evaluateDelegation` now adopts the view's resolved
+mandate for uncited handlers exactly as for cited ones:
+`effectiveMandateId` (cited id, else the view's standing id) feeds
+the fire, its envelope spec, and its structured intent; the
+adopted version feeds the narrower-of. A standing mandate that
+does not resolve, is not active, or belongs to another NPC/city
+blocks the fire (`blocked-handler-authority-changed`, §7.2 —
+mirroring the cited branch's checks verbatim); an NPC holding no
+standing mandate at all blocks likewise, instead of composing a
+rootless fire. The cited branch is byte-for-byte unchanged in
+behavior (S6g's revoked-cited-mandate block stands). To carry the
+id, `HandlerAuthorityView.mandate` gains `mandateId` — the
+production producer (`handlerAuthorityView`) already computed it
+and now returns it; its doc comment in delegation.ts is corrected
+from "the cited mandate" to the landed cited-or-standing
+doctrine. Blast radius, all deliberate: `recordDelegation` now
+writes the standing pair onto the card's `handling` (brief §6.2's
+handling shape carries both fields); the §8 silence commit
+receives the adopted pair for uncited silent rules (the same
+orphan-actor exposure, closed by the same adoption);
+`composeFirePlan`'s envelope staging now stages the mandate
+version record for uncited envelope fires, aligning them with the
+cited path. Sibling rules in the suite: rule-ask-1 (N5) is also
+uncited — its fire entry and envelope record now cite
+mand-envoy-1; N8's revocation scenario is served by the new
+standing-branch block (post-revocation, the view resolves no
+standing mandate → blocked at evaluation, as its spec requires).
+
+**The pin (same joint, W24 extended in place — count stays 24).**
+W24's first half now also asserts the stage's
+`classification.mandate` stamp (`{mandateId, mandateVersion, mode}`)
+beside the trigger on the delegated action's summary. Its new
+second half drives the REAL step (`evaluateDelegationStep`, hence
+the real `handlerAuthorityView` + evaluator + fire composition)
+over an uncited rule and asserts the citation on all three records
+the suite reads — `fire.mandateId/mandateVersion`, the fire
+entry's actor pair with `validateNpcActorForm(actor).ok === true`
+(the verifier's own form gate), and the card transition's
+`handling` pair — with the plan validated by the real
+`validatePlan`. Falsifiability half: the same uncited rule with
+the standing mandate revoked blocks at evaluation
+(`blocked-handler-authority-changed`, reason /no standing
+mandate/), composes no fire entry, and writes no transition.
+Situations-harness fixtures gained the view's new `mandateId`
+field at its three literal sites (defaults `"mand-1"`, S6g's
+`"mand-dead"`); no harness expectation changed.
+
+**Local regression (branch tip after this round):** `tsc --noEmit`
+clean · scoped ESLint on the four touched files
+(`lib/sim/delegation.ts`, `lib/sim/wakeSteps.ts`,
+`tests/wake-harness.ts`, `tests/situations-harness.ts`) 0 errors ·
+full pure battery green at landed counts (governance 59,
+situations 32, banking 54, wake **24** incl. the extended W24,
+closeout 29, chains 34, cat2 34, cat1 all, defense 12, acq 14,
+market 27, lore 27; npc-core harness 37, authority + envelopes
+harnesses all-pass) · `next build` green. No suite assertion was
+touched this round. Emulator suites are CI's venue on this push;
+watch items for the run: N4 completes through `verifyOk()` over
+the fire entry for the first time; then N5 (now citation-bearing),
+N7 trigger candidacy, N9(b) `DEPENDENTS_EXIST` as before.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 7, 2026-10-21.*
