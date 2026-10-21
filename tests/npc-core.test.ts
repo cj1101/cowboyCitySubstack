@@ -963,12 +963,19 @@ async function main() {
     );
     assert.equal(cancelled?.outputId, null);
 
-    // A later worker wake does not resurrect it.
+    // A later worker wake does not resurrect it. The drive field
+    // is stats.infrastructure, NEVER a money field: fixture_adjust
+    // clamps whatever stat it touches to [0, 1000] (the
+    // FIXTURE-ADJUST handler), so driving on cityB's treasury cut
+    // it 500,000 → 1,000 and silently starved N7's fundB
+    // (10,000 R > 1,000 R = INSUFFICIENT_TREASURY, no pending
+    // created — PR #45 CI round 10; the fixture-economy lesson's
+    // seventh bite). W27 pins the clamp × fund-guard chain.
     const drive = await submitConfirmWake(
       ownerB,
       "ownerB",
       "fixture_adjust",
-      { cityId: "cityB", field: "stats.treasuryRubars", delta: 1 },
+      { cityId: "cityB", field: "stats.infrastructure", delta: 1 },
       { worker: true }
     );
     assert.ok(
@@ -1046,6 +1053,11 @@ async function main() {
       effectDelta: 1,
       disbursementRubars: 10_000,
     });
+    assert.equal(
+      await actionStatus(fundA.actionId),
+      "resolved",
+      "fundA resolves (its treasury precondition stands — see the round-10 note)"
+    );
     pendingA = `pend_${fundA.actionId}_01`;
     const fundB = await submitConfirmWake(ownerB, "ownerB", "fixture_fund", {
       cityId: "cityB",
@@ -1057,6 +1069,11 @@ async function main() {
       effectDelta: 1,
       disbursementRubars: 10_000,
     });
+    assert.equal(
+      await actionStatus(fundB.actionId),
+      "resolved",
+      "fundB resolves (its treasury precondition stands — see the round-10 note)"
+    );
     pendingB = `pend_${fundB.actionId}_01`;
     assert.ok(await adminDoc(`sim_pending_consequences/${pendingA}`), "pending A stands");
     assert.ok(await adminDoc(`sim_pending_consequences/${pendingB}`), "pending B stands");
