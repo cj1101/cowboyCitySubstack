@@ -679,6 +679,13 @@ async function main() {
   // card. The fixture card is seeded with the module's own builder —
   // an initial condition, like sim-core's seeded treasuries; every
   // transition after the seed is the engine's.
+  // The spec adjusts stats.infrastructure (+5 from a standing 50):
+  // fixture_adjust writes are absolute and clamped to [0, 1000]
+  // (the FIXTURE-ADJUST handler), so a +5,000 move on a treasury
+  // standing at 1,000,000 could never evidence a +5,000 landing —
+  // expectations derive from the clamp (sim-core CK6's discipline;
+  // the fixture-economy lesson's sixth bite, found in PR #45 CI
+  // round 6 alongside the engine's missing trigger citation).
   // ======================================================================
   let fireSituationId = "";
   let fireActionId = "";
@@ -690,16 +697,16 @@ async function main() {
       recipientUid: null,
       kind: "proposal",
       severity: "routine",
-      title: "Proposal: adjust the harbor treasury by 5,000 R",
+      title: "Proposal: raise harbor infrastructure readiness by 5",
       summary:
-        "A proposal card carrying a delegated action spec (fixture_adjust +5000 on cityA's treasury), seeded as an initial condition for the gate scenario.",
+        "A proposal card carrying a delegated action spec (fixture_adjust +5 infrastructure on cityA), seeded as an initial condition for the gate scenario.",
       detail: {
         delegatedAction: {
           actionType: "fixture_adjust",
           structuredAction: {
             cityId: "cityA",
-            field: "stats.treasuryRubars",
-            delta: 5000,
+            field: "stats.infrastructure",
+            delta: 5,
           },
           targetCityIds: ["cityA"],
         },
@@ -711,7 +718,7 @@ async function main() {
     fireSituationId = card.situationId;
     await adminDb.doc(`sim_situations/${fireSituationId}`).set(card);
 
-    const treasuryBefore = await treasury("cityA");
+    const infrastructureBefore = (await cityStats("cityA")).infrastructure as number;
     const cycle = wakeCounter + 1;
     fireActionId = delegatedActionId({
       situationId: fireSituationId,
@@ -772,7 +779,11 @@ async function main() {
       (await adminDoc(`sim_actions/${fireActionId}`))?.lastLogSeq,
       "the card's resolvedSeq is the delegated action's last seq"
     );
-    assert.equal(await treasury("cityA"), treasuryBefore + 5000, "the delegated act landed exactly once");
+    assert.equal(
+      (await cityStats("cityA")).infrastructure as number,
+      infrastructureBefore + 5,
+      "the delegated act landed exactly once"
+    );
 
     const delegatedAction = await adminDoc(`sim_actions/${fireActionId}`);
     assert.equal(delegatedAction?.status, "resolved");

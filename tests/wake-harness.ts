@@ -29,6 +29,11 @@
  *   W23     the step read-plan contract: every step kind's seed paths
  *           carry sim_counters/log (the mandatory snapshot input —
  *           PR-4 fix round 1's regression pin).
+ *   W24     the executor's delegated-action construction
+ *           (buildDelegatedActionDoc) carries the §3.2 situation
+ *           trigger citation — the stage resolves the built action;
+ *           the same action unstamped rejects NO_TRIGGER_ROOT
+ *           (PR #45 fix round 6's regression pin).
  *
  * Every composed plan runs the real validatePlan (the committer's
  * §5.6/§6.3 guards incl. F-02 reconciliation) before assertions.
@@ -64,6 +69,7 @@ import {
 } from "../lib/sim/situations";
 import {
   WAKE_RULES_QUERY_ID,
+  buildDelegatedActionDoc,
   delegatedActionId,
   evaluateDelegationStep,
   evaluateTriggerPosture,
@@ -81,6 +87,8 @@ import {
 } from "../lib/sim/wakeSteps";
 import { buildTaskEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../lib/envelopes";
 import { buildMandateVersion } from "../lib/npcs";
+import { npcFromDoc } from "../lib/authority/view";
+import { readSituationActionSpec } from "../lib/sim/delegation";
 
 const registry = buildFixtureBaselineRegistry();
 const NOW = "2026-10-20T15:00:00.000Z";
@@ -1089,6 +1097,91 @@ check("W23 every step kind's seed paths carry sim_counters/log — the snapshot-
       `${step.kind} seed paths name sim_counters/head, a doc that does not exist`
     );
   }
+});
+
+check("W24 the executor's delegated-action construction carries the §3.2 situation trigger — it resolves; the same action unstamped rejects NO_TRIGGER_ROOT", () => {
+  // PR #45 CI round 6: executeDelegatedAction built the delegated
+  // action with delegatedVia only — no trigger citation — so the
+  // authority stage's check 5 refused every act-for-me fire
+  // (NO_TRIGGER_ROOT) while the pure venues stayed green: their
+  // fixtures hand-stamped the citation the engine was responsible
+  // for. This check drives the REAL construction (the executor
+  // persists buildDelegatedActionDoc's output verbatim) through the
+  // real resolver, so the joint cannot silently unstamp again.
+  const docs = baseDocs();
+  standingNpc(docs, {
+    version: {
+      structuredScope: {
+        triggerKinds: ["situation"],
+        allowedActionTypes: ["fixture_adjust"],
+        namedRecordIds: [],
+        counterpartyCityIds: null,
+      },
+    },
+  });
+  docs.set("sim_cities/cityA", {
+    cityId: "cityA",
+    stats: { infrastructure: 50, treasuryRubars: 1_000_000 },
+    stateVersion: 1,
+  });
+  const sit = makeSituation({
+    kind: "proposal",
+    detail: {
+      delegatedAction: {
+        actionType: "fixture_adjust",
+        structuredAction: { cityId: "cityA", field: "stats.infrastructure", delta: 5 },
+        targetCityIds: ["cityA"],
+      },
+    },
+  });
+  putSituation(docs, sit);
+  const npc = npcFromDoc(docs.get("sim_npcs/npc1") ?? null);
+  assert.ok(npc, "the standing steward parses");
+  const spec = readSituationActionSpec(sit);
+  assert.ok(spec, "the card carries a readable delegated spec");
+  const action = buildDelegatedActionDoc({
+    situationId: sit.situationId,
+    situationCreatedSeq: sit.createdSeq,
+    ownerUid: "ownerA",
+    npc,
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    spec,
+    audienceCityId: "cityA",
+    via: "rule1",
+    cycleId: CYCLE,
+    nowIso: NOW,
+  });
+  const trigger = (action.structuredAction as Record<string, unknown>).trigger as Record<string, unknown>;
+  assert.equal(trigger?.kind, "situation");
+  assert.equal(trigger?.sourceId, sit.situationId);
+  assert.equal(trigger?.sourceSeq, sit.createdSeq, "rooted at the card's creating event, not the wake");
+  const plan = runActionAt(docs, action, NOW);
+  assert.equal(plan.outcome, "resolved");
+  const summary = plan.entries[plan.entries.length - 1];
+  const classification = summary?.classification as unknown as Record<string, unknown>;
+  assert.deepEqual(classification?.trigger, {
+    kind: "situation",
+    sourceId: sit.situationId,
+    sourceSeq: sit.createdSeq,
+    deliberation: null,
+  });
+  const cityWrite = plan.writes.find((w) => w.path === "sim_cities/cityA");
+  assert.equal(
+    ((cityWrite?.afterDoc as Record<string, unknown>)?.stats as Record<string, unknown>)?.infrastructure,
+    55,
+    "the delegated act lands"
+  );
+  // Falsifiability: the identical action with the citation stripped
+  // — the executor's pre-fix shape — refuses at check 5.
+  const unstamped: SimAction = {
+    ...action,
+    structuredAction: { ...(action.structuredAction as Record<string, unknown>) },
+  };
+  delete (unstamped.structuredAction as Record<string, unknown>).trigger;
+  const plan2 = runActionAt(docs, unstamped, NOW);
+  assert.equal(plan2.outcome, "rejected");
+  assert.equal(plan2.rejection?.code, "NO_TRIGGER_ROOT");
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);
