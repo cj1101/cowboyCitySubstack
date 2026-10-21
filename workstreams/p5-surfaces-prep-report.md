@@ -302,3 +302,211 @@ P2-K15 chain items (A-2).
 this report; the draft-confirm binding stays open per F3),
 P5-G13 (source sweep clean; rendered sweep at capture). No
 branch-protection changes; no new CI jobs.
+
+---
+
+## 7. Assembly addendum (Rafe, Build Lead — PR-5)
+
+**Base + verification.** Assembly base `assembly/base-master-17ebbd0`
+at local `0b3deaf` (the PR-4 tip incl. both CI fix rounds): its tree
+`6c5c555327c9205268248ab35641e6b9dbe2bc5a` was verified byte-identical
+to the remote master commit `17ebbd0`'s tree via the API **before**
+cherry-picking. June's six commits cherry-picked **clean — zero
+conflicts**. The reason is structural, and it is enumerated, not
+assumed: June's delta vs `d36088d` (19 files) and PR-4's delta vs
+`d36088d` (17 files) share **no file at all** — hers are UI surfaces
+plus five shared UI files (`lib/dashboard/panelData.ts`,
+`components/dashboard/panels/SituationsPeekPanel.tsx`,
+`app/log/page.tsx`, `app/settings/page.tsx`,
+`components/layout/NavBar.tsx`); PR-4's are engine, rules, tests,
+README, and its own prep report. Composition was therefore never
+needed, and **no PR-4 content is regressed**: `lib/sim/wakePasses.ts`,
+`lib/sim/wakeSteps.ts`, the committer/dispatcher changes, governance
+incl. the F3 wiring and the F-E9 fix, `situations.ts`'s
+`outcomeVerb`, and the `sim_actions` delegated-create rules branch
+are all untouched by this branch's diff (disjoint file sets), and the
+battery counts below prove the content stands. June's 19 files are
+**byte-identical** in the assembled tree to her branch tip (0-line
+diff over all 19 paths); the assembled delta vs the base, before the
+Lead commits, is exactly her +5,930/−28. Two Lead commits follow:
+the F3 completion and the README.
+
+**Assembly item 1 — the decline control (F3 CLOSED).** June built
+before PR-4 decided F3, so her `awaiting_owner` cards offered
+handle-it-myself and let-it-sit only. The Lead commit wires the
+missing completion, in three places:
+
+- `components/sim/SituationCard.tsx` gains a **Decline the draft**
+  section rendered only for `status === "awaiting_owner"`, between
+  the delegate section and let-it-sit. Its copy carries the §4.3
+  substance: what happens exactly (the matter closes as declined;
+  the decision and its outcome are recorded on the card and in the
+  Log; the draft stays in history exactly as written) and the
+  what-will-NOT-happen sentence (nothing in the draft is adopted or
+  acted on; the draft binds nothing on its own). The control is
+  act-named — "Decline the draft — close this matter" — and runs
+  through `ActionRunner`, so the fabric's own preview + hash-bound
+  confirmation remains the binding confirmation. No second
+  confirmation layer was added: June's §2 two-confirmation note is a
+  delegation-composition fact, not a pattern for the owner's own
+  decision record. The card's header comment now documents the
+  control alongside decisions A/B/C. The submission passes the card's
+  shared note as `decisionNote` when one is present, same as the
+  handle-it-myself submission.
+- `lib/situations/client.ts`: `submitSituationHandle` gains the
+  optional `outcome?: "declined"` argument, spread into the
+  `situation.handle` structured payload only when present. The
+  submitted shape is exactly the one governance harness **G12 pins**
+  (`{situationId, outcome: "declined", decisionNote?}` against an
+  `awaiting_owner` card), and `recordSelfHandling`'s
+  `assertActionable` admits `awaiting_owner` (terminal-only refusal)
+  — verified in the landed module, not assumed.
+- The verb now reaches the card. PR-4 stores
+  `handling.outcomeVerb` on the record, but W4's `toSituation`
+  coercion predated that additive field and **dropped it**; the
+  coercion keeps it now, `outcomeLine` renders a declined history
+  line ahead of the mode branches ("Closed as handled — declined by
+  its owner. The draft binds nothing."), and the card's decision line
+  renders "You declined the draft." for a declined record. With
+  PR-4's engine wiring, **P5-G11's confirmation half is closable at
+  the gate on PR-4 + PR-5**, per PR-4's own record. (The confirm half
+  of the pair — adopting a draft — still binds through the draft's
+  own confirmable act, unchanged; F3 was only ever about decline.)
+
+**Assembly item 2 — F7 DISPOSITION: no index added.** June's
+fire-stats read (`loadRuleFireStats` in `lib/situations/client.ts`)
+is a single equality filter on the dot-path field
+`classification.delegationRuleId` over `sim_log_entries`, with
+`limit(50)`, **no second filter and no `orderBy`** (the newest seq
+is computed client-side over the returned page). A query of that
+shape is served by the field's automatic single-field index — a
+composite is required only when a query combines filters or pairs a
+filter with an ordering, and this one does neither. The §10
+field overrides on `sim_log_entries` exempt only `changes`,
+`summaryText`, `actionText`, `generation`, and `stateHeadsAfter`;
+`classification` is not exempted, so the single-field index stands.
+**No composite index is added in this PR.** The read's failure
+posture stays as June designed it and is honest either way: a failed
+read returns null and the panel renders no fire line — never a
+fabricated zero. (What remains for the gate is the render-side
+capture, not an index question.)
+
+**Assembly item 3 — §11.4 exports + peek verified against current
+master.** The step-11 export machinery underneath June's builders
+(the `lib/export` core and `deliverWorkbook`) sits in neither delta —
+untouched since before both stacks — and June's three new export
+files plus the `panelData.ts` peek loader are byte-identical to her
+verified build (above). Against current master they typecheck and
+build clean (below), with `/situations` and `/settings/npcs` in the
+route table. Her P5-D7 claim was verified in the diff itself:
+`SituationsPeekPanel.tsx` carries a header-comment-only change — the
+component and its registry entry are untouched, and the peek keeps
+no export affordance.
+
+**Regression (local, on the assembled tree).** `tsc --noEmit` clean;
+ESLint scoped to all 18 new/changed site files clean; `next build`
+exit 0 (`/situations` 11.9 kB, `/settings/npcs` 8.26 kB in the route
+table). Pure battery green at landed counts: governance **57**,
+situations **32**, wake **23**, close-out 29, chains 34, cat2 34,
+market 27, lore 27, acq 14, defense 12, cat1 all scenarios. No new
+harness rides this PR (W4 adds none; `test:sim` is unchanged). The
+emulator suites (rules matrix, sim-core/play-core, npc-core per A-1)
+cannot run in this sandbox — **CI on PR-5 is their venue**, the
+standing blocker, unchanged. **Terminology sweep re-run on the
+assembled diff**: the forbidden synonym occurs in **zero** added
+lines under `app/`, `components/`, and `lib/`, and in zero added
+README lines; it is quoted only inside this report's own §3/§5,
+where the rule itself is stated (June's text, untouched).
+
+**Gate-evidence note (per the tasking + A-3/A-5/A-6).** The capture
+points in §3 of this report are **not captured in PR-5**. They are
+named here for **PR-7, the gate PR**, which captures them as gate
+evidence in its own environment per Osei's countersign: A-3 (the
+Log→mandate click-through, both directions), A-5 (the unknown-kind
+card with all decisions present + the rendered silence-copy sweep),
+A-6 (the per-surface rendered terminology sweep — dashboard, Log,
+digest, Situations, settings). The PR body names them the same way.
+
+**Flags at assembly.** F3 is closed (above); F7 is dispositioned
+(above). F1, F2, F4, F5, F6, F8, F9 ride PR-review UNDECIDED,
+verbatim from §4 — F2 bears repeating in the PR body because it is a
+member-visible limitation: one-off persona spawns are not spawnable
+as built (the landed `envelope.spawn` requires a standing NPC
+record), so the form says so plainly and routes to Settings.
+P5-D6/A-7 untouched: nothing in this branch deletes a mandate
+version or reaches inside an undo restore.
+
+**PR draft.**
+
+Title: Phase 5 PR-5 — Surfaces: Situations queue, NPC settings,
+SpawnNpcForm + ConfirmationCard, peek swap, Log NPC filter, §11.4
+exports (June's W4, assembled)
+
+Body:
+
+Phase 5 PR-5 of the seven-PR train (prep report:
+`workstreams/p5-surfaces-prep-report.md`; assembly addendum §7).
+June's W4 surfaces, cherry-picked clean onto the post-PR-4 master —
+her delta and PR-4's share no file, and her 19 files ride
+byte-identical — plus two Lead assembly completions.
+
+What lands: `/situations` (one queue per owner, faceted per city;
+§6.2 order, severity then oldest first, with finite pagination;
+every card carries the three §6.3 decisions; the §7.4
+delegation-rules panel renders rules as sentences, always-wait
+first, with the composer running the module's own
+`validateDelegationRuleDraft` — Save unreachable while a violation
+exists), `/settings/npcs` (team rosters with derived activity
+rendered as display, the permission-mode radio reading
+`DEFAULT_PERMISSION_MODE` from the builder, the versioned mandate
+editor with the mandate hash read-only, retire behind the §4.3
+card, no delete control anywhere), `components/sim/SpawnNpcForm`
+(negotiation bounds required; `mayCommit` is fixed copy and the
+payload hardcodes `false`) + `ConfirmationCard` (Petra §4.3),
+the dashboard situations peek reading `sim_situations` (P5-D7,
+loader only), the Log page's NPC actor filter with
+`NPC 〈id〉, for 〈owner〉` badging, and the §11.4 exports (pure
+fail-closed builders + as-requester fetchers; xlsx + CSV
+touchpoints on both surfaces). Every write is a governance action
+through the play intake; the surfaces write no `sim_*` collection
+directly. No registry, rules, or index change rides this PR.
+
+Assembly completions: **(1) F3 closed** — `awaiting_owner` cards
+gain the Decline the draft control, submitting `situation.handle`
+with outcome `"declined"` against PR-4's handled-by-declining
+wiring (the payload shape is the one governance G12 pins), and
+`handling.outcomeVerb` is carried end-to-end — W4's client coercion
+predated PR-4's additive field and dropped it. With PR-4, P5-G11's
+confirmation half is closable at the gate. **(2) F7 dispositioned**
+— the rules panel's fire-stats read (a single equality filter on
+`classification.delegationRuleId`, no ordering) is served by the
+field's automatic single-field index; `classification` is not an
+exempted field, so no composite index is added, and the read stays
+best-effort by design (no fire line on failure, never a fabricated
+zero).
+
+Gate posture: P5-G10's export half closes on this PR. P5-G11's
+render halves and P5-G13's rendered sweep are captured at PR-7 —
+June's §3 names the capture points (A-3 Log↔mandate click-through,
+A-5 unknown-kind card + rendered silence-copy sweep, A-6
+per-surface rendered terminology sweep); they are named here as
+gate evidence and are **not** captured in this PR. June's flags
+F1/F2/F4/F5/F6/F8/F9 ride undecided. F2 is the member-visible one:
+one-off persona spawns are not spawnable as built — the landed
+`envelope.spawn` requires a standing NPC record — so the form says
+so plainly and routes to Settings; engine-side persona spawning is
+a fabric question, not a UI fork. P5-D6 is untouched by this PR and
+remains PENDING Koda ratification.
+
+Regression: typecheck clean; scoped ESLint clean; `next build`
+green (`/situations` and `/settings/npcs` in the route table); the
+pure battery green at landed counts (governance 57, situations 32,
+wake 23, close-out 29, chains 34, cat2 34, market 27, lore 27,
+acq 14, defense 12, cat1 all). Emulator suites run in CI.
+Terminology sweep over the assembled diff's site files: clean.
+
+**Built, not live (A-2).** This PR is built, not live: the P2-K15
+production chain has not run — no production fabric user (committer
++ worker roles), no production rules deploy, no production indexes
+deploy, no production genesis, no operated production wake path.
+Live-form gate rows close only when that chain executes.
