@@ -78,6 +78,7 @@ import {
   type TaggedChange,
   type TransferLine,
 } from "../../finance/transfer";
+import { bankBlockOf } from "../../finance/banking";
 import {
   MARKET_ACCOUNT_SEED_RUBARS,
   applyStepCap,
@@ -3509,6 +3510,21 @@ export function composeLiquidation(args: {
   const listing = plannedListing(plan, snapshot, args.corporationId);
   if (!corp || !listing) {
     return { status: "refused", code: "not-listed", message: `no standing listing record for ${args.corporationId}` };
+  }
+  // Chartered banks (Phase 5 PR-6 assembly, A5): a company holding
+  // an ACTIVE bank charter never liquidates through M-10's
+  // shareholder waterfall — depositor claims stand ahead of it and
+  // are B-10's business (frozen claims, setoff, the deposit
+  // waterfall, the charter surrendered inside the event). The
+  // refusal names the lawful path; unchartered mechanics are
+  // untouched, and a surrendered charter restores them.
+  const liquidationBank = bankBlockOf(corp);
+  if (liquidationBank && liquidationBank.status === "active") {
+    return {
+      status: "refused",
+      code: "bank-chartered",
+      message: `${args.corporationId} holds an active bank charter — a chartered bank liquidates only through B-10 (liquidate_bank), where depositor claims are paid through the banking waterfall before shareholders; M-10's waterfall does not reach its deposit book`,
+    };
   }
   const live = liveShares(corp);
   const holders = holdingDocs(snapshot)
