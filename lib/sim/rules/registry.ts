@@ -74,6 +74,7 @@ import { GROWTH_DESCRIPTORS } from "./growth";
 import { BUSINESS_DESCRIPTORS, BUSINESS_FINANCE_ADDITIONS } from "./businesses";
 import { ACQUISITION_DESCRIPTORS } from "./acquisition";
 import { MARKET_DESCRIPTORS, MARKET_FINANCE_ADDITIONS, MARKET_UNDO_CLASSES } from "./market";
+import { LORE_DESCRIPTORS } from "./lore";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1176,6 +1177,11 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   ...BUSINESS_REGISTERED,
   ...ACQUISITION_REGISTERED,
   ...MARKET_REGISTERED,
+  // Lore (Phase 4 step 11 assembly): LORE_DESCRIPTORS is a Record
+  // keyed by rule id with its finance §2.4 block riding inline on the
+  // descriptor (shortfallClass "none", no ledgers) — a plain spread,
+  // no fold.
+  ...LORE_DESCRIPTORS,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
