@@ -27,6 +27,14 @@
  * §2.4 additions ride inline on the descriptors, so no fold). R-29
  * registers as a descriptor-only stub — its single handler states
  * the deferral and the export-OFF clause, nothing more.
+ * M-00…M-12 (Market — the exchange) landed with Phase 4 step 7:
+ * their descriptors live in ./market and are registered below with
+ * their finance §2.4 additions folded on and the P4-K25
+ * `locked-at-commit` undo classes (M-03/M-04/M-10) folded onto the
+ * descriptors' new `undoClass` field. The verify.ts holdings supply
+ * is NOT wired at this landing: it is gated on the operated data
+ * step in p4-market-prep-report.md §6 (M-00 founding act +
+ * founder-holding backfill), per §5 item 3 of that report.
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -65,6 +73,7 @@ import { CHAINS_DESCRIPTORS, R32_PRODUCT_HANDLERS } from "./chains";
 import { GROWTH_DESCRIPTORS } from "./growth";
 import { BUSINESS_DESCRIPTORS, BUSINESS_FINANCE_ADDITIONS } from "./businesses";
 import { ACQUISITION_DESCRIPTORS } from "./acquisition";
+import { MARKET_DESCRIPTORS, MARKET_FINANCE_ADDITIONS, MARKET_UNDO_CLASSES } from "./market";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -124,6 +133,16 @@ export interface RuleDescriptor {
   handlers: Record<string, HandlerFn>;
   /** Finance §2.4 additions (see FinanceDescriptorAdditions). */
   finance?: FinanceDescriptorAdditions;
+  /** P4-K25 undo lock class: a descriptor whose committed events are
+   * locked at commit — undo of such a target refuses with the class
+   * named, and the remedy is the corrective-event path. Populated at
+   * registration from a family's undo-class map (the Market family
+   * ships MARKET_UNDO_CLASSES: M-03/M-04/M-10). NOTE: lib/sim/undo.ts
+   * does not read this field yet — enforcement is Phase 7's undo
+   * pass, which extends a populated field instead of retrofitting
+   * one; until then the standard suffix/dependency refusal governs
+   * (Phase 4 Market assembly, per p4-market-prep-report.md §5.2). */
+  undoClass?: "locked-at-commit";
   /** F-01 read-plan hook: declares the collection/graph reads this
    * descriptor's handlers need, beyond the base doc-path derivation.
    * Absent = doc-path reads only (the Phase 2 contract). */
@@ -1090,6 +1109,25 @@ const ACQUISITION_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntrie
   ACQUISITION_DESCRIPTORS.map((descriptor) => [descriptor.id, descriptor])
 );
 
+/** Market descriptors (Phase 4 step 7 assembly) with their finance
+ * §2.4 additions folded onto each descriptor's `finance` field — the
+ * FINANCE_REGISTERED/BUSINESS_REGISTERED pattern (the family carries
+ * no inline finance fields, so the addition attaches whole: class
+ * from the addition, its ledgers/invokes arrays as published) — and
+ * the P4-K25 undo classes folded onto the new `undoClass` field from
+ * MARKET_UNDO_CLASSES (prep §5 items 1–2). */
+const MARKET_REGISTERED: Record<string, RuleDescriptor> = Object.fromEntries(
+  Object.entries(MARKET_DESCRIPTORS).map(([id, descriptor]) => {
+    const withFinance = MARKET_FINANCE_ADDITIONS[id]
+      ? { ...descriptor, finance: MARKET_FINANCE_ADDITIONS[id] }
+      : descriptor;
+    return [
+      id,
+      MARKET_UNDO_CLASSES[id] ? { ...withFinance, undoClass: MARKET_UNDO_CLASSES[id] } : withFinance,
+    ];
+  })
+);
+
 export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   "R-32": {
     id: "R-32",
@@ -1137,6 +1175,7 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   ...GROWTH_DESCRIPTORS,
   ...BUSINESS_REGISTERED,
   ...ACQUISITION_REGISTERED,
+  ...MARKET_REGISTERED,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],
