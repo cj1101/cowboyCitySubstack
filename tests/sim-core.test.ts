@@ -60,6 +60,7 @@ import {
   PRODUCTION_BASELINE_REGISTRY,
   citableBaselineVersion,
   computeBaselineDocHash,
+  type BaselineRegistry,
 } from "../lib/sim/baseline/registry";
 import {
   buildFixtureBaselineRegistry,
@@ -493,22 +494,71 @@ async function main() {
   console.log("ok causality: empty wake byte-identical; no scheduler; scan fenced (P2-G2)");
 
   // ======================================================================
-  // CK4 — P2-G6 Baseline fail-closed (draft registry) + F10 fixture
-  // registry citation behavior (while head seq < 100 -> fixture v0.1).
+  // CK4 — P2-G6 Baseline: production entry ratified (CJ ruling,
+  // 2026-10-20) but pre-genesis in-registry; fail-closed proven against
+  // a draft copy of the same text; + F10 fixture registry citation
+  // behavior (while head seq < 100 -> fixture v0.1).
   // ======================================================================
   const fixtureRegistry = buildFixtureBaselineRegistry("cityB");
   {
-    // The draft is never citable, at any seq.
+    // The production entry is RATIFIED (CJ ruling, War Room,
+    // 2026-10-20 — Option A of Vera's ratification pack, closing
+    // P2-K2): the one-line flip draft -> ratified, docHash unchanged.
+    // Per pack §3 the entry carries effectiveFromSeq: null in the code
+    // registry until production genesis stamps it on sim_world/current,
+    // so the registry alone still selects NO citable version at any
+    // seq — citability from production seq 1 arrives with the genesis
+    // stamp (P2-K15 chain), not with this flip.
+    assert.equal(PRODUCTION_BASELINE_REGISTRY.versions[0].status, "ratified");
+    assert.equal(
+      PRODUCTION_BASELINE_REGISTRY.versions[0].docHash,
+      "db01a43ab1e6015d18d82cc09bf48cddea70a320bad44617f9d39e6a4e0d63ae"
+    );
+    assert.equal(PRODUCTION_BASELINE_REGISTRY.versions[0].effectiveFromSeq, null);
     assert.equal(citableBaselineVersion(PRODUCTION_BASELINE_REGISTRY, 1), null);
     assert.equal(citableBaselineVersion(PRODUCTION_BASELINE_REGISTRY, 9999), null);
-    assert.equal(PRODUCTION_BASELINE_REGISTRY.versions[0].status, "draft");
 
-    // A Baseline-dependent judgment rejects BASELINE_UNRATIFIED and the
-    // rejection is a proper logged Resolution Event citing NOTHING.
+    // Fail-closed, proven against a genuinely UNRATIFIED version: the
+    // same production text at status "draft" (test-local registry) is
+    // never citable, and a Baseline-dependent judgment against it
+    // rejects BASELINE_UNRATIFIED with a proper logged Resolution
+    // Event citing NOTHING — the mechanism is unchanged by the
+    // production flip.
+    const draftRegistry: BaselineRegistry = {
+      versions: PRODUCTION_BASELINE_REGISTRY.versions.map((v) => ({
+        ...v,
+        status: "draft" as const,
+      })),
+    };
+    assert.equal(citableBaselineVersion(draftRegistry, 1), null);
+    assert.equal(citableBaselineVersion(draftRegistry, 9999), null);
+    const { actionId: draftActionId } = await submitConfirmWake(
+      ownerA,
+      "ownerA",
+      "fixture_market_judgment",
+      {
+        cityId: "cityA",
+        sections: ["WB-4.3"],
+        judgment: "fixture judgment that must never land against a draft",
+      },
+      { registry: draftRegistry }
+    );
+    const draftAction = await adminDoc(`sim_actions/${draftActionId}`);
+    assert.equal(draftAction?.status, "rejected");
+    assert.equal((draftAction?.failure as Record<string, unknown>)?.code, "BASELINE_UNRATIFIED");
+    const draftEntries = await entriesOf(draftActionId);
+    assert.equal(draftEntries.length, 1);
+    assert.equal(draftEntries[0].kind, "rejected");
+    assert.equal(draftEntries[0].baseline, null);
+
+    // Against the production registry as it now stands (ratified,
+    // pre-genesis): no selectable citable version yet, so the same
+    // judgment still rejects BASELINE_UNRATIFIED and the rejection is
+    // a proper logged Resolution Event citing NOTHING.
     const { actionId } = await submitConfirmWake(ownerA, "ownerA", "fixture_market_judgment", {
       cityId: "cityA",
       sections: ["WB-4.3"],
-      judgment: "fixture judgment that must never land pre-ratification",
+      judgment: "fixture judgment that must never land pre-genesis",
     });
     const action = await adminDoc(`sim_actions/${actionId}`);
     assert.equal(action?.status, "rejected");
@@ -533,7 +583,8 @@ async function main() {
     assert.equal(narrativeEntries[0].baseline, null);
     assert.deepEqual(narrativeEntries[0].changes, []);
 
-    // No entry anywhere cites the draft production text.
+    // No entry anywhere cites the production text (ratified, but not
+    // citable pre-genesis).
     for (const entry of await allEntries()) {
       const baseline = entry.baseline as Record<string, unknown> | null;
       assert.ok(baseline === null || baseline.version !== "world-baseline-1.0");
