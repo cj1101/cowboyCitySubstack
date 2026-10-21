@@ -926,6 +926,29 @@ function writeSetTooLargePlan(req: CommitRequest, action: SimAction): Resolution
   const ruleIds = [
     ...new Set(req.plan.entries.flatMap((e) => e.ruleIds)),
   ];
+  // §3.2 citation carry-over (PR #45 CI round 8): this fallback
+  // rebuilds the rejection entry from the raw action, which would
+  // strip the citation the authority stage stamped on the attempted
+  // plan's summary — for an NPC-actor action the standing entry
+  // would stand as an orphan. The attempted plan's own stamped
+  // mandate + trigger carry over verbatim when present (they are
+  // the citation the stage verified for this very attempt).
+  const attemptedSummary = req.plan.entries[req.plan.entries.length - 1];
+  const attemptedClassification =
+    attemptedSummary?.classification !== null &&
+    typeof attemptedSummary?.classification === "object"
+      ? (attemptedSummary.classification as Record<string, unknown>)
+      : {};
+  const carriedCitation: Record<string, unknown> = {};
+  if (attemptedClassification.mandate !== undefined) {
+    carriedCitation.mandate = attemptedClassification.mandate;
+  }
+  const attemptedTrigger = attemptedClassification.trigger as
+    | Record<string, unknown>
+    | undefined;
+  if (attemptedTrigger && typeof attemptedTrigger.kind === "string") {
+    carriedCitation.trigger = attemptedTrigger;
+  }
   const plan: ResolutionPlan = {
     outcome: "rejected",
     descriptorId: req.plan.descriptorId,
@@ -948,6 +971,7 @@ function writeSetTooLargePlan(req: CommitRequest, action: SimAction): Resolution
           ruleIds,
           unruled: false,
           rejectionCode: "WRITE_SET_TOO_LARGE",
+          ...carriedCitation,
         },
       },
     ],

@@ -677,28 +677,38 @@ export function triggerClassification(
   };
 }
 
-/** Merge the mandate citation + trigger into a summary entry's
+/** Merge the mandate citation + trigger into EVERY entry's
  * classification (which may be null) on resolve verdicts — including
- * the resolver's rejected-handler-path plans. */
+ * the resolver's rejected-handler-path plans.
+ *
+ * PR #45 CI round 8: this stamp originally landed on the summary
+ * entry only, but the standing verifier's §3.2 traceability reads
+ * classification.trigger on every entry whose actor is an NPC — a
+ * multi-entry handler plan leaves its non-summary entries as orphans
+ * (the gate suite's seq 14: fixture_adjust's rule-effect detail entry
+ * stood triggerless beside its stamped summary at seq 15). The
+ * citation is a property of the resolution's authority, not of the
+ * summary, so it lands on every entry the resolution writes; each
+ * entry's own classification keys are preserved. */
 export function stampMandateCitation(
   plan: ResolutionPlan,
   stage: StageResult & { verdict: Extract<AuthorityVerdict, { disposition: "resolve" }> }
 ): void {
-  const summary = plan.entries[plan.entries.length - 1];
-  if (!summary) return;
-  const existing =
-    summary.classification !== null && typeof summary.classification === "object"
-      ? summary.classification
-      : {};
-  summary.classification = {
-    ...existing,
-    mandate: {
-      mandateId: stage.verdict.citation.mandateId,
-      mandateVersion: stage.verdict.citation.mandateVersion,
-      mode: stage.verdict.citation.mode,
-    },
-    trigger: triggerClassification(stage),
-  };
+  for (const entry of plan.entries) {
+    const existing =
+      entry.classification !== null && typeof entry.classification === "object"
+        ? entry.classification
+        : {};
+    entry.classification = {
+      ...existing,
+      mandate: {
+        mandateId: stage.verdict.citation.mandateId,
+        mandateVersion: stage.verdict.citation.mandateVersion,
+        mode: stage.verdict.citation.mode,
+      },
+      trigger: triggerClassification(stage),
+    };
+  }
 }
 
 export function planForStageVerdict(
@@ -733,6 +743,18 @@ export function planForStageVerdict(
           ruleIds,
           unruled: false,
           rejectionCode: verdict.code,
+          // §3.2 parity with the sibling verdict plans below (PR #45
+          // CI round 8): a stage-rejected NPC entry is still an NPC
+          // entry — it carries the mandate keys and the trigger
+          // citation the stage actually verified. For a NO_TRIGGER_ROOT
+          // rejection the citation is the defaulted one (kind
+          // "log-event", sourceSeq null): the honest record of a
+          // triggerless attempt, which no landed path produces
+          // (the wake executor stamps every delegated action; envelope
+          // executions root at the envelope).
+          mandateId: action.actor.mandateId,
+          mandateVersion: action.actor.mandateVersion,
+          trigger: triggerClassification(stage),
         },
       },
     ];
@@ -826,19 +848,18 @@ export function planForStageVerdict(
         cityId: principalCityId,
         cityIds,
         ruleIds,
-        // Mirror of Vera's buildSilenceCommit classification shape
-        // (lib/sim/situations.ts, PR-3): silence + producingMode +
-        // situation fields + trigger {sourceKind, sourceId, sourceSeq}.
+        // Silence + producingMode + situation fields, with the
+        // trigger in the §3.2 entry vocabulary — the same citation
+        // triggerClassification stamps everywhere (PR #45 CI round 8;
+        // the pre-fix mirror of buildSilenceCommit's {sourceKind, …}
+        // shape read as triggerless to the standing verifier, whose
+        // traceability keys on trigger.kind).
         classification: {
           silence: true,
           producingMode: "silent",
           situationId: t?.kind === "situation" ? t.sourceId : null,
           situationKind: null,
-          trigger: {
-            sourceKind: t?.kind ?? null,
-            sourceId: t?.sourceId ?? null,
-            sourceSeq: t?.sourceSeq ?? null,
-          },
+          trigger: triggerClassification(stage),
         },
         summaryText: `No response — the NPC acting for ${principalCityId ?? "its city"} is in silent mode; the leader didn't say anything.`,
       })

@@ -1080,10 +1080,20 @@ export function buildSilenceCommit(input: SilenceCommitInput): SilenceCommit {
       producingMode: input.producingMode,
       situationId: situation.situationId,
       situationKind: situation.kind,
+      // §3.2 trigger citation in the entry vocabulary (PR #45 CI
+      // round 8): the silence responds to the situation card itself,
+      // rooted at triggerSeq — the same seq the summary text cites
+      // (the card's source seq, falling back to its creating event).
+      // The pre-fix shape ({sourceKind, …} — the SITUATION's source
+      // kind, e.g. "manual-action") read as triggerless to the
+      // standing verifier, whose traceability keys on trigger.kind;
+      // NPC-actor silence entries (npc-silent-mode / silence-rule)
+      // were orphans under it.
       trigger: {
-        sourceKind: situation.source.kind,
-        sourceId: situation.source.sourceId,
-        sourceSeq: situation.source.sourceSeq,
+        kind: "situation",
+        sourceId: situation.situationId,
+        sourceSeq: triggerSeq,
+        deliberation: null,
       },
       ...(input.delegationRuleId
         ? {

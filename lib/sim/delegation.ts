@@ -747,6 +747,19 @@ export function buildRuleFireEntry(
       tierB: fire.tierB,
       situationId: situation.situationId,
       situationKind: situation.kind,
+      // §3.2 trigger citation (PR #45 CI round 8): the fire entry's
+      // actor is the handler NPC, so the standing verifier's
+      // traceability requires the citation on THIS entry — the same
+      // situation citation the delegated action itself carries
+      // (buildDelegatedActionDoc): the card, rooted at the seq of
+      // the event that created it. Its absence was the gate suite's
+      // seq 13 (NPC_TRACE_TRIGGER_MISSING).
+      trigger: {
+        kind: "situation",
+        sourceId: situation.situationId,
+        sourceSeq: situation.createdSeq,
+        deliberation: null,
+      },
     },
     // The situation transition is a top-level record effect:
     // claimed via recordsUpdated + the manifest write set, not

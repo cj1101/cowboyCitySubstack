@@ -1086,9 +1086,10 @@ export function resolveAttentionStep(
   );
   const originActor = (pendingDoc.originActor as SimActor | null) ?? null;
   const fallbackOwner = cityOwnerUids(snapshot, originCityId)[0] ?? situation.audienceOwnerUidsSnapshot[0];
+  const entryActor = originActor ?? (fallbackOwner ? memberActor(fallbackOwner) : memberActor(""));
   plan.entries.push(
     summaryDraft({
-      actor: originActor ?? (fallbackOwner ? memberActor(fallbackOwner) : memberActor("")),
+      actor: entryActor,
       cityId: originCityId,
       cityIds: originCityId ? [originCityId] : [],
       ruleIds: [],
@@ -1100,6 +1101,23 @@ export function resolveAttentionStep(
         pendingKind: str(pendingDoc.kind),
         failureCode: view.lastFailure?.code ?? null,
         situationId: situation.situationId,
+        // §3.2 trigger citation (PR #45 CI round 8): the conversion
+        // entry carries the pending's ORIGIN actor — when that actor
+        // is an NPC (a delegated action's pending that exhausted its
+        // retries), the standing verifier's traceability requires
+        // the citation: the pending itself, rooted at its origin
+        // event. Member-origin conversions keep their landed shape.
+        ...(entryActor.type === "npc"
+          ? {
+              trigger: {
+                kind: "log-event",
+                sourceId: pendingId,
+                sourceSeq:
+                  typeof pendingDoc.originSeq === "number" ? pendingDoc.originSeq : null,
+                deliberation: null,
+              },
+            }
+          : {}),
       },
       summaryText: `A delayed consequence (${pendingId}) exhausted its ripening retries; its needs-attention card ${situation.situationId} now stands in the owner's Situations.`,
     })
