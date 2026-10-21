@@ -3858,6 +3858,291 @@ function seizeCollateralReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   return { paths, queries };
 }
 
+// ---------------------------------------------------------------------------
+// B-11 — write_off_loan (amendment §3.10, REC-2). The bank forgives
+// debt it judges uncollectible: the loan asset falls, NO liability
+// moves, NO cash moves, and the loss posts through the bank's
+// EQUITY — the named "credit loss" bridge (classification-stamped
+// on the summary + stated in the entry), never a burn (REC-2's
+// rejected alternative). The record is retained whole (A-B2/A-B5
+// read it; §3.9's credit record keeps the history). A bank in
+// derived failure may not write off (§5.4): judgments about
+// collectibility belong to a going concern; in failure the book is
+// the pool's, untouched by the old owner's forgiveness.
+// ---------------------------------------------------------------------------
+
+function writeOffLoanHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-11";
+  const tierB = rejectTierBNpc(ctx, descriptorId);
+  if (tierB) return tierB;
+  const targetOrPlan = parseLoanTarget(ctx, descriptorId);
+  if ("outcome" in targetOrPlan) return targetOrPlan;
+  const { loanPath, loan, bank } = targetOrPlan;
+  if (loan.status !== "active") {
+    return rejectedPlan(descriptorId, "loan-not-active", [descriptorId], `B-11: loan ${loan.loanId} is ${loan.status}; write-off acts on a live bank's active loan (a pool-assigned loan is the pool's, and no pool write-off verb exists).`);
+  }
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId || actorId !== bank.corp.ownerMemberId) {
+    return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], "B-11: writing off a loan is the bank owner's act.");
+  }
+  if (deriveBankHealth(bank.corp) === "insolvent") {
+    return rejectedPlan(descriptorId, "write-off-in-failure", [descriptorId], `B-11: ${bank.corporationId} derives failed (insolvent, REC-6) — in failure the book belongs to the waterfall; the owner may not forgive debts out of the pool's reach (§5.4).`);
+  }
+  const amount = sa(ctx.action).amountRubars;
+  const writeOffAmount =
+    typeof amount === "number" && Number.isInteger(amount) && amount > 0 ? amount : loan.outstandingRubars;
+  if (writeOffAmount > loan.outstandingRubars) {
+    return rejectedPlan(descriptorId, "write-off-exceeds-outstanding", [descriptorId], `B-11: write-off of ${writeOffAmount} R exceeds the loan's outstanding principal of ${loan.outstandingRubars} R. Unsettled interest is never written off by B-11 — it is extinguished, unclaimed, when the record closes (the B-03 closing discipline), and this entry states it.`);
+  }
+  const standing = deriveLoanStanding(loan, ctx.snapshot.counterHead.lastSeq + 1);
+  const closes = writeOffAmount === loan.outstandingRubars;
+  const plan = emptyPlan(descriptorId);
+  const tagged: TaggedChange[] = [
+    applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", -writeOffAmount, descriptorId),
+  ];
+  if (loan.insider) {
+    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "insiderLoansRubars", -writeOffAmount, descriptorId));
+  }
+  planMutate(plan, ctx.snapshot, loanPath, "state", ["outstandingRubars", "writtenOffRubars", "status"], (current) => {
+    if (!current) return current;
+    return {
+      ...current,
+      outstandingRubars: loan.outstandingRubars - writeOffAmount,
+      writtenOffRubars: loan.writtenOffRubars + writeOffAmount,
+      ...(closes ? { status: "written-off" } : {}),
+    };
+  });
+  // B5: the borrower's write-off card (history not erased).
+  const addressing = situationAddressingFor(ctx.snapshot, loan.borrower, bank.cityId);
+  const card = mintSituation(
+    plan,
+    ctx,
+    buildIncidentSituation({
+      cityId: bank.cityId,
+      audienceCityId: bank.cityId,
+      audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+      recipientUid: addressing.recipientUid ?? null,
+      severity: "routine",
+      createdSeq: ctx.snapshot.counterHead.lastSeq + 1,
+      now: ctx.snapshot.now,
+      sourceSeq: ctx.snapshot.counterHead.lastSeq + 1,
+      sourceResolutionId: ctx.resolutionId,
+      title: `Loan written off — ${loan.loanId}`,
+      summary: `${bank.corporationId} wrote off ${writeOffAmount} R of loan ${loan.loanId}${closes ? " — the debt is forgiven in full" : ` — ${loan.outstandingRubars - writeOffAmount} R remains owed`}. The loan's history stands in the Log; write-off forgives, it does not erase.`,
+      consequenceSummary: `Forgiven: ${writeOffAmount} R of principal. The loss posts through the bank's equity as a named credit loss (REC-2) — no cash moved, no liability moved, nothing was burned.`,
+      ask: "No action is required.",
+      amountRubars: writeOffAmount,
+      subject: { kind: "corporation", id: bank.corporationId },
+    })
+  );
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bank.cityId,
+      cityIds: [bank.cityId],
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange(`bankLoans/${loan.loanId}.outstandingRubars`, loan.outstandingRubars, loan.outstandingRubars - writeOffAmount, "B-11 write-off — the asset falls; the loss posts through equity (credit-loss bridge)"),
+        fieldChange(`bankLoans/${loan.loanId}.writtenOffRubars`, loan.writtenOffRubars, loan.writtenOffRubars + writeOffAmount, "B-11 — cumulative written-off principal (the record is retained, §3.10)"),
+        ...(closes
+          ? [
+              fieldChange(`bankLoans/${loan.loanId}.status`, "active", "written-off", `B-11 — fully written off; ${standing.accruedInterestRubars} R of unsettled interest is extinguished unclaimed at closing (a derived figure, never a balance)`),
+            ]
+          : []),
+      ],
+      recordsCreated: card.created,
+      recordsUpdated: [loanPath, ...card.updated],
+      summaryText: `B-11: ${bank.corporationId} wrote off ${writeOffAmount} R of loan ${loan.loanId} (borrower ${ledgerLabel(loan.borrower)}). The loss posts as a credit loss through the bank's equity: net worth falls by exactly ${writeOffAmount} R; no cash, liability, or claim moved.`,
+    })
+  );
+  pushMovementEntries(plan, ctx, descriptorId, tagged, () =>
+    `B-11: ${bank.corporationId}'s loan book fell by ${writeOffAmount} R — the A-B2 pair of the write-off (equity bridge: net worth ${bankBalanceSheet(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {})?.netWorthRubars ?? 0} R after).`
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "write-off-loan",
+    scope: "bank",
+    cityId: bank.cityId,
+    summaryText: `Wrote off ${writeOffAmount} R of loan ${loan.loanId} at ${bank.corporationId} — credit loss through equity; the borrower's card stands and the record's history is retained.`,
+    classificationExtra: {
+      creditLoss: { loanId: loan.loanId, amountRubars: writeOffAmount, bridge: "equity" },
+    },
+  });
+}
+
+function writeOffLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId), ...situationKeyQueries(record.cityId));
+  }
+  if (typeof record.loanId === "string" && record.loanId) paths.push(bankLoanPath(record.loanId));
+  return { paths, queries };
+}
+
+// ---------------------------------------------------------------------------
+// B-09 — recapitalize_bank (amendment §5.2). Anyone may inject
+// capital into a bank from a ledger they control; against a FAILED
+// bank the injection is tested as a CURE in the same event: cure ⇔
+// the post-injection sheet derives solvent (net worth ≥ 0) AND
+// liquid (cash ≥ liquid reserve) AND — for the failed-payment form
+// — the failure-deriving claims are now coverable, stamped
+// `curesFailedPayment` on the summary classification for the
+// derivation (banking.ts deriveFailedPayment reads it). The
+// boundary is inclusive: exact equality cures. A non-curing
+// injection is lawful and lands as an ordinary injection whose Log
+// entry states it did not cure (previews show the same verdict —
+// V-B7 parity is the same computation).
+// ---------------------------------------------------------------------------
+
+function recapitalizeBankHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-09";
+  const tierB = rejectTierBNpc(ctx, descriptorId);
+  if (tierB) return tierB;
+  const bankOrPlan = parseBankTarget(ctx, descriptorId);
+  if ("outcome" in bankOrPlan) return bankOrPlan;
+  const cityId = stringField(ctx.action, "cityId") as string;
+  const corporationId = stringField(ctx.action, "corporationId") as string;
+  const bank: BankTarget & { cityId: string; corporationId: string } = { ...bankOrPlan, cityId, corporationId };
+  const from = parseLedgerRef(sa(ctx.action).from);
+  if (!from || from.kind === "market" || from.kind === "exterior" || from.kind === "institution") {
+    return rejectedPlan(descriptorId, "malformed-recapitalization", [descriptorId], "B-09: `from` must name a member, company, or treasury ledger the actor controls — recapitalization is real money from a real ledger, never the Market Account, the Exterior, or the fund.");
+  }
+  const control = borrowerControlRejection(ctx, descriptorId, from);
+  if (control) {
+    return rejectedPlan(descriptorId, "not-ledger-controller", [descriptorId], "B-09: the injection's source ledger is not the actor's to spend.");
+  }
+  const amount = positiveAmount(ctx.action);
+  if (amount === null) {
+    return rejectedPlan(descriptorId, "malformed-recapitalization", [descriptorId], "B-09: amountRubars must be a positive integer.");
+  }
+  const healthBefore = deriveBankHealth(bank.corp);
+  const sheetBefore = bankBalanceSheet(bank.corp);
+  const plan = emptyPlan(descriptorId);
+  if (from.kind === "personal") {
+    composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: from.memberId, viaActionKind: "recapitalize_bank" });
+  }
+  const line: TransferLine = {
+    from,
+    to: corporationRef(cityId, corporationId),
+    amountRubars: amount,
+    ruleId: descriptorId,
+    memo: `recapitalization of ${corporationId}`,
+  };
+  const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+  if (!applied.ok) {
+    return rejectedPlan(descriptorId, applied.code.toLowerCase().replace(/_/g, "-"), [descriptorId], `B-09: injection refused: ${applied.message}`);
+  }
+  const sheetAfter = bankBalanceSheet(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {});
+  const cured =
+    sheetAfter !== null && sheetAfter.netWorthRubars >= 0 && sheetAfter.cashRubars >= sheetAfter.liquidReserveRubars;
+  const wasFailed = healthBefore === "insolvent";
+  // K2: a standing failed-payment episode card terminals on a cure
+  // and updates on a non-cure (Pattern X). (The episode's minting
+  // rides the Log-slice seam — rejections write no entries, so the
+  // card is minted by the first banking event whose read set can
+  // see the derivation; B-09 is that event when the card already
+  // stands from the wake composition. Flagged in the prep report.)
+  const episodeKey = {
+    sourceKind: "system" as const,
+    sourceId: episodeSourceId(`bank:${corporationId}`, "failed-payment"),
+    situationKind: "incident",
+    audienceKey: cityId,
+  };
+  const standingCard = findSituation(
+    ctx,
+    (doc) => doc.dedupeKey === dedupeKeyFor(episodeKey) && doc.status === "open"
+  );
+  const situationClaims = { created: [] as string[], updated: [] as string[] };
+  const summarySeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + groupChangesByEntryCity(applied.changes).size + 1;
+  if (standingCard && cured) {
+    const closedPath = closeSituationWhere(plan, ctx, (doc) => doc.situationId === standingCard.situationId, {
+      resolvedSeq: summarySeq,
+      resolutionId: ctx.resolutionId,
+    });
+    if (closedPath) situationClaims.updated.push(closedPath);
+  } else if (standingCard && !cured) {
+    const card = mintSituation(
+      plan,
+      ctx,
+      buildIncidentSituation({
+        cityId,
+        audienceCityId: cityId,
+        audienceOwnerUidsSnapshot: standingCard.audienceOwnerUidsSnapshot,
+        recipientUid: standingCard.recipientUid,
+        severity: "major",
+        createdSeq: summarySeq,
+        now: ctx.snapshot.now,
+        sourceSeq: summarySeq,
+        sourceResolutionId: ctx.resolutionId,
+        title: standingCard.title,
+        summary: `${corporationId} remains in failed-payment failure after a recapitalization of ${amount} R: net worth ${sheetBefore?.netWorthRubars ?? 0} → ${sheetAfter?.netWorthRubars ?? 0} R, cash ${sheetBefore?.cashRubars ?? 0} → ${sheetAfter?.cashRubars ?? 0} R against a liquid reserve of ${sheetAfter?.liquidReserveRubars ?? 0} R. The injection landed; it did not cure.`,
+        consequenceSummary: "The failed-payment episode continues: custodial claims that derived the failure are not all coverable on the post-injection sheet (derivation stated in the B-09 entry).",
+        ask: "Inject enough to cure, or liquidate (B-10) — the episode closes only on a cure or a liquidation.",
+        amountRubars: amount,
+        subject: { kind: "corporation", id: corporationId },
+        episode: { subjectKey: `bank:${corporationId}`, episodeClass: "failed-payment" },
+      })
+    );
+    situationClaims.created.push(...card.created);
+    situationClaims.updated.push(...card.updated);
+  }
+  pushMovementEntries(
+    plan,
+    ctx,
+    descriptorId,
+    applied.changes,
+    (entryCityId) =>
+      entryCityId === cityId
+        ? `B-09: ${corporationId} received ${amount} R of recapitalization from ${ledgerLabel(from)}. Post-injection: net worth ${sheetAfter?.netWorthRubars ?? 0} R, cash ${sheetAfter?.cashRubars ?? 0} R, liquid reserve ${sheetAfter?.liquidReserveRubars ?? 0} R — ${cured ? "the bank derives CURED (solvent and liquid; the boundary is inclusive)" : wasFailed ? "the injection landed but does NOT cure (the preview computes this same verdict)" : "an ordinary capital injection into a going concern"}.`
+        : `B-09: ${ledgerLabel(from)} injected ${amount} R into ${corporationId}.`,
+    { created: situationClaims.created, updated: situationClaims.updated }
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "recapitalize-bank",
+    scope: "bank",
+    cityId,
+    summaryText: wasFailed
+      ? cured
+        ? `Recapitalized ${corporationId} with ${amount} R from ${ledgerLabel(from)} — the bank derives CURED in this event (net worth ${sheetAfter?.netWorthRubars ?? 0} R ≥ 0, cash ≥ liquid reserve).`
+        : `Injected ${amount} R into the failed ${corporationId} — the injection stands, but the bank does NOT derive cured (net worth ${sheetAfter?.netWorthRubars ?? 0} R, cash ${sheetAfter?.cashRubars ?? 0} R vs reserve ${sheetAfter?.liquidReserveRubars ?? 0} R).`
+      : `Recapitalized ${corporationId} with ${amount} R from ${ledgerLabel(from)} (ordinary injection; the bank was not failed).`,
+    major: wasFailed,
+    classificationExtra: {
+      recapitalization: {
+        bankCorporationId: corporationId,
+        amountRubars: amount,
+        cured,
+        // The derivation's clearing signal: a curing injection
+        // clears earlier uncured failed-payment rejections. On a
+        // bank with none standing the stamp is vacuous; on a
+        // non-curing injection it is false and nothing clears.
+        curesFailedPayment: cured,
+        netWorthBeforeRubars: sheetBefore?.netWorthRubars ?? null,
+        netWorthAfterRubars: sheetAfter?.netWorthRubars ?? null,
+      },
+    },
+  });
+}
+
+function recapitalizeBankReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId), ...situationKeyQueries(record.cityId));
+  }
+  const from = parseLedgerRef(record.from);
+  if (from?.kind === "company") paths.push(corporationPath(from.cityId, from.corporationId));
+  if (from?.kind === "treasury") paths.push(cityPath(from.cityId), `factions/${from.cityId}`);
+  if (from?.kind === "personal") paths.push(memberAccountPath(from.memberId));
+  return { paths, queries };
+}
+
 function offerLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
   const paths: string[] = [INSURANCE_FUND_PATH];
