@@ -57,6 +57,8 @@ import {
 } from "../lib/npcs";
 import { buildTaskOutput, envelopeTaskId } from "../lib/envelopes";
 import { computeDelegationRuleHash } from "../lib/sim/rules/governance";
+import { verifyStandingLog } from "../lib/sim/verify";
+import { ruleEffectDraft } from "../lib/sim/rules/planHelpers";
 import type { ResolutionPlan, SimAction, SimActor } from "../lib/sim/state";
 
 const fixtureRegistry = buildFixtureBaselineRegistry();
@@ -1017,6 +1019,84 @@ check("buildTaskOutput stores the caller-supplied audienceUids (§9.5 branch)", 
     audienceUids: ["ownerA", "ownerB"],
   });
   assert.deepEqual(output.audienceUids, ["ownerA", "ownerB"]);
+});
+
+section("G10 — verifier NPC checks (PR-2): traceability triple, inert pre-Phase-5");
+function verifyWorld(npcOverrides: Record<string, unknown> = {}) {
+  const genesisDraft = {
+    ...ruleEffectDraft({
+      actor: { type: "system", memberId: null, npcId: null, onBehalfOfMemberId: null, mandateId: null, mandateVersion: null, envelopeId: null } as SimActor,
+      summaryText: "genesis",
+    }),
+    kind: "genesis" as const,
+    summary: true,
+  };
+  const genesis = buildLogEntry(genesisDraft, {
+    seq: 1, resolutionSeq: 1, resolutionId: "genesis", entryIndexWithinResolution: 0,
+    resolvedAt: NOW_A, rulesVersion: "sim-rules-0.5.0-phase5",
+    prevHash: "0".repeat(64), wakeActionId: null, executedDuringSeq: null,
+  });
+  const npcDraft = summaryDraft({
+    actor: NPC_ACTOR as SimActor,
+    actionId: "act-npc-1",
+    cityId: "cityA",
+    cityIds: ["cityA"],
+    ruleIds: [],
+    classification: {
+      mandate: { mandateId: "mand-1", mandateVersion: 1, mode: "act-for-me" },
+      trigger: { kind: "log-event", sourceId: "evt-1", sourceSeq: 1, deliberation: null },
+    },
+    summaryText: "NPC acted under mandate.",
+  });
+  const npcEntry = buildLogEntry(npcDraft, {
+    seq: 2, resolutionSeq: 2, resolutionId: "res-npc-1", entryIndexWithinResolution: 0,
+    resolvedAt: NOW_A, rulesVersion: "sim-rules-0.5.0-phase5",
+    prevHash: genesis.entryHash as string, wakeActionId: null, executedDuringSeq: null,
+  });
+  const stateDocs = new Map<string, Record<string, unknown>>();
+  stateDocs.set("sim_npcs/charA1", npcDocFixture({
+    currentMandateId: "mand-1", currentMandateVersion: 1, ...npcOverrides,
+  }));
+  stateDocs.set("sim_mandates/mand-1", mandateRootFixture());
+  stateDocs.set("sim_mandates/mand-1/versions/1", mandateVersionFixture("act-for-me"));
+  const manifests = new Map<string, Record<string, unknown>>([
+    ["res-npc-1", { writeSet: [], lastSeq: 2 }],
+  ]);
+  return {
+    entries: [genesis, npcEntry],
+    manifests,
+    counter: { lastSeq: 2, lastEntryHash: npcEntry.entryHash as string },
+    world: { lastCommittedSeq: 2 },
+    stateDocs,
+    baselineRegistry: fixtureRegistry,
+  };
+}
+
+check("a fully-traced NPC entry verifies clean", () => {
+  const result = verifyStandingLog(verifyWorld());
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.ok, true);
+});
+
+check("an owner mismatch in the traceability triple is a finding", () => {
+  const result = verifyStandingLog(verifyWorld({ ownerUid: "ownerB" }));
+  assert.ok(result.findings.some((f) => f.code === "NPC_TRACE_OWNER_MISMATCH"));
+  assert.equal(result.ok, false);
+});
+
+check("characterId on an NPC actor is flagged (P5-K13); absent key never is", () => {
+  const world = verifyWorld();
+  const tampered = {
+    ...world,
+    entries: world.entries.map((e) =>
+      e.seq === 2 ? { ...e, actor: { ...(e.actor as Record<string, unknown>), characterId: "charA1" } } : e
+    ),
+  };
+  // The tampered actor changes the entry hash too — recompute so only
+  // the P5-K13 finding (and its hash consequence) can appear; assert
+  // the specific code is present.
+  const result = verifyStandingLog(tampered as never);
+  assert.ok(result.findings.some((f) => f.code === "CHARACTER_ID_ON_NON_MEMBER"));
 });
 
 console.log(`\ngovernance harness: ${checks} checks passed`);

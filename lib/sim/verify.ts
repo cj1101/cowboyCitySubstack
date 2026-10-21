@@ -36,6 +36,14 @@ import {
   sectionScopeCovers,
   type BaselineRegistry,
 } from "./baseline/registry";
+import { validateNpcActorForm } from "../authority/actor";
+import {
+  mandateHash as recomputeStoredMandateHash,
+  resolveVersionInForce,
+  type SimMandateRoot,
+  type SimMandateVersion,
+} from "../npcs";
+import type { SimActor } from "./state";
 
 export interface VerifyFinding {
   code: string;
@@ -307,6 +315,268 @@ export function verifyStandingLog(input: StandingWorld): {
         path,
         resolutionId: lastWriter.resolutionId,
       });
+    }
+  }
+
+  // -- Phase 5 NPC checks (§3.2 traceability; PR-2 verifier half) --------
+  // INERT on pre-Phase-5 worlds: every check below keys on npc-actor
+  // entries or sim_task_outputs docs, and a world with neither produces
+  // no findings (the landed suites prove this unchanged).
+  const npcEntries = entries.filter(
+    (e) => (e.actor as { type?: string } | undefined)?.type === "npc"
+  );
+
+  // P5-K13: characterId rides MEMBER actors only; flag it on any
+  // non-member actor. Absent ≡ null — a missing key is never flagged.
+  for (const entry of entries) {
+    const actor = entry.actor as Record<string, unknown> | undefined;
+    if (!actor || actor.type === "member") continue;
+    if ("characterId" in actor && actor.characterId !== null && actor.characterId !== undefined) {
+      push({
+        code: "CHARACTER_ID_ON_NON_MEMBER",
+        message: `entry at seq ${entry.seq} carries characterId on a ${String(actor.type)} actor — the field is the member in-character form only (P5-K13)`,
+        seq: entry.seq as number,
+      });
+    }
+  }
+
+  for (const entry of npcEntries) {
+    const seq = entry.seq as number;
+    const actor = entry.actor as unknown as SimActor;
+
+    // Actor form + exactly-one-root (§3.2).
+    const form = validateNpcActorForm(actor);
+    if (!form.ok) {
+      push({
+        code: "NPC_ACTOR_FORM",
+        message: `npc entry at seq ${seq} fails the actor form: ${form.violations.join("; ")}`,
+        seq,
+      });
+      continue;
+    }
+
+    // Traceability (a): the NPC record — owner + city match, active
+    // at the entry's seq (activationSeq/retiredSeq window).
+    const npcDoc = actor.npcId
+      ? input.stateDocs.get(`sim_npcs/${actor.npcId}`)
+      : undefined;
+    if (!npcDoc) {
+      push({
+        code: "NPC_TRACE_MISSING_NPC",
+        message: `npc entry at seq ${seq} cites NPC ${String(actor.npcId)}, which does not stand`,
+        seq,
+      });
+    } else {
+      if (npcDoc.ownerUid !== actor.onBehalfOfMemberId) {
+        push({
+          code: "NPC_TRACE_OWNER_MISMATCH",
+          message: `npc entry at seq ${seq}: NPC owner ${String(npcDoc.ownerUid)} != actor onBehalfOfMemberId ${String(actor.onBehalfOfMemberId)}`,
+          seq,
+        });
+      }
+      const entryCities = (entry.cityIds as string[] | undefined) ?? [];
+      if (
+        typeof npcDoc.cityId === "string" &&
+        entry.cityId !== npcDoc.cityId &&
+        !entryCities.includes(npcDoc.cityId)
+      ) {
+        push({
+          code: "NPC_TRACE_CITY_MISMATCH",
+          message: `npc entry at seq ${seq}: NPC serves ${npcDoc.cityId}, the entry names ${entryCities.join(", ") || String(entry.cityId)}`,
+          seq,
+        });
+      }
+      const activationSeq = npcDoc.activationSeq as number | null | undefined;
+      const retiredSeq = npcDoc.retiredSeq as number | null | undefined;
+      if (
+        activationSeq === null ||
+        activationSeq === undefined ||
+        seq < activationSeq ||
+        (retiredSeq !== null && retiredSeq !== undefined && seq >= retiredSeq)
+      ) {
+        push({
+          code: "NPC_TRACE_NOT_ACTIVE_AT_SEQ",
+          message: `npc entry at seq ${seq}: NPC ${String(actor.npcId)} was not active at that seq (activationSeq ${String(activationSeq)}, retiredSeq ${String(retiredSeq)})`,
+          seq,
+        });
+      }
+    }
+
+    // Traceability (b): mandate root + version resolution at seq, and
+    // the citation's stored mandateHash equality.
+    if (actor.mandateId !== null && actor.mandateVersion !== null) {
+      const rootPath = `sim_mandates/${actor.mandateId}`;
+      const rootDoc = input.stateDocs.get(rootPath);
+      if (!rootDoc) {
+        push({
+          code: "NPC_TRACE_MISSING_MANDATE",
+          message: `npc entry at seq ${seq} cites mandate ${actor.mandateId}, whose root does not stand`,
+          seq,
+        });
+      } else {
+        if (rootDoc.npcId !== actor.npcId) {
+          push({
+            code: "NPC_TRACE_MANDATE_NPC_MISMATCH",
+            message: `npc entry at seq ${seq}: mandate ${actor.mandateId} belongs to NPC ${String(rootDoc.npcId)}`,
+            seq,
+          });
+        }
+        const versions: SimMandateVersion[] = [];
+        for (const [path, doc] of input.stateDocs) {
+          if (path.startsWith(`${rootPath}/versions/`)) {
+            versions.push(doc as unknown as SimMandateVersion);
+          }
+        }
+        const usedBefore = new Set(
+          npcEntries
+            .filter(
+              (e) =>
+                (e.seq as number) < seq &&
+                (e.actor as unknown as SimActor).mandateId === actor.mandateId &&
+                (e.actor as unknown as SimActor).mandateVersion === actor.mandateVersion
+            )
+            .map((e) => e.resolutionId as string)
+        ).size;
+        const resolved = resolveVersionInForce(
+          rootDoc as unknown as SimMandateRoot,
+          versions,
+          seq,
+          usedBefore
+        );
+        if (!resolved.version || resolved.version.version !== actor.mandateVersion) {
+          push({
+            code: "NPC_TRACE_VERSION_NOT_IN_FORCE",
+            message: `npc entry at seq ${seq} cites mandate ${actor.mandateId} v${actor.mandateVersion}, not in force at that seq (${resolved.reason})`,
+            seq,
+          });
+        } else {
+          let hashOk = false;
+          try {
+            hashOk = recomputeStoredMandateHash(resolved.version) === resolved.version.mandateHash;
+          } catch {
+            hashOk = false;
+          }
+          if (!hashOk) {
+            push({
+              code: "NPC_TRACE_MANDATE_HASH_MISMATCH",
+              message: `npc entry at seq ${seq}: cited mandate version's stored mandateHash does not recompute`,
+              seq,
+            });
+          }
+        }
+      }
+    }
+
+    // Traceability (c): the trigger citation resolves.
+    const classification = entry.classification as Record<string, unknown> | null;
+    const trigger = classification?.trigger as Record<string, unknown> | undefined;
+    if (actor.envelopeId !== null) {
+      if (!input.stateDocs.has(`sim_task_envelopes/${actor.envelopeId}`)) {
+        push({
+          code: "NPC_TRACE_ENVELOPE_MISSING",
+          message: `npc entry at seq ${seq} cites envelope ${actor.envelopeId}, which does not stand`,
+          seq,
+        });
+      }
+    }
+    if (!trigger || typeof trigger.kind !== "string") {
+      push({
+        code: "NPC_TRACE_TRIGGER_MISSING",
+        message: `npc entry at seq ${seq} carries no classification.trigger citation — an orphan (§3.2)`,
+        seq,
+      });
+    } else {
+      const sourceSeq = trigger.sourceSeq as number | null | undefined;
+      if (
+        (trigger.kind === "log-event" || trigger.kind === "mandate-routine") &&
+        (sourceSeq === null || sourceSeq === undefined)
+      ) {
+        push({
+          code: "NPC_TRACE_TRIGGER_UNRESOLVABLE",
+          message: `npc entry at seq ${seq}: a ${trigger.kind} trigger requires the causing event's seq`,
+          seq,
+        });
+      } else if (
+        sourceSeq !== null &&
+        sourceSeq !== undefined &&
+        !standingSeqs.has(sourceSeq)
+      ) {
+        push({
+          code: "NPC_TRACE_TRIGGER_UNRESOLVABLE",
+          message: `npc entry at seq ${seq}: trigger sourceSeq ${sourceSeq} does not stand`,
+          seq,
+        });
+      }
+    }
+  }
+
+  // Envelope↔output bijection: every output doc traces to exactly one
+  // standing entry whose recordsCreated names it and whose actor is
+  // the matching envelope actor; the envelope doc stands.
+  for (const [path] of input.stateDocs) {
+    if (!path.startsWith("sim_task_outputs/")) continue;
+    const taskId = path.slice("sim_task_outputs/".length);
+    const citing = entries.filter((e) =>
+      ((e.recordsCreated as string[] | undefined) ?? []).includes(path)
+    );
+    if (citing.length !== 1) {
+      push({
+        code: citing.length === 0 ? "OUTPUT_WITHOUT_ENTRY" : "OUTPUT_MULTIPLE_ENTRIES",
+        message: `${path} is named by recordsCreated of ${citing.length} standing entries (exactly one required)`,
+        path,
+      });
+      continue;
+    }
+    const entryActor = citing[0].actor as unknown as SimActor;
+    if (entryActor.type !== "npc" || entryActor.envelopeId !== taskId) {
+      push({
+        code: "OUTPUT_ACTOR_MISMATCH",
+        message: `${path}'s citing entry (seq ${citing[0].seq}) is not the matching envelope actor's entry`,
+        path,
+        seq: citing[0].seq as number,
+      });
+    }
+    if (!input.stateDocs.has(`sim_task_envelopes/${taskId}`)) {
+      push({
+        code: "OUTPUT_ENVELOPE_MISSING",
+        message: `${path} stands but its envelope sim_task_envelopes/${taskId} does not`,
+        path,
+      });
+    }
+  }
+
+  // Silence assertions (Vera's classification shape): a resolution
+  // carrying a silence entry changes nothing, and its manifest's
+  // state-writes touch situation bookkeeping only.
+  for (const [resolutionId, resolutionEntries] of entriesByResolution) {
+    const hasSilence = resolutionEntries.some(
+      (e) =>
+        ((e.classification as Record<string, unknown> | null)?.silence as boolean | undefined) ===
+        true
+    );
+    if (!hasSilence) continue;
+    for (const e of resolutionEntries) {
+      if (((e.changes as unknown[] | undefined) ?? []).length > 0) {
+        push({
+          code: "SILENCE_WITH_CHANGES",
+          message: `silence resolution ${resolutionId} carries field changes at seq ${e.seq} — silence changes nothing`,
+          seq: e.seq as number,
+          resolutionId,
+        });
+      }
+    }
+    const manifest = input.manifests.get(resolutionId);
+    const writeSet = (manifest?.writeSet as Record<string, unknown>[] | undefined) ?? [];
+    for (const write of writeSet) {
+      if (write.recordClass !== "state") continue;
+      if (!(write.path as string).startsWith("sim_situations/")) {
+        push({
+          code: "SILENCE_FOREIGN_WRITE",
+          message: `silence resolution ${resolutionId} writes state at ${String(write.path)} — situation bookkeeping only`,
+          resolutionId,
+          path: write.path as string,
+        });
+      }
     }
   }
 
