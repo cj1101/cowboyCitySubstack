@@ -3983,6 +3983,18 @@ function writeOffLoanHandler(ctx: HandlerContext): ResolutionPlan {
   });
 }
 
+function cancelLoanOfferReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(...premiumQueries(record.corporationId), ...situationKeyQueries(record.cityId));
+  }
+  if (typeof record.loanId === "string" && record.loanId) paths.push(bankLoanPath(record.loanId));
+  return { paths, queries };
+}
+
 function writeOffLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
   const paths: string[] = [INSURANCE_FUND_PATH];
@@ -5812,10 +5824,10 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     visibility: "public",
     requiresBaseline: false,
     defaultBaselineSections: [],
-    mayCreatePendings: false,
+    mayCreatePendings: true,
     handlers: { charter_bank: charterBankHandler, surrender_charter: surrenderCharterHandler },
     readPlan: charterReadPlan,
-    summary: "Charter a corporation as a bank (owner-only, min capital 100000 R, terms recorded verbatim) + surrender at zero live claims.",
+    summary: "Charter a corporation as a bank (owner-only, min capital 100000 R, terms recorded verbatim; the controller bar refuses a barred controller) + surrender at zero live claims. Chartering seeds the bank's DIF premium chain when the fund stands.",
   },
   "B-02": {
     id: "B-02",
@@ -5826,7 +5838,7 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     mayCreatePendings: false,
     handlers: { deposit_funds: depositHandler },
     readPlan: depositReadPlan,
-    summary: "Deposit funds into a chartered bank: cash line + deposit claim record + liability aggregate, in one event.",
+    summary: "Deposit funds into a chartered bank: cash line + deposit claim record + liability aggregate, in one event. Tier A (mandated NPCs within caps); a premium-suspended bank refuses new deposits.",
   },
   "B-03": {
     id: "B-03",
@@ -5837,7 +5849,7 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     mayCreatePendings: false,
     handlers: { withdraw_deposit: withdrawHandler },
     readPlan: depositTargetReadPlan,
-    summary: "Withdraw deposit principal, custodial class against unencumbered cash, refused in full on shortfall.",
+    summary: "Withdraw deposit principal, custodial class against unencumbered cash, refused in full on shortfall. Tier A; a bank deriving failed (REC-6) refuses — claims route to the waterfall.",
   },
   "B-04": {
     id: "B-04",
@@ -5848,7 +5860,107 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     mayCreatePendings: false,
     handlers: { settle_deposit_interest: settleInterestHandler },
     readPlan: depositTargetReadPlan,
-    summary: "Settle deposit interest, cash-paid branch only (custodial); the credited branch is Phase 5.",
+    summary: "Settle deposit interest: cash-paid branch (custodial) or credited branch (the claim grows, no cash moves, bridge class interest-capitalized). Tier A; refused at a failed bank in both branches.",
+  },
+  "B-05": {
+    id: "B-05",
+    actionKinds: ["offer_loan", "cancel_loan_offer"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { offer_loan: offerLoanHandler, cancel_loan_offer: cancelLoanOfferHandler },
+    readPlan: (seeds) =>
+      seeds.action.actionType === "cancel_loan_offer" ? cancelLoanOfferReadPlan(seeds) : offerLoanReadPlan(seeds),
+    summary: "Offer a loan (Tier B): full terms stated at offer, funding source (cash | credit) fixed at offer, collateral pledged at offer, resting offers never expire; either party may cancel an unfunded offer.",
+  },
+  "B-06": {
+    id: "B-06",
+    actionKinds: ["accept_loan"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: true,
+    handlers: { accept_loan: acceptLoanHandler },
+    readPlan: acceptLoanReadPlan,
+    summary: "Fund an offered loan (Tier B, binding by nature): cash branch disburses above the liquid reserve; credit branch creates the paired deposit in the same event (Appendix A — unpaired issuance does not exist). Creates the installment schedule pendings.",
+  },
+  "B-07": {
+    id: "B-07",
+    actionKinds: ["repay_loan"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { repay_loan: repayLoanHandler },
+    readPlan: repayLoanReadPlan,
+    summary: "Repay a loan (Tier A, borrower-initiated only, never auto-debit): fixed allocation (interest, fee at payoff, principal), principal-only netting against the loan's own created deposit, and the pool form for assigned loans with subrogation routing.",
+  },
+  "B-08": {
+    id: "B-08",
+    actionKinds: ["seize_collateral"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { seize_collateral: seizeCollateralHandler },
+    readPlan: seizeCollateralReadPlan,
+    summary: "Seize collateral on a loan in derived default (Tier B; pool form for claimants): satisfaction at recorded basis, mandatory excess-value return as a plan validation, remainder unsecured.",
+  },
+  "B-09": {
+    id: "B-09",
+    actionKinds: ["recapitalize_bank"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { recapitalize_bank: recapitalizeBankHandler },
+    readPlan: recapitalizeBankReadPlan,
+    summary: "Inject capital into a bank from any controlled ledger (Tier B); against a failed bank the injection is tested as a cure in-event (inclusive boundary), stamped for the failed-payment derivation.",
+  },
+  "B-10": {
+    id: "B-10",
+    actionKinds: ["liquidate_bank"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { liquidate_bank: liquidateBankHandler },
+    readPlan: liquidateBankReadPlan,
+    summary: "Liquidate a bank (Tier B): REC-5 frozen claims, in-event setoff, the (a)-(d) waterfall with B-13 paying inside (senior queue first), assignment to the depositor pool, charter surrender and dissolution in the same event. (B-13 is a committer step inside B-10, never an actor verb.)",
+  },
+  "B-11": {
+    id: "B-11",
+    actionKinds: ["write_off_loan"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { write_off_loan: writeOffLoanHandler },
+    readPlan: writeOffLoanReadPlan,
+    summary: "Write off a loan (Tier B): the loss posts through the bank's equity as a named credit-loss bridge (REC-2, never a burn); the record is retained; refused in derived failure.",
+  },
+  "B-12": {
+    id: "B-12",
+    actionKinds: ["pay_insurance_premium"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { pay_insurance_premium: payInsurancePremiumHandler },
+    readPlan: insurancePaymentReadPlan("B-12"),
+    summary: "Pay deposit-insurance premiums in full against ripened markers (Tier A, never auto-debit); the settlement classification is the delinquency ladder's input — cure derives, no flag flips.",
+  },
+  "B-14": {
+    id: "B-14",
+    actionKinds: ["pay_supplemental_assessment"],
+    visibility: "public",
+    requiresBaseline: false,
+    defaultBaselineSections: [],
+    mayCreatePendings: false,
+    handlers: { pay_supplemental_assessment: paySupplementalAssessmentHandler },
+    readPlan: insurancePaymentReadPlan("B-14"),
+    summary: "Pay a B-14 supplemental assessment in full, naming the ripened obligation (Tier A). Obligations arise at premium ripenings while the fund derives deficient, pro-rata by insured liabilities.",
   },
 };
 
@@ -5862,4 +5974,13 @@ export const FINANCE_DESCRIPTOR_META: Record<string, FinanceDescriptorMeta> = {
   "B-02": { shortfallClass: "transfer", ledgersTouched: ["personal", "company", "treasury"], invokesRules: [] },
   "B-03": { shortfallClass: "custodial", ledgersTouched: ["company", "personal", "treasury"], invokesRules: [] },
   "B-04": { shortfallClass: "custodial", ledgersTouched: ["company", "personal", "treasury"], invokesRules: [] },
+  "B-05": { shortfallClass: "none", ledgersTouched: ["company", "personal", "treasury"], invokesRules: [] },
+  "B-06": { shortfallClass: "custodial", ledgersTouched: ["company", "personal", "treasury"], invokesRules: ["B-05"] },
+  "B-07": { shortfallClass: "transfer", ledgersTouched: ["personal", "company", "treasury", "institution"], invokesRules: [] },
+  "B-08": { shortfallClass: "custodial", ledgersTouched: ["company", "personal", "treasury"], invokesRules: [] },
+  "B-09": { shortfallClass: "transfer", ledgersTouched: ["personal", "company", "treasury"], invokesRules: [] },
+  "B-10": { shortfallClass: "custodial", ledgersTouched: ["company", "personal", "treasury", "institution"], invokesRules: ["B-13"] },
+  "B-11": { shortfallClass: "none", ledgersTouched: ["company"], invokesRules: [] },
+  "B-12": { shortfallClass: "transfer", ledgersTouched: ["company", "institution"], invokesRules: [] },
+  "B-14": { shortfallClass: "transfer", ledgersTouched: ["company", "institution"], invokesRules: ["B-12"] },
 };
