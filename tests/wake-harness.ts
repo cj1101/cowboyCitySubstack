@@ -89,6 +89,7 @@ import { buildTaskEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../l
 import { buildMandateVersion } from "../lib/npcs";
 import { npcFromDoc } from "../lib/authority/view";
 import { readSituationActionSpec } from "../lib/sim/delegation";
+import { validateNpcActorForm } from "../lib/authority/actor";
 
 const registry = buildFixtureBaselineRegistry();
 const NOW = "2026-10-20T15:00:00.000Z";
@@ -1099,7 +1100,7 @@ check("W23 every step kind's seed paths carry sim_counters/log — the snapshot-
   }
 });
 
-check("W24 the executor's delegated-action construction carries the §3.2 situation trigger — it resolves; the same action unstamped rejects NO_TRIGGER_ROOT", () => {
+check("W24 the executor's delegated-action construction carries the §3.2 situation trigger — it resolves; the same action unstamped rejects NO_TRIGGER_ROOT; an uncited rule's fire cites the standing mandate (§7.1), and blocks when it is gone (round 7)", () => {
   // PR #45 CI round 6: executeDelegatedAction built the delegated
   // action with delegatedVia only — no trigger citation — so the
   // authority stage's check 5 refused every act-for-me fire
@@ -1166,6 +1167,11 @@ check("W24 the executor's delegated-action construction carries the §3.2 situat
     sourceSeq: sit.createdSeq,
     deliberation: null,
   });
+  assert.deepEqual(classification?.mandate, {
+    mandateId: "mandate1",
+    mandateVersion: 1,
+    mode: "act-for-me",
+  }, "the stage stamps its verified mandate citation beside the trigger");
   const cityWrite = plan.writes.find((w) => w.path === "sim_cities/cityA");
   assert.equal(
     ((cityWrite?.afterDoc as Record<string, unknown>)?.stats as Record<string, unknown>)?.infrastructure,
@@ -1182,6 +1188,84 @@ check("W24 the executor's delegated-action construction carries the §3.2 situat
   const plan2 = runActionAt(docs, unstamped, NOW);
   assert.equal(plan2.outcome, "rejected");
   assert.equal(plan2.rejection?.code, "NO_TRIGGER_ROOT");
+
+  // Round 7 (the same joint, the fire's half): a rule whose handler
+  // cites NO mandate fires under the handler NPC's STANDING mandate,
+  // and the citation stands on the fire, the card's handling, and
+  // the fire entry's actor — the three records the gate suite reads.
+  // PR #45 CI round 7 convicted the pre-fix evaluator: it adopted
+  // the authority view's resolved mandate only for cited rules, so
+  // an uncited fire composed a ROOTLESS entry actor (mandateId and
+  // envelopeId both null) — a §3.2 orphan the standing verifier
+  // flags NPC_ACTOR_FORM. Every pure-venue fire fixture cited its
+  // mandate (W1's ruleDoc, the situations harness's rule()); the
+  // gate suite's rule-fire-1 was the first uncited fire exercised.
+  const docsF = baseDocs();
+  standingNpc(docsF, {
+    rule: ruleDoc({ handler: { npcId: "npc1", mode: "act-for-me", mandateId: null } }),
+  });
+  const sitF = makeSituation({
+    kind: "proposal",
+    detail: {
+      delegatedAction: {
+        actionType: "advance_project",
+        structuredAction: { projectId: "proj-1" },
+        targetCityIds: ["cityA"],
+      },
+    },
+  });
+  putSituation(docsF, sitF);
+  const snapshotF = snapshotOf(docsF);
+  const stepF: WakePassStep = { kind: "delegation", situationId: sitF.situationId };
+  const fired = evaluateDelegationStep(snapshotF, sitF.situationId, {
+    resolutionId: wakeStepResolutionId(stepF, CYCLE), cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(fired.evaluation?.outcome, "fire");
+  if (fired.evaluation?.outcome !== "fire") throw new Error("unreachable");
+  assert.equal(fired.evaluation.fire.kind, "delegated-action");
+  assert.equal(fired.evaluation.fire.mandateId, "mandate1", "the fire adopts the standing mandate the view resolved");
+  assert.equal(fired.evaluation.fire.mandateVersion, 1);
+  assertPlanValid(fired.plan, snapshotF);
+  const fireEntry = fired.plan.entries.find(
+    (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+  );
+  assert.ok(fireEntry, "the fire entry stands in the plan");
+  assert.equal(fireEntry.actor.mandateId, "mandate1", "the fire entry's actor cites the standing mandate");
+  assert.equal(fireEntry.actor.mandateVersion, 1);
+  assert.equal(
+    validateNpcActorForm(fireEntry.actor).ok,
+    true,
+    "the fire entry's actor passes the verifier's exactly-one-root form gate (§3.2)"
+  );
+  const afterF = planWriteFor(fired.plan, `sim_situations/${sitF.situationId}`)?.afterDoc as unknown as SimSituation;
+  assert.equal(afterF?.handling?.mandateId, "mandate1", "the card's handling cites the standing mandate");
+  assert.equal(afterF?.handling?.mandateVersion, 1);
+
+  // Falsifiability: the same uncited rule with the standing mandate
+  // revoked (the NPC holds none) blocks at evaluation — no fire, no
+  // transition, no rootless entry (§7.2 handler-authority-changed).
+  const docsB = baseDocs();
+  standingNpc(docsB, {
+    npc: { currentMandateId: null, currentMandateVersion: null },
+    rule: ruleDoc({ handler: { npcId: "npc1", mode: "act-for-me", mandateId: null } }),
+  });
+  putSituation(docsB, sitF);
+  const snapshotB = snapshotOf(docsB);
+  const blockedFire = evaluateDelegationStep(snapshotB, sitF.situationId, {
+    resolutionId: wakeStepResolutionId(stepF, CYCLE), cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(blockedFire.evaluation?.outcome, "blocked-handler-authority-changed");
+  if (blockedFire.evaluation?.outcome === "blocked-handler-authority-changed") {
+    assert.match(blockedFire.evaluation.reason, /no standing mandate/);
+  }
+  assert.equal(
+    blockedFire.plan.entries.some(
+      (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+    ),
+    false,
+    "no fire entry is composed for the blocked rule"
+  );
+  assert.equal(planWriteFor(blockedFire.plan, `sim_situations/${sitF.situationId}`), undefined, "the card is not transitioned");
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);

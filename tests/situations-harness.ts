@@ -381,7 +381,7 @@ function rule(over: RuleOver = {}): SimDelegationRule {
 function authority(over: Partial<HandlerAuthorityView> = {}): HandlerAuthorityView {
   return {
     npc: { npcId: NPC, ownerUid: OWNER, permissionMode: "act-for-me", status: "active" },
-    mandate: { found: true, rootStatus: "active", version: mandateVersion() },
+    mandate: { mandateId: "mand-1", found: true, rootStatus: "active", version: mandateVersion() },
     ...over,
   };
 }
@@ -697,7 +697,7 @@ check("S6e ask-first narrows the fire to a draft: envelope out, card awaiting_ow
   const out = evaluateDelegation({
     situation,
     rules: [askRule],
-    authorityFor: () => authority({ mandate: { found: true, rootStatus: "active", version: mandateVersion({ permissionMode: "ask-first" }) } }),
+    authorityFor: () => authority({ mandate: { mandateId: "mand-1", found: true, rootStatus: "active", version: mandateVersion({ permissionMode: "ask-first" }) } }),
   });
   assert.equal(out.outcome, "fire");
   if (out.outcome !== "fire") return;
@@ -745,7 +745,7 @@ check("S6g step 4: a dead mandate blocks the selected rule — no fall-through t
     rules: [broadLive, specificDead],
     authorityFor: (r) =>
       r.ruleId === "rule-specific-dead"
-        ? authority({ mandate: { found: true, rootStatus: "revoked", version: null } })
+        ? authority({ mandate: { mandateId: "mand-dead", found: true, rootStatus: "revoked", version: null } })
         : authority(),
   });
   assert.equal(out.outcome, "blocked-handler-authority-changed");
