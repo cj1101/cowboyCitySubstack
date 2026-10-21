@@ -22,6 +22,7 @@ const NAV_LINKS = [
   { href: "/maps", label: "Realm Map" },
   { href: "/treaties", label: "Treaties" },
   { href: "/forum", label: "Forum" },
+  { href: "/situations", label: "Situations" },
   { href: "/timeline", label: "Timeline" },
   { href: "/lore-graph", label: "Lore Graph" },
   { href: "/search", label: "Search" },

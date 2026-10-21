@@ -162,6 +162,12 @@ export default function SettingsPage() {
           <Link href="/reports" className="text-accent-gold text-sm block">Your reports</Link>
           <Link href="/settings/trust" className="text-accent-gold text-sm block">Your assessments of published claims</Link>
         </div>
+        <div className="border-t border-primary-brown pt-4 space-y-3">
+          <h2 className="text-xl font-bold text-accent-gold">Your NPCs</h2>
+          <p className="text-sm text-text-muted">The NPCs who act on your behalf, their permission modes, and the mandates you have given them.</p>
+          <Link href="/settings/npcs" className="text-accent-gold text-sm block">Your NPCs and mandates</Link>
+          <Link href="/situations" className="text-accent-gold text-sm block">Situations waiting on you</Link>
+        </div>
       </div>
     </div>
   );

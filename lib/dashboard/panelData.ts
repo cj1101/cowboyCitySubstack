@@ -16,8 +16,9 @@
  *     merged client-side under Phase 2 §11.1 discipline (the snapshot
  *     projection is public-tier only; private entries arrive flagged
  *     `isOwnPrivate` and are badged by the panel).
- *   - situations-peek: the viewer's notifications substrate (brief
- *     §4.2 — the dedicated Situations queue is Phase 5).
+ *   - situations-peek: the viewer's Situations queue (Phase 5 swap,
+ *     P5-D7 — Phase 3 read the notifications substrate here because
+ *     no queue existed; the component and its props never changed).
  *   - town-hall: the realm's treaty state (pending → open motions;
  *     active/broken → recent resolutions). The term card itself comes
  *     from the snapshot and stays null until Phase 7 term records
@@ -61,13 +62,14 @@ import {
 import type { DashboardCoreData } from "./snapshotRead";
 import type { CityCard } from "@/lib/sim/snapshot";
 import { isActorPrivate } from "@/lib/sim/log";
-import {
-  notificationHref,
-  notificationLabel,
-  notificationsQuery,
-  toNotification,
-} from "@/lib/firestore/notifications";
 import { toStoredTreaty } from "@/lib/firestore/treaties";
+import { getAllFactions } from "@/lib/firestore/posts";
+import { loadQueue } from "@/lib/situations/client";
+import {
+  kindLabel,
+  sortQueue,
+  waitsOnOwner,
+} from "@/lib/situations/present";
 import { getAllWikiEntries } from "@/lib/firestore/wikiEntries";
 import { wikiEntryPath } from "@/lib/entity/paths";
 import {
@@ -246,26 +248,46 @@ export async function loadOwnPrivateDigest(
 }
 
 // ---------------------------------------------------------------------------
-// Situations peek: the viewer's notifications (Phase 3 substrate)
+// Situations peek: the viewer's real queue (Phase 5 swap, P5-D7)
 // ---------------------------------------------------------------------------
 
+/**
+ * THE SWAP (P5-D7): this loader read the notifications substrate in
+ * Phase 3 because no Situations queue existed. Phase 5 replaces
+ * that one function's source with `sim_situations` — the component,
+ * its props, and the registry entry are unchanged. The peek now
+ * counts what is actually waiting on the viewer (open cards plus
+ * delegates' drafts awaiting their decision), shows the top three
+ * in the §6.2 order (severity, then oldest first), and links to the
+ * real queue at /situations.
+ */
 export async function loadSituationsPeek(
   uid: string
 ): Promise<SituationsPeekData> {
-  const snap = await getDocs(notificationsQuery(uid));
-  const unread = snap.docs
-    .map((d) => toNotification(d.id, d.data() as Record<string, unknown>))
-    .filter((n) => !n.read);
+  const factions = await getAllFactions();
+  const ownedCityIds = factions
+    .filter((f) => f.ownerUids.includes(uid))
+    .map((f) => f.id);
+  const nameOf = (cityId: string | null) =>
+    cityId === null
+      ? "You, personally"
+      : (factions.find((f) => f.id === cityId)?.name ?? cityId);
+  const queue = await loadQueue(uid, ownedCityIds);
+  const waiting = sortQueue(
+    queue.filter(waitsOnOwner),
+    "severity-oldest",
+    nameOf
+  );
   return {
-    openCount: unread.length,
-    topItems: unread.slice(0, 3).map((n) => ({
-      id: n.id,
-      title: n.summary,
-      cityName: null,
-      kindLabel: notificationLabel(n),
-      href: notificationHref(n.href),
+    openCount: waiting.length,
+    topItems: waiting.slice(0, 3).map((s) => ({
+      id: s.situationId,
+      title: s.title,
+      cityName: s.audienceCityId !== null ? nameOf(s.audienceCityId) : null,
+      kindLabel: kindLabel(s.kind),
+      href: "/situations",
     })),
-    queueHref: "/notifications",
+    queueHref: "/situations",
   };
 }
 

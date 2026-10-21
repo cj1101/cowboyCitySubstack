@@ -3,10 +3,11 @@
 /**
  * Situations peek (brief §4.2 #4, P3-D4; spec §5.2.5) — a deliberately
  * small window into the member's own queue. In Phase 3 the data source
- * is the member's existing site `notifications` substrate, mapped by
- * the read path into the shape below; the Phase 5 Situations queue
- * replaces that source with NO registry or component change (the props
- * are the swap contract).
+ * was the member's existing site `notifications` substrate, mapped by
+ * the read path into the shape below; Phase 5 swapped that one source
+ * for the real `sim_situations` queue (P5-D7) with NO registry or
+ * component change — these props were the swap contract, and the swap
+ * landed exactly there (`loadSituationsPeek` in panelData.ts).
  *
  * Member-only (registry audience), owner-private data. Plain text
  * count, up to 3 top items, link to the full queue. No badge counter,

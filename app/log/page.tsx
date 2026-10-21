@@ -5,7 +5,9 @@
  *
  * Reverse-chronological, finite pages of 50 (a "load more" cursor on
  * seq — never an infinite scroll over an unbounded Log), filters for
- * city / member / kind. A member's view merges the public entries with
+ * city / member / kind / NPC actor (Phase 5: acts an NPC took on a
+ * member's behalf are filterable as their own actor class, and are
+ * badged "〈NPC〉, for 〈owner〉" wherever they render). A member's view merges the public entries with
  * their OWN actor-private entries (badged private); nobody else's
  * private entries ever render, and erased entries leave no placeholder
  * and no gap annotation — the standing Log is the whole story.
@@ -57,7 +59,9 @@ interface LogRow {
 function actorLabel(actor: DocumentData | undefined): string {
   if (!actor) return "unknown";
   if (actor.type === "member") return `member ${actor.memberId ?? ""}`;
-  if (actor.type === "npc") return `NPC ${actor.npcId ?? ""} (for ${actor.onBehalfOfMemberId ?? ""})`;
+  // NPC attribution is badged "〈NPC〉, for 〈owner〉" at the same
+  // prominence as the change itself (Phase 5 countersign A-6).
+  if (actor.type === "npc") return `NPC ${actor.npcId ?? ""}, for ${actor.onBehalfOfMemberId ?? ""}`;
   if (actor.type === "shared-office") return `shared office (${actor.office ?? "mayor"})`;
   if (actor.type === "contest") return `contest (${actor.type})`;
   return String(actor.type ?? "unknown");
@@ -73,6 +77,10 @@ export default function LogPage() {
   const [cityFilter, setCityFilter] = useState("");
   const [kindFilter, setKindFilter] = useState("");
   const [memberFilter, setMemberFilter] = useState("");
+  // Phase 5 (§11.1): the NPC actor filter — every entry an NPC
+  // authored, or one NPC's entries. NPC acts are delegated member
+  // action, badged "〈NPC〉, for 〈owner〉" wherever they render.
+  const [npcFilter, setNpcFilter] = useState("");
   const [expandedSeq, setExpandedSeq] = useState<number | null>(null);
   const [exportLimit, setExportLimit] = useState("");
   const [exporting, setExporting] = useState(false);
@@ -189,6 +197,17 @@ export default function LogPage() {
     return [...members.entries()];
   }, [visible]);
 
+  const npcOptions = useMemo(() => {
+    const npcs = new Map<string, string>();
+    for (const row of visible) {
+      const actor = row.data.actor as DocumentData | undefined;
+      if (actor?.type === "npc" && actor.npcId) {
+        npcs.set(actor.npcId as string, actorLabel(actor));
+      }
+    }
+    return [...npcs.entries()];
+  }, [visible]);
+
   const filtered = visible.filter((row) => {
     const data = row.data;
     if (cityFilter && !((data.cityIds as string[] | undefined) ?? []).includes(cityFilter)) {
@@ -197,6 +216,11 @@ export default function LogPage() {
     if (kindFilter && data.kind !== kindFilter) return false;
     if (memberFilter && (data.actor as DocumentData | undefined)?.memberId !== memberFilter) {
       return false;
+    }
+    if (npcFilter) {
+      const actor = data.actor as DocumentData | undefined;
+      if (actor?.type !== "npc") return false;
+      if (npcFilter !== "any" && actor.npcId !== npcFilter) return false;
     }
     return true;
   });
@@ -303,7 +327,7 @@ export default function LogPage() {
             Everything that has happened in the world, newest first. What was lawfully
             undone is simply not here — the standing Log is the whole story.
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-4">
             <select className="form-input" value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} aria-label="Filter by city">
               <option value="">All cities</option>
               {cities.map((city) => (
@@ -320,6 +344,13 @@ export default function LogPage() {
               <option value="">All members</option>
               {memberOptions.map(([uid, label]) => (
                 <option key={uid} value={uid}>{label}</option>
+              ))}
+            </select>
+            <select className="form-input" value={npcFilter} onChange={(e) => setNpcFilter(e.target.value)} aria-label="Filter by NPC actor">
+              <option value="">All actors</option>
+              <option value="any">NPCs acting for members</option>
+              {npcOptions.map(([npcId, label]) => (
+                <option key={npcId} value={npcId}>{label}</option>
               ))}
             </select>
           </div>
