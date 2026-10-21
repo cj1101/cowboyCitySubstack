@@ -377,11 +377,19 @@ export function validatePlan(
     throw new PlanValidationError(message);
   };
 
-  // §5.6 — no surface records: the committer never produces situations,
-  // notifications, or chronicle drafts in Phase 2.
+  // §5.6 — narrative outputs: notes always; chronicle outputs are
+  // admitted since the Phase 4 step 11 badging wiring (the committer
+  // turns them into sim-badged drafts in the existing `drafts`
+  // collection — prep report §4(a)); situation/outbox records remain
+  // forbidden (their surfaces are Phase 5/6). A chronicle output must
+  // carry its telling: an empty text is a bug, not a draft.
   for (const output of plan.narrativeOutputs) {
-    if (output.kind !== "note") {
-      fail(`plan emits a ${output.kind} output — situations/outbox/chronicle records are not Phase 2`);
+    if (output.kind === "chronicle") {
+      if (typeof output.text !== "string" || output.text.trim().length === 0) {
+        fail("plan emits a chronicle output with no text — an empty telling is a bug, not a draft");
+      }
+    } else if (output.kind !== "note") {
+      fail(`plan emits a ${output.kind} output — situation/outbox records are not Phase 4`);
     }
   }
 
