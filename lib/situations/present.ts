@@ -146,7 +146,7 @@ export function outcomeLine(
       return `Closed as silent. ${silenceRecordLine(city, situation.resolvedSeq)}`;
     case "handled": {
       if (situation.handling?.outcomeVerb === "declined") {
-        return "Closed as handled — declined by its owner. The draft binds nothing.";
+        return "Closed as handled — declined by its owner (handled-by-declining). The draft stays inert in history and binds nothing.";
       }
       const mode = situation.handling?.mode;
       if (mode === "delegated" || mode === "auto-delegated") {

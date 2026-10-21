@@ -486,12 +486,11 @@ export function SituationCard({
                   <h4 className="font-bold">Decline the draft</h4>
                   <p className="text-sm text-text-muted">
                     The draft waiting on this card binds nothing on its own.
-                    Declining closes the matter as declined: your decision
-                    and its outcome are recorded on the card and in the Log,
-                    the draft stays in history exactly as it was written,
-                    and nothing in it is adopted or acted on. The underlying
-                    matter is closed as declined — it does not return to
-                    your queue.
+                    Declining is a complete outcome — handled-by-declining:
+                    your decision and its outcome verb are recorded on the
+                    card and in the Log, the draft stays inert in history
+                    exactly as it was written, and nothing in it is adopted
+                    or acted on. The matter does not return to your queue.
                   </p>
                   {user && (
                     <ActionRunner
