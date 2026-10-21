@@ -10,15 +10,21 @@
  * use the CITED version + hash (TC-A03/TC-W05), so old versions are never
  * deleted.
  *
- * Status of the production text as of Phase 2: the ratification draft
- * (Vera, workstreams/world-baseline-ratification-draft.md) is
- * **DRAFT — NOT RATIFIED**. Its registry entry below therefore carries
- * `status: "draft"`, and the resolver NEVER cites it (brief §6.4 — an
- * entry citing unratified text is precisely what TC-W01 fails). The
- * interim ratifying act is a process call left open in
- * workstreams/phase2-decisions.md (P2-K2, flagged open): when it happens,
- * ratification is a one-line status flip in this file, shipped as its own
- * reviewed change — never a runtime mutation.
+ * Status of the production text: **RATIFIED**. The ratification draft
+ * (Vera, workstreams/world-baseline-ratification-draft.md) was adopted
+ * as World Baseline 1.0 by CJ ruling in the War Room on 2026-10-20
+ * (Option A of workstreams/baseline-ratification-pack.md, closing the
+ * P2-K2 process call left open in workstreams/phase2-decisions.md):
+ * under the Baseline's own precedence (§1.2.2.5) the ruling is the
+ * ratifying act, and the one-line status flip in this file — shipped
+ * as its own reviewed change, never a runtime mutation — is its
+ * record. The entry's `effectiveFromSeq` stays null in this registry
+ * until production genesis stamps it on `sim_world/current` (pack §3:
+ * the version is citable from production seq 1 onward via that stamp),
+ * so `citableBaselineVersion` still selects nothing from the code
+ * registry alone pre-genesis; citations of the ratified version verify
+ * against this entry (TC-W01 forbids citing a draft — this text is no
+ * longer one).
  */
 
 import { sha256HexOfText } from "../canonical";
@@ -43,7 +49,9 @@ export interface BaselineVersion {
   docHash: string;
   sections: BaselineSection[];
   /** First seq at which this version may be cited (amendments are
-   * prospective only, TC-W04). Null while draft. */
+   * prospective only, TC-W04). Null while draft; world-baseline-1.0
+   * also carries null here post-ratification, until production genesis
+   * stamps it (ratification pack §3). */
   effectiveFromSeq: number | null;
 }
 
@@ -129,8 +137,10 @@ export function sectionScopeCovers(section: BaselineSection, cityIds: string[]):
 }
 
 // ---------------------------------------------------------------------------
-// The production registry. One version: the ratification candidate,
-// status "draft". Section textHashes + docHash were computed from
+// The production registry. One version: world-baseline-1.0, status
+// "ratified" (CJ ruling, War Room 2026-10-20; the docHash is unchanged
+// — ratification adopts the identified text, it does not edit it).
+// Section textHashes + docHash were computed from
 // workstreams/world-baseline-ratification-draft.md §1 at Phase 2 build
 // time under the normalization above; recomputing them over the draft
 // file (see tests/sim-core.test.ts vectors for the fixture analogue)
@@ -143,7 +153,7 @@ export const PRODUCTION_BASELINE_REGISTRY: BaselineRegistry = {
   versions: [
     {
       version: "world-baseline-1.0",
-      status: "draft",
+      status: "ratified",
       docHash: "db01a43ab1e6015d18d82cc09bf48cddea70a320bad44617f9d39e6a4e0d63ae",
       effectiveFromSeq: null,
       sections: [
