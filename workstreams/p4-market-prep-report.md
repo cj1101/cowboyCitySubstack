@@ -422,3 +422,286 @@ In order, against production corpora, each step a player/fabric act
   yet; M-06 reads a standing finite integer or treats the term as
   absent (null, logged). The first writer (a finance/business
   earnings record) inherits the closed-list seat unchanged.
+
+## 8. Assembly record (Lead — Rafe)
+
+**Branch:** `p4/market-assembled` in `phase4-clone`, on the
+reconstructed local base `assembly/base-master-31e1fb6` (the
+Acquisition stack cherry-picked onto `assembly/base-master-cat2`;
+resulting tree `dee21922617ad747802da91a0eb51dd81baa824a`, identical
+to the `p4/acquisition-assembled` tip tree — Theo verifies against
+remote master `31e1fb6` at push). Cato's 10 commits cherry-picked
+with authorship preserved; the module payloads are byte-identical
+to `p4-market-clone` @ `5f890a3` (verified per file:
+`lib/sim/rules/market.ts`, `lib/sim/marketRecords.ts`,
+`lib/market/*`, `tests/market-harness.ts`, the three `lib/finance`
+files, this report). The one conflict — README — was composed
+payload-delta style: Cato's three additions placed onto the
+post-Acquisition README (scripts row after the acq row; the Market
+narrative paragraph after the Data acquisition paragraph; the
+changelog line above the acquisition lines, newest-first). The
+stack diff vs base is exactly Cato's declared 15 files,
++7,121/−15.
+
+**§3 fence verification (Lead):** the three in-fence `lib/finance`
+edits are exactly as enumerated in §3 — (1) `accounts.ts`:
+`MARKET_ACCOUNT_PATH` const + `ledgerDocPath({kind:"market"})`
+resolves to it (was `null`); (2) `transfer.ts`: the blanket
+`MARKET_LEDGER_UNAVAILABLE` refusal lifted, structural validation /
+netting / custodial branch unchanged; (3) `conservation.ts`:
+`MINT_RULES` gains `"M-00"`, `cashDeltaOfWrite` recognizes
+`sim_market_account/main` (`cashRubars`, kind `"market"`),
+`resolveChangeTarget` maps `marketAccount.cashRubars`. Nothing else
+outside the family files was touched.
+
+**Lead commits (6):**
+1. **Registry (§5 item 1 + item 2's field/fold):** `MARKET_REGISTERED`
+   in the FINANCE/BUSINESS pattern — `MARKET_DESCRIPTORS` spread
+   with `MARKET_FINANCE_ADDITIONS` attached whole onto each
+   descriptor's `finance` field (the family carries no inline
+   finance fields, so §5.1's merge semantics reduce to the attach:
+   class from the addition, its arrays as published), and
+   `MARKET_UNDO_CLASSES` folded onto the new field. `RuleDescriptor`
+   gains `undoClass?: "locked-at-commit"` (P4-K25). Probe: **64
+   descriptors** (51 + M-00…M-12); `found_market_account` → M-00,
+   `list_company` → M-01, `place_order` → M-03,
+   `transfer_shares` → M-04, `liquidate_company` → M-10; M-06/M-12
+   kindless as built; `locked-at-commit` on exactly
+   {M-03, M-04, M-10}.
+2. **Rules (§5 item 4):** the five collections
+   (`sim_market_account`, `sim_market_listings`, `sim_holdings`,
+   `sim_market_orders`, `sim_market_trades`) get the `sim_cases`
+   posture — committer-only writes, `isViewer()` reads — with suite
+   posture proofs in `tests/rules.test.ts` (committer seed; owner /
+   member / guest reads succeed; anon read fails; member, guest-path
+   and fabric-worker writes fail). Plus a scope fix commit
+   (`committerFs` is block-local in the suite).
+3. **Indexes (§5 item 5):** one composite —
+   `sim_market_trades` (`corporationId` ASC, `seq` ASC); 43 total.
+4. **CI (§5 item 6, order per Theo):** `test:sim` chains
+   `tests/market-harness.ts` after the acq harness
+   (…cat2 → acq → market), inside the existing non-required Sim
+   core job; required check untouched.
+5. **README:** Cato's delta (composed, above) + Lead assembly
+   sentence + dated Lead changelog line.
+
+**§5 item 2 — the undo-engine question, Lead's decision:** the
+field and the fold are taken; `lib/sim/undo.ts` is **not** taught
+to refuse in this PR. Rationale: the family's own record assigns
+enforcement to Phase 7's undo pass ("extends a populated field
+instead of retrofitting one"), and the class is now populated from
+day one as P4-K25 requires. Until that pass lands, undo of a market
+event follows the standing suffix/dependency refusal (the CJ
+dependency rule), and M-11's corrective-event path is the
+published remedy for settled trades. Named here as a Phase 7 /
+gate follow-up, not silently dropped.
+
+**§5 item 3 — NOT WIRED (gated on §6, recorded precisely).** The
+`verify.ts` holdings supply stays unwired in this PR, per §5
+item 3's own gate and Theo's instruction — no operated or
+production step was run or improvised around. What waits, exactly:
+in `verifyStandingConservation` — (a) the market rule ids
+(M-00…M-11) added to `financeRuleIds`; (b) `isFinancePath`
+extended with `sim_market_account/`; (c) `holdingDocs` collected
+in the state-docs pass (`sim_holdings`, two segments) and passed
+as `holdings:` into the `checkStandingRecords` call, replacing
+the Cat II comment at that site ("NO holdings supply is wired…").
+What it waits ON (§6, in order, all production player/fabric acts
+— no direct writes): (1) the M-00 founding act — one member
+submits `found_market_account`, creating `sim_market_account/main`
+with its 1,000,000 R seed; until then every trade verb rejects
+`market-account-missing`; (2) the backfill report —
+`planFounderHoldingBackfill` (pure, exported from
+`lib/sim/marketRecords.ts`) run over the standing production
+corpora; the expected shape is one gap per R-06-listed company
+with `missingShares == sharesOutstanding`, and any other shape is
+a data incident to surface, not paper over; (3) per-gap completion
+acts — each gap company's owner submits `list_company` (M-01
+branch (a)), creating the listing + founder holding and anchoring
+the index divisor where applicable; (4) only then the wiring PR.
+Who operates it: the P2-K15 production chain (service-user
+provisioning, production rules deploy, genesis-class operated
+acts) — **no owner is assigned yet**; assigning one is a Phase 4
+gate item (Petra's standing recommendation, one phase early).
+Wiring early would make the checker — correctly — fail every
+standing listed company not yet completed; the assertion
+Σ holdings + retired == sharesOutstanding guards the corpus only
+from the completion seq forward. The assertion itself is proven
+today: the module harness wires the identical supply in miniature
+(its `assertStanding`) and asserts standing share conservation
+after every storyline phase.
+
+**§5 item 7 — businesses seams NOT taken (per the module's own
+recommendation).** `businesses.ts` is untouched in this PR. (i)
+The listed Contract cash leg keeps rejecting
+`cash-leg-requires-market-module` and (ii) listed Dissolve keeps
+rejecting `liquidation-requires-market-module` — both fail-closed
+rejections are lawful as built: they route owners to the
+M-08/M-09/M-10 verbs, which ARE the un-block (harness check 16
+proves the M-08 pair). Taking (i)/(ii) is a UX decision for a
+later pass, never a correctness need. (iii)/(iv) The in-event
+`composeMarketRepricing` compositions for R-07 listed branches
+and F-03 funding events are likewise untaken: prices move at the
+next market verb — a disclosed lag, not a silent one (every
+market entry prints the inputs it used). (v) M-06 composition
+inside ripening plans is step-11 engine work, not a handler edit.
+
+**Flags D-1…D-8 (§1/§7):** ship as built — Cato's composition
+decisions stand (custody over MM-inventory per P4-K21(i); top-level
+`sim_holdings`, which is the shape §5 item 4's posture assumes and
+what landed; cumulative-issued + `retiredShares`; unreserved
+resting buys with crossing re-validation; M-00 numbering and the
+1,000,000 R seed — the landed `MINT_RULES` entry already names
+M-00; salvage disclosed-not-paid; earnings proxy read-never-
+invented). Theo ratifies at push.
+
+**Verification (assembled tree):** `tsc --noEmit` clean · scoped
+ESLint 0 errors (8 warnings: the pre-existing Phase 2 `_dropped`
+warning, and 7 unused-symbol warnings inside Cato's
+`lib/sim/rules/market.ts` — the module payload is left
+byte-identical per assembly discipline; the dead-symbol cleanup is
+named here as a close-out item for the module author) ·
+`next build` green · **market harness 27/27 post-registration**
+(every plan through the real `validatePlan`, every money event
+through the real conservation checker, standing share conservation
+with the holdings supply wired in miniature) · full sibling
+battery green: cat1 all scenarios, defense 12/12, chains 34/34,
+cat2 34/34, acq 14/14 · registry probe above. Emulator suites
+(sim-core / play-core / rules) remain CI's venue.
+
+## 9. PR draft — Phase 4 Market (step 7)
+
+**Title:** Phase 4 Market (step 7): M-00…M-12 exchange family — registry (64) + undoClass field, five rules postures, tape index; verify.ts holdings supply gated on the operated data step
+
+**Body:**
+
+### Summary
+Cato's step-7 module + Lead assembly. `lib/sim/rules/market.ts`
+carries the exchange family (M-00…M-12) over the pure engine in
+`lib/market/` and the record shapes in `lib/sim/marketRecords.ts`,
+under P4-K21 custody: shares live in member holdings, the
+market-maker holds no inventory, and only fees reach the Market
+Account. Assembly registers the family (**64 descriptors**), lands
+the five market rules postures and the trades-tape index, and
+chains the harness in CI. **One §5 item is deliberately not
+wired — see "Gated, not wired" below.**
+
+### What lands (module)
+- **M-00** `found_market_account` (genesis-class): the Market
+  Account singleton at `sim_market_account/main`, seeded
+  1,000,000 R — a mint under finance §3.3's closed list (the
+  checker's `MINT_RULES` gains M-00 in this stack's finance
+  landings). Handlers never lazy-create it: absent the act, trade
+  verbs reject `market-account-missing`.
+- **M-01** listing in both branches — completion of an R-06
+  listed founding (listing record + founder holding from the
+  founding figures, judged at founding, never re-judged) and full
+  listing (paid-in capital moved, shares issued, opening price by
+  the §4.4 formula over the closed M-06 input list, judgment only
+  from the prepared payload) — plus the pure founder-holding
+  backfill planner (`planFounderHoldingBackfill`) naming every
+  pre-step-7 listing gap exactly. **M-02** issuance (per-holder
+  dilution printed), capital injection (treasury sourcing refused,
+  P4-K21(ii)), float placement/recall (commitments behind the
+  standing float offer; shares never move).
+- **M-03/M-04** book settlement, price–time priority, self-match
+  prevention, 0.25%-per-side fees, free-share commitments behind
+  resting sells; resting buys carry no cash reservation in v1 —
+  crossing re-validates and cancels in-event when a buyer cannot
+  cover (D-5). **M-05** cancels + expiry sweeps inside touching
+  events (never a timer). **M-06** repricing as a resolver step:
+  coded inputs only, `legacyBookRubars` structurally absent from
+  the input list (P4-G6), no multiplier ever on valuation
+  (P4-K18), the locked ±25% step cap with the uncapped figure
+  logged beside the applied one. **M-07** suspend/resume.
+  **M-08** pro-rata distributions — the lawful cash leg that
+  un-blocks Catalogue II's fail-closed listed Contract
+  withdrawal (P4-K22 routing). **M-09** buybacks through the book
+  into retirement (cumulative issued stands; retirements
+  accumulate in `retiredShares`, keeping
+  Σ holdings + retired == sharesOutstanding exact). **M-10**
+  liquidation waterfall (payables → adjudicated → pro-rata
+  holders; structure salvage disclosed, never paid in v1 — D-7).
+  **M-11** record corrections refuse without a Phase 7 verdict.
+  **M-12** publication stub (the tape records are written now;
+  step 9's R-30 reads them). Shares are economic-only (OPEN-5).
+  NPC actors reject (`npc-mandate-unavailable`).
+- **In-fence finance landings (§3 of the prep report, verified by
+  the Lead):** the market-ledger doc path resolves
+  (`MARKET_ACCOUNT_PATH`), the blanket
+  `MARKET_LEDGER_UNAVAILABLE` refusal is lifted now that the
+  account's owner has landed, and the conservation checker
+  recognizes the Market Account (mint rule, cash pattern, change
+  target).
+
+### Assembly (Lead)
+- **Registry:** family registered (51 → **64**) with finance
+  §2.4 additions folded; `RuleDescriptor` gains the P4-K25
+  `undoClass` field, folded `locked-at-commit` onto M-03/M-04/
+  M-10. The undo engine does not read the field yet — enforcement
+  is Phase 7's undo pass (the family's recorded design); until
+  then the standard suffix/dependency refusal governs.
+- **Rules:** the five market collections take the `sim_cases`
+  posture (committer-only writes, viewer reads), proven in the
+  rules suite. **Indexes:** `sim_market_trades`
+  (corporationId ASC, seq ASC). **CI:** `test:sim` chains
+  `tests/market-harness.ts` after the acq harness.
+
+### Gated, not wired — the verify.ts holdings supply (§5 item 3)
+This PR does **not** wire the conservation checker's holdings
+supply in `verify.ts`, and does not run any part of the data step
+it waits on. The gate is the module's own (§5 item 3 + §6): the
+wiring (market rule ids into `financeRuleIds`,
+`sim_market_account/` into `isFinancePath`, `sim_holdings` docs
+into `checkStandingRecords`) may land only after the operated
+data step completes against production, in order: (1) the M-00
+founding act; (2) the `planFounderHoldingBackfill` report over
+the standing corpora (any non-expected shape is a data incident);
+(3) per-gap owner `list_company` (M-01 branch (a)) completion
+acts. Wired earlier, the checker would correctly fail every
+standing listed company not yet completed. The step is
+P2-K15-class operated wiring with **no owner assigned yet** —
+assigning one is a Phase 4 gate item. The share assertion itself
+is proven in this PR: the harness wires the identical supply in
+miniature and asserts standing share conservation after every
+storyline phase.
+
+### Seams not taken (§5 item 7)
+`businesses.ts` is untouched. The listed Contract cash leg and
+listed Dissolve keep their fail-closed rejections
+(`cash-leg-requires-market-module` /
+`liquidation-requires-market-module`) per the module's own
+recommendation — they route owners to M-08/M-09/M-10, which are
+the lawful un-block (harness check 16). In-event repricing
+composition for R-07 listed branches / F-03 funding events is
+likewise untaken: prices move at the next market verb, a
+disclosed lag (every market entry prints its inputs).
+
+### Flags (ship as built)
+D-1…D-8 per the prep report §1/§7: custody supersedes the
+market-engine's MM-inventory model (P4-K21(i)); top-level
+`sim_holdings` (forced by the F-01 read contract; Dana/Lead
+ratification noted); cumulative-issued + `retiredShares` (the
+M-09 "(sharesOutstanding falls)" spec text is the errata
+candidate for Vera — the executable checker is the law the
+harness satisfies); unreserved resting buys (escrow is a
+Phase 11 candidate); M-00 numbering + 1,000,000 R seed; salvage
+disclosed-not-paid (Vera); the §4.1 official-price reading
+(pinned by harness check 18); earnings proxy read-never-invented
+(null-honesty).
+
+### Verification
+Module harness 27/27 through the real `validatePlan` + the real
+conservation checker + the holdings-supply standing proof.
+Assembled tree: tsc clean, scoped ESLint 0 errors (7
+unused-symbol warnings inside the module file, payload left
+byte-identical; cleanup named in the assembly record), `next
+build` green, sibling battery all green (cat1, defense 12,
+chains 34, cat2 34, acq 14), registry probe per the assembly
+record (`workstreams/p4-market-prep-report.md` §8). Emulator
+suites are CI's venue.
+
+README updated (module delta composed onto current master + Lead
+assembly sentence + changelog lines) per the README-with-every-PR
+rule. No production deploy, no operated steps, no production data
+access.
