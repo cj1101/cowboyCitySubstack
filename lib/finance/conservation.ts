@@ -41,9 +41,26 @@
  *  - A-B2: bank.loanBookRubars == Σ outstanding over its active loans
  *    (asserts trivially against the Phase 4 slice's empty loan book —
  *    asserted from the start so Phase 5 activates a watched
- *    invariant, not a new one).
+ *    invariant, not a new one). Phase 5 (PR-6) adds the per-event
+ *    pair discipline: every event moving a loan record moves the
+ *    aggregate by the same delta in the same event (and likewise
+ *    A-B3's insider aggregate and A-B7's seized-assets aggregate).
  *  - A-B3: bank.insiderLoansRubars == Σ outstanding over its active
  *    insider loans.
+ *  - A-B5 (Phase 5): created claims never exceed their backing —
+ *    per funding loan, Σ principal over its non-closed
+ *    credit-created deposits ≤ the loan's funded principal.
+ *  - A-B6 (Phase 5, at DIF founding): the fund's
+ *    totalInsuredLiabilitiesRubars == the insured-liabilities
+ *    derivation over supplied records (its fundCashRubars IS the
+ *    segregated account's balance — one doc, one balance; the
+ *    aggregate-vs-ledger discipline for fund cash discharges
+ *    per-event through the bridge + bijection over
+ *    institutionAccount lines, wired with the institution's
+ *    tracked class below).
+ *  - A-B7 (Phase 5): bank.seizedAssetsRubars == Σ recorded
+ *    satisfaction values over the bank's loans carrying a seizure
+ *    record (the REC-6 other-recognized-assets term's truth).
  *  - Share conservation (P4-K21): Σ holdings + retired ==
  *    sharesOutstanding, asserted for every supplied corporation
  *    record that carries share figures.
@@ -104,6 +121,12 @@ export interface ConservationRecords {
   memberAccounts?: Record<string, unknown>[];
   cities?: Record<string, unknown>[];
   holdings?: Record<string, unknown>[];
+  /** The DIF institution record (Phase 5), when the fund stands —
+   * A-B6 asserts over it. */
+  fund?: Record<string, unknown> | null;
+  /** Log-derived suspension intervals per bank (coverage reads
+   * them; A-B6's derivation consumes them). */
+  suspensionIntervalsByBank?: ReadonlyMap<string, readonly { fromSeq: number; toSeq: number | null }[]>;
 }
 
 export interface EventConservationSummary {
@@ -145,13 +168,23 @@ const BURN_RULES = new Set<string>(); // no burn exists in v1 (§3.3)
 // Ledger identification.
 // ---------------------------------------------------------------------------
 
-type CashLedgerKind = "personal" | "treasury" | "company" | "market";
+type CashLedgerKind = "personal" | "treasury" | "company" | "market" | "institution";
 
 function cashDeltaOfWrite(write: ConservationWriteView): {
   kind: CashLedgerKind;
   key: string;
   delta: number;
 } | null {
+  if (write.path === "sim_deposit_insurance_fund/main") {
+    // The DIF's segregated account (fifth tracked class, REC-3):
+    // premiums in and payouts out are transfers within tracked
+    // ledgers, so the fund's cash belongs inside Σ Δtracked.
+    return {
+      kind: "institution",
+      key: write.path,
+      delta: docNum(write.afterDoc, "fundCashRubars") - docNum(write.beforeDoc, "fundCashRubars"),
+    };
+  }
   if (write.path === "sim_market_account/main") {
     // The Market Account (finance §1.1 account class 4): §3.1's
     // generalized invariant names it inside Σ Δtracked; recognized
@@ -207,6 +240,16 @@ function resolveChangeTarget(
   const deposit = /^bankDeposits\/([^/.]+)\.(.+)$/.exec(change.field);
   if (deposit) {
     return { path: `sim_bank_deposits/${deposit[1]}`, docField: deposit[2] };
+  }
+  const loan = /^bankLoans\/([^/.]+)\.(.+)$/.exec(change.field);
+  if (loan) {
+    return { path: `sim_bank_loans/${loan[1]}`, docField: loan[2] };
+  }
+  if (change.field === "institutionAccount.cashRubars") {
+    // The DIF account's change spelling (accounts.ts grammar) — a
+    // top-level doc riding null-city entries, like the Market
+    // Account's.
+    return { path: "sim_deposit_insurance_fund/main", docField: "fundCashRubars" };
   }
   if (change.field === "marketAccount.cashRubars") {
     // The Market Account's change spelling (accounts.ts grammar) —
@@ -346,7 +389,7 @@ export function checkConservationEvent(
       const target = resolveChangeTarget(entry, change);
       if (!target) continue;
       const delta = changeDelta(change);
-      if (target.docField === "cashRubars" || target.docField === "stats.treasuryRubars" || target.docField === "companyCashRubars") {
+      if (target.docField === "cashRubars" || target.docField === "stats.treasuryRubars" || target.docField === "companyCashRubars" || target.docField === "fundCashRubars") {
         postingSum += delta; // cash asset leg
       }
       if (
@@ -376,17 +419,191 @@ export function checkConservationEvent(
   }
   // The bank aggregate's Log change must equal the sum of its deposits'
   // claim changes in the same event (the event-level form of A-B1).
-  for (const entry of event.entries) {
-    for (const change of entry.changes) {
-      const target = resolveChangeTarget(entry, change);
-      if (!target || target.docField !== "bank.depositLiabilitiesRubars") continue;
-      const corpId = /^sim_cities\/[^/]+\/corporations\/([^/]+)$/.exec(target.path)?.[1];
-      const expected = corpId ? claimDeltaByBankFromLog.get(corpId) ?? 0 : 0;
-      if (changeDelta(change) !== expected) {
+  // Phase 5: the record side is STATUS-AWARE — a claim counts toward
+  // the aggregate only while its record is active, so a liquidation
+  // sweep (active → assigned, claim figure unchanged) lawfully
+  // drops the aggregate in the same event. The record side is
+  // therefore computed from the writeSet with countedClaim(); the
+  // bijection check (3) has already proved the Log's deposit
+  // principal/credited changes equal the writeSet's, so for events
+  // without status transitions this is identical to the Log-side
+  // accumulation (claimDeltaByBankFromLog above).
+  {
+    const countedClaim = (doc: Record<string, unknown> | null): number =>
+      doc && doc.status === "active"
+        ? num(doc.principalRubars) + num(doc.creditedInterestRubars)
+        : 0;
+    const claimDeltaByBankFromWrites = new Map<string, number>();
+    for (const write of event.writeSet) {
+      if (!/^sim_bank_deposits\/[^/]+$/.test(write.path)) continue;
+      const doc = write.afterDoc ?? write.beforeDoc;
+      const bankId = typeof doc?.bankCorporationId === "string" ? doc.bankCorporationId : "";
+      if (!bankId) continue;
+      const delta = countedClaim(write.afterDoc) - countedClaim(write.beforeDoc);
+      if (delta !== 0) {
+        claimDeltaByBankFromWrites.set(
+          bankId,
+          (claimDeltaByBankFromWrites.get(bankId) ?? 0) + delta
+        );
+      }
+    }
+    for (const entry of event.entries) {
+      for (const change of entry.changes) {
+        const target = resolveChangeTarget(entry, change);
+        if (!target || target.docField !== "bank.depositLiabilitiesRubars") continue;
+        const corpId = /^sim_cities\/[^/]+\/corporations\/([^/]+)$/.exec(target.path)?.[1];
+        const expected = corpId ? claimDeltaByBankFromWrites.get(corpId) ?? 0 : 0;
+        if (changeDelta(change) !== expected) {
+          push(
+            "AGGREGATE_PAIR_DIVERGENCE",
+            `bank ${corpId ?? target.path} aggregate moved ${changeDelta(change)} but its deposit records' claims moved ${expected} in the same event`,
+            target.path
+          );
+        }
+      }
+    }
+  }
+
+  // Phase 5: the same per-event pair discipline for the loan-side
+  // aggregates (the event-level forms of A-B2, A-B3, A-B7). The
+  // record side is computed from the writeSet (status-aware:
+  // "active" loans count toward loanBook/insider; seizure values
+  // count while the loan is unassigned); the bijection check (3)
+  // already proved the Log's loan changes equal these writeSet
+  // deltas, so comparing the aggregate's LOG change against the
+  // writeSet's record sums is the same cross-side discipline as
+  // the deposit pair above.
+  {
+    const loanDeltaByBank = new Map<string, number>();
+    const insiderDeltaByBank = new Map<string, number>();
+    const seizedDeltaByBank = new Map<string, number>();
+    const countedOutstanding = (doc: Record<string, unknown> | null): number =>
+      doc && doc.status === "active" ? num(doc.outstandingRubars) : 0;
+    const countedSeizure = (doc: Record<string, unknown> | null): number => {
+      if (!doc || doc.status === "assigned") return 0;
+      const seizure = doc.seizure as { satisfactionValueRubars?: unknown } | null;
+      return seizure && typeof seizure === "object" ? num(seizure.satisfactionValueRubars) : 0;
+    };
+    for (const write of event.writeSet) {
+      if (!/^sim_bank_loans\/[^/]+$/.test(write.path)) continue;
+      const doc = write.afterDoc ?? write.beforeDoc;
+      const bankId = typeof doc?.bankCorporationId === "string" ? doc.bankCorporationId : "";
+      if (!bankId) continue;
+      const bookDelta = countedOutstanding(write.afterDoc) - countedOutstanding(write.beforeDoc);
+      if (bookDelta !== 0) {
+        loanDeltaByBank.set(bankId, (loanDeltaByBank.get(bankId) ?? 0) + bookDelta);
+      }
+      const insider = (write.afterDoc ?? write.beforeDoc)?.insider === true;
+      if (insider && bookDelta !== 0) {
+        insiderDeltaByBank.set(bankId, (insiderDeltaByBank.get(bankId) ?? 0) + bookDelta);
+      }
+      const seizedDelta = countedSeizure(write.afterDoc) - countedSeizure(write.beforeDoc);
+      if (seizedDelta !== 0) {
+        seizedDeltaByBank.set(bankId, (seizedDeltaByBank.get(bankId) ?? 0) + seizedDelta);
+      }
+    }
+    const pairFields: {
+      field: string;
+      deltas: Map<string, number>;
+      label: string;
+    }[] = [
+      { field: "bank.loanBookRubars", deltas: loanDeltaByBank, label: "loan records' outstanding" },
+      { field: "bank.insiderLoansRubars", deltas: insiderDeltaByBank, label: "insider loan records' outstanding" },
+      { field: "bank.seizedAssetsRubars", deltas: seizedDeltaByBank, label: "loans' recorded seizure values" },
+    ];
+    for (const { field, deltas, label } of pairFields) {
+      for (const entry of event.entries) {
+        for (const change of entry.changes) {
+          const target = resolveChangeTarget(entry, change);
+          if (!target || target.docField !== field) continue;
+          const corpId = /^sim_cities\/[^/]+\/corporations\/([^/]+)$/.exec(target.path)?.[1];
+          const expected = corpId ? deltas.get(corpId) ?? 0 : 0;
+          if (changeDelta(change) !== expected) {
+            push(
+              "AGGREGATE_PAIR_DIVERGENCE",
+              `bank ${corpId ?? target.path} aggregate ${field} moved ${changeDelta(change)} but its ${label} moved ${expected} in the same event`,
+              target.path
+            );
+          }
+        }
+      }
+      // A record-side movement with NO aggregate Log change anywhere
+      // in the event is the same divergence (the tamper-negative
+      // form: a loan moved and the aggregate never followed).
+      for (const [bankId, delta] of deltas) {
+        if (delta === 0) continue;
+        const logged = event.entries.some((entry) =>
+          entry.changes.some((change) => {
+            const target = resolveChangeTarget(entry, change);
+            return (
+              target !== null &&
+              target.docField === field &&
+              /^sim_cities\/[^/]+\/corporations\/([^/]+)$/.exec(target.path)?.[1] === bankId
+            );
+          })
+        );
+        if (!logged) {
+          push(
+            "AGGREGATE_PAIR_DIVERGENCE",
+            `bank ${bankId}: its ${label} moved ${delta} in this event but ${field} has no Log change in the event`,
+            `sim_bank_loans`
+          );
+        }
+      }
+    }
+  }
+
+  // A-B4, plan-shape half (Phase 5): a credit-created deposit may
+  // only be BORN inside an event that also activates exactly one
+  // loan of equal principal at the same bank (the Appendix A pair).
+  // Unpaired issuance — a deposit created with no matching loan
+  // activation, or a credit-mode activation with no deposit — is a
+  // must-not-build made checkable (M1). Cash-mode activations and
+  // non-creation deposit writes are untouched by this check.
+  {
+    const createdDeposits: { bankId: string; principal: number }[] = [];
+    const creditActivations: { bankId: string; principal: number }[] = [];
+    for (const write of event.writeSet) {
+      if (/^sim_bank_deposits\/[^/]+$/.test(write.path)) {
+        const after = write.afterDoc;
+        if (
+          write.op === "create" &&
+          after &&
+          depositOriginOf(after) === "credit-created"
+        ) {
+          createdDeposits.push({
+            bankId: typeof after.bankCorporationId === "string" ? after.bankCorporationId : "",
+            principal: num(after.principalRubars),
+          });
+        }
+      }
+      if (/^sim_bank_loans\/[^/]+$/.test(write.path)) {
+        const before = write.beforeDoc;
+        const after = write.afterDoc;
+        if (
+          before &&
+          after &&
+          before.status === "offered" &&
+          after.status === "active" &&
+          after.fundingMode === "credit-created"
+        ) {
+          creditActivations.push({
+            bankId: typeof after.bankCorporationId === "string" ? after.bankCorporationId : "",
+            principal: num(after.principalRubars),
+          });
+        }
+      }
+    }
+    if (createdDeposits.length > 0 || creditActivations.length > 0) {
+      const paired =
+        createdDeposits.length === 1 &&
+        creditActivations.length === 1 &&
+        createdDeposits[0].bankId === creditActivations[0].bankId &&
+        createdDeposits[0].principal === creditActivations[0].principal;
+      if (!paired) {
         push(
-          "AGGREGATE_PAIR_DIVERGENCE",
-          `bank ${corpId ?? target.path} aggregate moved ${changeDelta(change)} but its deposit records' claims moved ${expected} in the same event`,
-          target.path
+          "A_B4_CREATION_PAIRING",
+          `credit creation must pair exactly one created deposit with exactly one credit-mode loan activation of equal principal at the same bank in one event (deposits created: ${createdDeposits.length}, credit activations: ${creditActivations.length})`
         );
       }
     }
@@ -567,6 +784,125 @@ export function checkStandingRecords(records: ConservationRecords): {
         "A_B4_CREATION_PAIRING",
         `deposit ${String(deposit.depositId)} is credit-created but fundingLoanId ${JSON.stringify(fundingLoanId ?? null)} names no loan on bank ${String(deposit.bankCorporationId)}`
       );
+    }
+  }
+
+  // A-B5 (Phase 5, Appendix C): created claims never exceed their
+  // backing — per funding loan, Σ principal over its non-closed
+  // credit-created deposits ≤ the loan's funded principal. Born
+  // equal at funding (B-06); the deposit's principal thereafter
+  // only falls (netting lowers it, cash conversion keeps the record
+  // whole), so any excess is a tamper or an unpaired issuance.
+  {
+    const createdByLoan = new Map<string, number>();
+    for (const deposit of records.deposits) {
+      if (deposit.status === "closed") continue;
+      if (depositOriginOf(deposit) !== "credit-created") continue;
+      const principal = num(deposit.principalRubars);
+      const writtenDown = num(deposit.writtenDownRubars);
+      if (writtenDown > principal) {
+        push(
+          "A_B5_CREATED_CLAIMS",
+          `deposit ${String(deposit.depositId)}: writtenDownRubars ${writtenDown} exceeds principal ${principal} (A-B5)`
+        );
+      }
+      if (typeof deposit.fundingLoanId === "string") {
+        createdByLoan.set(
+          deposit.fundingLoanId,
+          (createdByLoan.get(deposit.fundingLoanId) ?? 0) + principal
+        );
+      }
+    }
+    for (const loan of records.loans) {
+      if (typeof loan.loanId !== "string") continue;
+      const created = createdByLoan.get(loan.loanId) ?? 0;
+      if (created > num(loan.principalRubars)) {
+        push(
+          "A_B5_CREATED_CLAIMS",
+          `loan ${loan.loanId}: credit-created deposit principal Σ ${created} exceeds the loan's funded principal ${num(loan.principalRubars)} (A-B5: created claims exceed their backing)`
+        );
+      }
+    }
+  }
+
+  // A-B7 (Phase 5, REC-6's seized-assets term): each bank's
+  // seizedAssetsRubars == Σ recorded satisfaction values over its
+  // loans carrying a seizure record and not yet swept into a pool
+  // (assignment moves the position into the pool derivation; the
+  // closing bank's aggregate zeroes inside the liquidation event).
+  for (const corp of records.corporations) {
+    const bank = corp.bank as Record<string, unknown> | undefined;
+    if (!bank || typeof bank !== "object") continue;
+    const corporationId = typeof corp.corporationId === "string" ? corp.corporationId : "";
+    const seizedSum = records.loans
+      .filter((l) => l.bankCorporationId === corporationId && l.status !== "assigned")
+      .reduce((sum, l) => {
+        const seizure = l.seizure as { satisfactionValueRubars?: unknown } | null;
+        return (
+          sum +
+          (seizure && typeof seizure === "object"
+            ? num(seizure.satisfactionValueRubars)
+            : 0)
+        );
+      }, 0);
+    if (num(bank.seizedAssetsRubars) !== seizedSum) {
+      push(
+        "A_B7_SEIZED_AGGREGATE",
+        `bank ${corporationId}: seizedAssetsRubars ${num(bank.seizedAssetsRubars)} != Σ recorded satisfaction values over its seized loans ${seizedSum} (A-B7)`
+      );
+    }
+  }
+
+  // A-B6 (Phase 5, V2-§1.2): when the fund record stands, its
+  // maintained insured-liabilities aggregate equals the derivation
+  // over the supplied records. (The fund's fundCashRubars IS the
+  // segregated account's balance — one doc, one balance; the
+  // aggregate-vs-ledger discipline for fund cash discharges
+  // per-event through the settlement bridge + bijection over
+  // institutionAccount lines.)
+  if (records.fund) {
+    // The insured-liabilities derivation, implemented HERE a second
+    // time on purpose: this module shares no code path with the
+    // handlers or the pure finance layer (that independence is the
+    // check's value). Coverage: fund existed at the deposit's open
+    // seq (grandfathering election "none" — pre-founding deposits
+    // are never covered), depositor is not the bank's owner
+    // (insider exclusion), deposit not opened inside one of the
+    // bank's Log-derived suspension intervals, status active;
+    // basis = principal + credited.
+    const fund = records.fund;
+    const establishedAtSeq = num(fund.establishedAtSeq);
+    const ownerByBank = new Map<string, string>();
+    for (const corp of records.corporations) {
+      if (typeof corp.corporationId === "string" && typeof corp.ownerMemberId === "string") {
+        ownerByBank.set(corp.corporationId, corp.ownerMemberId);
+      }
+    }
+    let derived = 0;
+    for (const deposit of records.deposits) {
+      if (deposit.status !== "active") continue;
+      const bankId = typeof deposit.bankCorporationId === "string" ? deposit.bankCorporationId : "";
+      const owner = ownerByBank.get(bankId);
+      if (owner === undefined) continue;
+      const depositor = deposit.depositor as { kind?: unknown; memberId?: unknown } | undefined;
+      if (depositor && depositor.kind === "personal" && depositor.memberId === owner) continue;
+      if (num(deposit.openedAtSeq) < establishedAtSeq) continue;
+      const intervals = records.suspensionIntervalsByBank?.get(bankId) ?? [];
+      const openedAtSeq = num(deposit.openedAtSeq);
+      const suspended = intervals.some(
+        (i) => openedAtSeq >= i.fromSeq && (i.toSeq === null || openedAtSeq < i.toSeq)
+      );
+      if (suspended) continue;
+      derived += num(deposit.principalRubars) + num(deposit.creditedInterestRubars);
+    }
+    if (num(records.fund.totalInsuredLiabilitiesRubars) !== derived) {
+      push(
+        "A_B6_INSURED_AGGREGATE",
+        `deposit insurance fund: totalInsuredLiabilitiesRubars ${num(records.fund.totalInsuredLiabilitiesRubars)} != insured-liabilities derivation ${derived} (A-B6)`
+      );
+    }
+    if (num(records.fund.fundCashRubars) < 0) {
+      push("NEGATIVE_BALANCE", "deposit insurance fund holds negative fund cash");
     }
   }
 

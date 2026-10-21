@@ -62,7 +62,7 @@ export interface PendingKindConfig {
    * this declaration, never on payload sniffing alone). A delivery
    * kind's payloadSpec MUST carry a `delivery` block and a stat kind's
    * MUST NOT — validatePayloadSpec fences both directions. */
-  effectPath: "stat" | "delivery";
+  effectPath: "stat" | "delivery" | "schedule";
   /** Positive floor for the derived minWallElapsedHours (P4-K19): the
    * §2.3 formula's factors can round a small derivation to zero, which
    * would make a pending seq-ripe the moment it exists — a rounding
@@ -142,6 +142,37 @@ export const PENDING_KINDS: Record<string, PendingKindConfig> = {
     referenceFund: null,
     effectPath: "delivery",
     minWallHoursFloor: 1,
+  },
+  // Banking schedule kinds (Phase 5, PR-6; banking amendment §3.4 +
+  // V2-§1.3). These pendings are CONTRACTUAL schedules, not delayed
+  // effects: their requiredSeq is fixed by the loan/premium contract
+  // at creation (installment k due at originatedAtSeq +
+  // k × dueIntervalSeqs; a premium period exactly PREMIUM_PERIOD_SEQS
+  // after its anchor), and drafts are built by the banking family's
+  // schedule builder (lib/finance/banking.ts buildSchedulePendingDraft),
+  // never by buildPendingDraft — the delay formula has no lawful
+  // input here, so baseHours is 0 and the wall floor is exempted BY
+  // NAME (zeroDelayExempt): the seq gate alone governs. Ripening
+  // dispatches on effectPath "schedule" to the family's ripening
+  // composition (buildScheduleRipeningPlan, rules/finance.ts),
+  // wired by the Lead like the delivery dispatch.
+  "loan-installment-due": {
+    kind: "loan-installment-due",
+    baseHours: 0,
+    modes: ["determinate"],
+    ruleIdsOnRipen: ["B-07"],
+    referenceFund: null,
+    effectPath: "schedule",
+    zeroDelayExempt: true,
+  },
+  "insurance-premium-due": {
+    kind: "insurance-premium-due",
+    baseHours: 0,
+    modes: ["determinate"],
+    ruleIdsOnRipen: ["B-12"],
+    referenceFund: null,
+    effectPath: "schedule",
+    zeroDelayExempt: true,
   },
 };
 
