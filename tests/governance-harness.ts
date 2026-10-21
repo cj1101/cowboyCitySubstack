@@ -215,7 +215,7 @@ check("the twelve governance kinds classify to the five descriptors", () => {
     assert.equal(descriptorForActionKind(kind)?.id, descriptorId, `${kind} descriptor`);
   }
   assert.equal(Object.keys(GOVERNANCE_DESCRIPTORS).length, 5);
-  assert.equal(Object.keys(RULE_DESCRIPTORS).length, 70, "65 landed + 5 governance");
+  assert.equal(Object.keys(RULE_DESCRIPTORS).length, 79, "74 landed + 5 governance");
 });
 
 check("every registered governance kind has a handler", () => {
