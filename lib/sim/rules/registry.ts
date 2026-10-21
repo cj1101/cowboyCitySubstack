@@ -35,6 +35,10 @@
  * is NOT wired at this landing: it is gated on the operated data
  * step in p4-market-prep-report.md §6 (M-00 founding act +
  * founder-holding backfill), per §5 item 3 of that report.
+ * The Phase 5 governance surface (brief §3.3: npc.*, mandate.*,
+ * delegationRule.set, situation.*, envelope.*) landed with the Phase 5
+ * substrate (PR-1): its descriptors live in ./governance, keyed by
+ * primary action kind, registered below.
  *
  * Handler discipline (brief §5.3): handlers are pure — (snapshot, action,
  * prepared) → plan contributions. They never invent content, never read
@@ -75,6 +79,7 @@ import { BUSINESS_DESCRIPTORS, BUSINESS_FINANCE_ADDITIONS } from "./businesses";
 import { ACQUISITION_DESCRIPTORS } from "./acquisition";
 import { MARKET_DESCRIPTORS, MARKET_FINANCE_ADDITIONS, MARKET_UNDO_CLASSES } from "./market";
 import { LORE_DESCRIPTORS } from "./lore";
+import { GOVERNANCE_DESCRIPTORS } from "./governance";
 
 export interface HandlerContext {
   snapshot: SimSnapshot;
@@ -1182,6 +1187,14 @@ export const RULE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   // descriptor (shortfallClass "none", no ledgers) — a plain spread,
   // no fold.
   ...LORE_DESCRIPTORS,
+  // Governance (Phase 5 substrate, PR-1): GOVERNANCE_DESCRIPTORS is a
+  // Record keyed by descriptor id — a governance descriptor's id is its
+  // primary action kind (the form the ahead-built modules use). The
+  // twelve §3.3 governance kinds classify from this PR: npc.create is
+  // live through its lib/npcs adapter; the other eleven carry stated
+  // deferral handlers naming their landing step (PR-2/PR-3), in the
+  // R-29 idiom — registered, logged, never silent.
+  ...GOVERNANCE_DESCRIPTORS,
   "FIXTURE-ADJUST": {
     id: "FIXTURE-ADJUST",
     actionKinds: ["fixture_adjust"],

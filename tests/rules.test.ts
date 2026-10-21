@@ -2561,6 +2561,346 @@ async function main() {
   }
   console.log("ok lore postures + badge fence + F-L7 facts (P4 Lore assembly)");
 
+  // --- Phase 5 substrate (brief §9; gate row P5-G9) ----------------------
+  // The seven Phase 5 collections under the §1.2 write split: members
+  // author PENDING records; only the committer makes anything effective.
+  //
+  // HELD OUT (A-7 discipline): the undo-restore assertion that a restore
+  // transaction DELETES an effective mandate version is NOT in this
+  // suite. Brief §9.8's exemption says effective versions are deletable
+  // by no identity; decisions P5-D6 (whether a restore transaction is
+  // the one carve-out) is FLAGGED for Koda and unratified at this PR.
+  // What IS asserted below is the ratified ground both readings share:
+  // an effective version's delete fails for every identity tried here
+  // (author, committer, worker), and the committer's supersededSeq-only
+  // restore flip succeeds. When P5-D6 is ratified, the restore-context
+  // assertion lands in the gate PR (W6) in its ratified form.
+  {
+    // Fixtures: a character per city + one ACTIVE NPC per owner (seeded
+    // fabric-side; member authoring is exercised live below).
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "characters", "charA1"), { factionId: "cityA", name: "Ada Archivist" });
+      await setDoc(doc(db, "characters", "charB1"), { factionId: "cityB", name: "Bo Broker" });
+      await setDoc(doc(db, "sim_npcs", "npcA1"), {
+        npcId: "npcA1", characterId: "charA1", cityId: "cityA", ownerUid: "ownerA",
+        status: "active", permissionMode: "ask-first",
+      });
+      await setDoc(doc(db, "sim_npcs", "npcB1"), {
+        npcId: "npcB1", characterId: "charB1", cityId: "cityB", ownerUid: "ownerB",
+        status: "active", permissionMode: "ask-first",
+      });
+    });
+
+    const npcCreateDoc = (over: Record<string, unknown> = {}) => ({
+      npcId: "charA1",
+      characterId: "charA1",
+      cityId: "cityA",
+      ownerUid: "ownerA",
+      displayNameSnapshot: "Ada Archivist",
+      titleFreeform: "Chief Archivist",
+      roleTemplate: "steward",
+      personality: { traits: ["meticulous"], voiceNotes: null, characterNotes: null },
+      scopeFreeform: "Keep the city rolls.",
+      permissionMode: "ask-first",
+      status: "pending_activation",
+      currentMandateId: null,
+      currentMandateVersion: null,
+      activationSeq: null,
+      retiredSeq: null,
+      stateVersion: 1,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...over,
+    });
+
+    // §9.1 sim_npcs — the refusals run first, each isolating one fence
+    // against the standing charA1 character fixture.
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_npcs", "npcA1"))); // viewer read
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), npcCreateDoc({ backdoor: true }))); // field fence
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), npcCreateDoc({ scopeFreeform: "x".repeat(4001) }))); // freeform cap
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), npcCreateDoc({ permissionMode: "whenever" }))); // mode fence
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), npcCreateDoc({ status: "active" }))); // born pending only
+    await assertFails(setDoc(doc(memberC.firestore(), "sim_npcs", "charA9"), npcCreateDoc({ npcId: "charA9", ownerUid: "memberC" }))); // not the city owner
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_npcs", "charB1"), npcCreateDoc({ npcId: "charB1", characterId: "charB1" }))); // character serves cityB
+    await assertFails(setDoc(doc(fabricWorker.firestore(), "sim_npcs", "charA1"), npcCreateDoc())); // worker never authors
+    await assertSucceeds(setDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), npcCreateDoc()));
+    await assertSucceeds(updateDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), { titleFreeform: "Chief Archivist & Keeper" })); // pending authoring correction
+    await assertFails(updateDoc(doc(ownerA.firestore(), "sim_npcs", "charA1"), { status: "active" })); // activation is the fabric's
+    await assertFails(updateDoc(doc(memberC.firestore(), "sim_npcs", "charA1"), { titleFreeform: "Nope" }));
+    await assertSucceeds(updateDoc(doc(fabricCommitter.firestore(), "sim_npcs", "charA1"), { status: "active", activationSeq: 50 })); // fabric flip
+    await assertFails(deleteDoc(doc(ownerA.firestore(), "sim_npcs", "charA1")));
+    await assertSucceeds(deleteDoc(doc(fabricCommitter.firestore(), "sim_npcs", "charA1"))); // §9.8 undo erasure
+
+    // §9.2 sim_teams — fabric-derived, member-read-only
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_teams", "cityA")));
+    await assertFails(setDoc(doc(memberC.firestore(), "sim_teams", "cityA"), { cityId: "cityA", npcIds: [] }));
+    await assertSucceeds(setDoc(doc(fabricCommitter.firestore(), "sim_teams", "cityA"), { cityId: "cityA", npcIds: ["npcA1"] }));
+    await assertFails(setDoc(doc(fabricWorker.firestore(), "sim_teams", "cityB"), { cityId: "cityB", npcIds: [] }));
+    await assertSucceeds(deleteDoc(doc(fabricCommitter.firestore(), "sim_teams", "cityA")));
+
+    // §9.3 sim_mandates + versions
+    const mandateRoot = (over: Record<string, unknown> = {}) => ({
+      mandateId: "mandateA1",
+      npcId: "npcA1",
+      cityId: "cityA",
+      ownerUid: "ownerA",
+      currentVersion: 0,
+      status: "pending",
+      currentVersionRef: null,
+      createdSeq: null,
+      revokedSeq: null,
+      expiresAtSeq: null,
+      ...over,
+    });
+    const mandateVersion = (over: Record<string, unknown> = {}) => ({
+      mandateId: "mandateA1",
+      npcId: "npcA1",
+      cityId: "cityA",
+      ownerUid: "ownerA",
+      version: 1,
+      permissionMode: "ask-first",
+      scopeFreeform: "Run the archive.",
+      structuredScope: { allowedActionTypes: [], allowedCityIds: ["cityA"], targetKinds: [], excludedTargets: [] },
+      caps: { perActionRubars: null, perWakeRubars: null, maxResolutionsPerWake: null, allowPartialExecution: true },
+      negotiationBounds: null,
+      alwaysEscalate: [],
+      responseStyle: "",
+      expiresAtSeq: null,
+      horizonActions: null,
+      sourceActionId: "act_fixture",
+      effectiveSeq: null,
+      supersededSeq: null,
+      mandateHash: "fixturehash",
+      ...over,
+    });
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_mandates", "mandateA1"))); // group-readable
+    await assertSucceeds(setDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA1"), mandateRoot()));
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA2"), mandateRoot({ mandateId: "mandateA2", status: "active" }))); // born pending
+    await assertFails(setDoc(doc(ownerB.firestore(), "sim_mandates", "mandateA3"), mandateRoot({ mandateId: "mandateA3", ownerUid: "ownerB" }))); // not B's city
+    await assertSucceeds(
+      setDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA1", "versions", "1"), mandateVersion())
+    ); // next version over a currentVersion-0 root
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA1", "versions", "3"), mandateVersion({ version: 3 }))
+    ); // skips the sequence
+    await assertSucceeds(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1"), { currentVersion: 1 })
+    ); // the fabric advances the pointer when v1 takes effect in a resolution
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_mandates", "mandateA1", "versions", "2"), mandateVersion({ version: 2, ownerUid: "memberC" }))
+    ); // the sequence is right; the author is not
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA1", "versions", "1"), { scopeFreeform: "Edited." })
+    ); // payloads are immutable — for the author too
+    await assertFails(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1", "versions", "1"), { supersededSeq: 60 })
+    ); // the restore flip needs an EFFECTIVE version
+    await assertSucceeds(deleteDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA1", "versions", "1"))); // never-effective: author may withdraw
+    // The module-born shape: root authored WITH its first version.
+    await assertSucceeds(
+      setDoc(doc(ownerA.firestore(), "sim_mandates", "mandateBorn"), mandateRoot({ mandateId: "mandateBorn", currentVersion: 1, currentVersionRef: "sim_mandates/mandateBorn/versions/1" }))
+    );
+    await assertSucceeds(
+      setDoc(doc(ownerA.firestore(), "sim_mandates", "mandateBorn", "versions", "1"), mandateVersion({ mandateId: "mandateBorn" }))
+    );
+    // An effective version: only the supersededSeq flip moves, for anyone.
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "sim_mandates", "mandateA1", "versions", "9"),
+        mandateVersion({ version: 9, effectiveSeq: 42 })
+      );
+    });
+    await assertFails(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1", "versions", "9"), { scopeFreeform: "Edited." })
+    );
+    await assertSucceeds(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1", "versions", "9"), { supersededSeq: 77 })
+    ); // the undo-restore flip — the one update (P5-D6 governs deletion inside restore, held out above)
+    await assertFails(deleteDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1", "versions", "9"))); // §9.8 exemption
+    await assertFails(deleteDoc(doc(ownerA.firestore(), "sim_mandates", "mandateA1", "versions", "9")));
+    await assertFails(updateDoc(doc(memberC.firestore(), "sim_mandates", "mandateA1"), { status: "revoked" }));
+    await assertSucceeds(updateDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1"), { status: "revoked", revokedSeq: 80 }));
+    await assertSucceeds(deleteDoc(doc(fabricCommitter.firestore(), "sim_mandates", "mandateA1"))); // root: §9.8
+
+    // §9.4 sim_task_envelopes + §9.5 sim_task_outputs
+    const envelopeDoc = (over: Record<string, unknown> = {}) => ({
+      taskId: "env1",
+      requestingMemberId: "ownerA",
+      cityId: "cityA",
+      npcId: "npcA1",
+      mandateId: null,
+      sourceSituationId: null,
+      task: "Draft the weekly archive digest.",
+      bounds: { mayCommit: false, maxRubars: null },
+      availableAt: new Date(),
+      expiresAt: null,
+      claim: null,
+      run: null,
+      outputId: null,
+      logOutcomeSeq: null,
+      failure: null,
+      status: "QUEUED",
+      ...over,
+    });
+    await assertSucceeds(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env1"), envelopeDoc()));
+    await assertSucceeds(getDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env1"))); // requester
+    await assertSucceeds(getDoc(doc(adminD.firestore(), "sim_task_envelopes", "env1"))); // admin
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_task_envelopes", "env1"))); // not the audience
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env2"), envelopeDoc({ taskId: "env2", bounds: { mayCommit: true, maxRubars: null } }))); // mayCommit is false three-deep
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env3"), envelopeDoc({ taskId: "env3", status: "RUNNING" }))); // born QUEUED
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env4"), envelopeDoc({ taskId: "env4", task: "x".repeat(8001) }))); // task cap
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env5"), envelopeDoc({ taskId: "env5", npcId: "npcB1" }))); // another member's NPC
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env6"), envelopeDoc({ taskId: "env6", requestingMemberId: "memberC" }))); // requester == caller
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env7"), envelopeDoc({ taskId: "env7", claim: { workerId: "w" } }))); // born unclaimed
+    await assertFails(updateDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env1"), { status: "CLAIMED" }));
+    await assertSucceeds(updateDoc(doc(fabricCommitter.firestore(), "sim_task_envelopes", "env1"), { status: "CLAIMED", claim: { workerId: "fabricWkr" } }));
+    await assertFails(deleteDoc(doc(ownerA.firestore(), "sim_task_envelopes", "env1")));
+    await assertSucceeds(deleteDoc(doc(fabricCommitter.firestore(), "sim_task_envelopes", "env1"))); // §9.8
+
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "sim_task_envelopes", "envOut"), envelopeDoc({ taskId: "envOut" }));
+      await setDoc(doc(db, "sim_task_outputs", "envOut"), {
+        outputId: "envOut", npcId: "npcA1", outcome: "COMPLETED",
+        outputText: "Digest drafted.", structuredOutput: null, createdSeq: 5,
+      });
+    });
+    await assertSucceeds(getDoc(doc(ownerA.firestore(), "sim_task_outputs", "envOut"))); // via the envelope join
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_task_outputs", "envOut")));
+    await assertFails(getDoc(doc(guestG.firestore(), "sim_task_outputs", "envOut")));
+    await assertSucceeds(setDoc(doc(fabricCommitter.firestore(), "sim_task_outputs", "envNew"), {
+      outputId: "envNew", npcId: "npcA1", outcome: "FAILED",
+      outputText: "", structuredOutput: null, createdSeq: 6,
+    }));
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_task_outputs", "envForged"), {
+      outputId: "envForged", npcId: "npcA1", outcome: "COMPLETED",
+      outputText: "Forged.", structuredOutput: null, createdSeq: 7,
+    }));
+    await assertFails(updateDoc(doc(fabricCommitter.firestore(), "sim_task_outputs", "envOut"), { outputText: "Rewritten." })); // outputs are forever
+    await assertFails(deleteDoc(doc(fabricCommitter.firestore(), "sim_task_outputs", "envOut")));
+
+    // §9.6 sim_situations
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "sim_situations", "sitCity"), {
+        situationId: "sitCity", status: "open", kind: "attention",
+        audienceCityId: "cityA", recipientUid: null, cityId: "cityA",
+        handling: null, dedupeKey: "dk-city", detail: {}, createdSeq: 90,
+      });
+      await setDoc(doc(db, "sim_situations", "sitPerson"), {
+        situationId: "sitPerson", status: "open", kind: "attention",
+        audienceCityId: null, recipientUid: "memberC", cityId: "cityA",
+        handling: null, dedupeKey: "dk-person", detail: {}, createdSeq: 91,
+      });
+      await setDoc(doc(db, "sim_situations", "sitClosed"), {
+        situationId: "sitClosed", status: "handled", kind: "attention",
+        audienceCityId: "cityA", recipientUid: null, cityId: "cityA",
+        handling: { mode: "self", decidedByUid: "ownerA" }, dedupeKey: "dk-closed", detail: {}, createdSeq: 92,
+      });
+    });
+    await assertSucceeds(getDoc(doc(ownerA.firestore(), "sim_situations", "sitCity"))); // audience city owner
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_situations", "sitCity")));
+    await assertSucceeds(getDoc(doc(memberC.firestore(), "sim_situations", "sitPerson"))); // the recipient
+    await assertSucceeds(getDoc(doc(adminD.firestore(), "sim_situations", "sitCity")));
+    await assertFails(setDoc(doc(ownerA.firestore(), "sim_situations", "sitForged"), { status: "open", audienceCityId: "cityA" })); // fabric mints
+    await assertSucceeds(setDoc(doc(fabricCommitter.firestore(), "sim_situations", "sitMinted"), {
+      situationId: "sitMinted", status: "open", kind: "attention",
+      audienceCityId: "cityA", recipientUid: null, cityId: "cityA",
+      handling: null, dedupeKey: "dk-minted", detail: {}, createdSeq: 93,
+    }));
+    await assertSucceeds(
+      updateDoc(doc(ownerA.firestore(), "sim_situations", "sitCity"), {
+        handling: { mode: "self", decidedByUid: "ownerA", decidedAtSeq: null, note: null },
+        updatedAt: new Date(),
+      })
+    ); // the handling decision — handling fields only
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_situations", "sitCity"), { summary: "owner edit" })
+    ); // nothing outside handling/updatedAt
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_situations", "sitCity"), {
+        handling: { mode: "silent", decidedByUid: "memberC", decidedAtSeq: null, note: null },
+      })
+    ); // decidedByUid is the decider's own
+    await assertFails(
+      updateDoc(doc(memberC.firestore(), "sim_situations", "sitCity"), {
+        handling: { mode: "self", decidedByUid: "memberC", decidedAtSeq: null, note: null },
+      })
+    ); // not the audience
+    await assertFails(
+      updateDoc(doc(ownerA.firestore(), "sim_situations", "sitClosed"), {
+        handling: { mode: "self", decidedByUid: "ownerA", decidedAtSeq: null, note: null },
+      })
+    ); // decided situations are closed to decisions
+    await assertFails(deleteDoc(doc(ownerA.firestore(), "sim_situations", "sitCity")));
+    await assertSucceeds(deleteDoc(doc(fabricCommitter.firestore(), "sim_situations", "sitClosed"))); // §9.8
+
+    // §9.7 sim_delegation_rules + versions — author-private (P5-D4)
+    const ruleRoot = (over: Record<string, unknown> = {}) => ({
+      ownerUid: "ownerA",
+      cityId: "cityA",
+      status: "pending",
+      version: 0,
+      currentVersionRef: null,
+      effectiveSeq: null,
+      createdSeq: null,
+      ...over,
+    });
+    const ruleVersion = (over: Record<string, unknown> = {}) => ({
+      ownerUid: "ownerA",
+      cityId: "cityA",
+      version: 1,
+      match: { kinds: ["situation"], minSeverity: "routine" },
+      handler: { mode: "npc-first", npcId: "npcA1", characterId: null, mandateId: null },
+      caps: null,
+      alwaysWait: false,
+      ruleHash: "fixturehash",
+      effectiveSeq: null,
+      supersededSeq: null,
+      ...over,
+    });
+    await assertSucceeds(setDoc(doc(ownerA.firestore(), "sim_delegation_rules", "ruleA1"), ruleRoot()));
+    await assertFails(setDoc(doc(memberC.firestore(), "sim_delegation_rules", "ruleC1"), ruleRoot({ ownerUid: "memberC" }))); // not their city
+    await assertFails(setDoc(doc(ownerB.firestore(), "sim_delegation_rules", "ruleB1"), ruleRoot({ ownerUid: "ownerB" }))); // not B's city
+    await assertSucceeds(getDoc(doc(ownerA.firestore(), "sim_delegation_rules", "ruleA1"))); // the author
+    await assertFails(getDoc(doc(memberC.firestore(), "sim_delegation_rules", "ruleA1"))); // author-private
+    await assertSucceeds(
+      setDoc(doc(ownerA.firestore(), "sim_delegation_rules", "ruleA1", "versions", "1"), ruleVersion())
+    );
+    await assertSucceeds(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_delegation_rules", "ruleA1"), { version: 1 })
+    ); // the fabric advances the pointer when v1 takes effect
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_delegation_rules", "ruleA1", "versions", "2"),
+        ruleVersion({ version: 2, alwaysWait: true }))
+    ); // alwaysWait means the handler IS wait-for-owner
+    await assertFails(
+      setDoc(doc(ownerA.firestore(), "sim_delegation_rules", "ruleA1", "versions", "2"),
+        ruleVersion({ version: 2, handler: { mode: "npc-first", npcId: "npcB1", characterId: null, mandateId: null } }))
+    ); // the handler NPC must be the author's own
+    await assertFails(
+      setDoc(doc(memberC.firestore(), "sim_delegation_rules", "ruleA1", "versions", "2"), ruleVersion({ version: 2, ownerUid: "memberC" }))
+    );
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "sim_delegation_rules", "ruleA1", "versions", "9"),
+        ruleVersion({ version: 9, effectiveSeq: 42, handler: { mode: "wait-for-owner", npcId: null, characterId: null, mandateId: null } })
+      );
+    });
+    await assertFails(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_delegation_rules", "ruleA1", "versions", "9"), { alwaysWait: true })
+    );
+    await assertSucceeds(
+      updateDoc(doc(fabricCommitter.firestore(), "sim_delegation_rules", "ruleA1", "versions", "9"), { supersededSeq: 88 })
+    ); // the restore flip, mirrored
+    await assertFails(deleteDoc(doc(fabricCommitter.firestore(), "sim_delegation_rules", "ruleA1", "versions", "9"))); // effective: no identity
+    await assertFails(updateDoc(doc(memberC.firestore(), "sim_delegation_rules", "ruleA1"), { status: "active" }));
+    await assertSucceeds(updateDoc(doc(fabricCommitter.firestore(), "sim_delegation_rules", "ruleA1"), { status: "active", effectiveSeq: 90 }));
+    await assertSucceeds(deleteDoc(doc(fabricCommitter.firestore(), "sim_delegation_rules", "ruleA1"))); // root: §9.8
+  }
+  console.log("ok sim phase 5 substrate postures (P5-G9 matrix, brief §9)");
+
   await env.cleanup();
   assert.ok(true);
   console.log("rules tests passed");

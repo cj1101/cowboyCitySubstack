@@ -47,6 +47,17 @@ export interface SimActor {
   envelopeId: string | null;
   /** Present on shared-office actors (spec §3.3); absent elsewhere. */
   office?: "mayor" | "vice-mayor" | null;
+  /** Phase 5 (P5-K13, Vera §9 C-1): the MEMBER actor form's one
+   * additive field — a member acting in character carries the persona's
+   * ID here, and attribution stays `type: "member"` (renders "〈member〉
+   * as 〈character〉"). There is no `character` actor type and never will
+   * be: a character is not an authority. Absent ≡ null in canonical
+   * form — entries minted before Phase 5 lack the key, and the entry
+   * builder (lib/sim/log.ts) stores the key only when it carries a
+   * value, so the hashed field list and every historical hash are
+   * unchanged. NPC actors never carry it (the mandate, not the persona,
+   * authorized the act — the entry cites `npcId`). */
+  characterId?: string | null;
 }
 
 export interface SimChange {

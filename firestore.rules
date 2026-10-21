@@ -1679,5 +1679,306 @@ service cloud.firestore {
       // transaction; everyone else's delete stays denied.
       allow delete: if isFabricCommitter();
     }
+
+    // --- Sim layer: NPCs, mandates, envelopes, situations (Phase 5, brief §9) ---
+    // The §1.2 write split governs every fence below: members author
+    // PENDING records (NPC definitions, mandate/rule roots + versions,
+    // decision fields, envelope spawns); only the fabric committer
+    // makes anything EFFECTIVE (status flips, envelope claims/runs,
+    // situation creation/closure). §9.8: undo erasure reaches records a
+    // resolution created in these collections (committer delete) —
+    // EXCEPT effective mandate/rule versions and task outputs, which
+    // no identity may delete.
+
+    // §9 helpers: a characters doc serving a city (the §9.1 link fence).
+    function characterServesCity(characterId, cityId) {
+      return characterId is string
+        && exists(/databases/$(database)/documents/characters/$(characterId))
+        && get(/databases/$(database)/documents/characters/$(characterId)).data.get('factionId', '') == cityId;
+    }
+
+    // §9 helpers: the situation-audience leg of the §9.4 envelope read,
+    // evaluated over a situation ID an envelope cites.
+    function situationAudienceMember(situationId) {
+      return situationId is string
+        && exists(/databases/$(database)/documents/sim_situations/$(situationId))
+        && (get(/databases/$(database)/documents/sim_situations/$(situationId)).data.get('recipientUid', '') == request.auth.uid
+            || (get(/databases/$(database)/documents/sim_situations/$(situationId)).data.get('audienceCityId', null) != null
+                && ownsListedCity(get(/databases/$(database)/documents/sim_situations/$(situationId)).data.get('audienceCityId', ''))));
+    }
+
+    // §9 helpers: the §9.4 read audience over an envelope-shaped map:
+    // admins, the requesting member, the target city's owners, and —
+    // when the envelope was spawned from a situation — the situation's
+    // audience (its recipient + its audience city's owners).
+    function envelopeReadable(env) {
+      return isAdmin()
+        || (isFullMember()
+            && (env.get('requestingMemberId', '') == request.auth.uid
+                || ownsListedCity(env.get('cityId', ''))
+                || situationAudienceMember(env.get('sourceSituationId', null))));
+    }
+
+    // §9 helpers: the §9.5 output read — the §9.4 audience resolved
+    // against the envelope this output answers (the shared task ID
+    // joins them), plus a stored audience snapshot where the output
+    // carries one (the Dana §5.5 pattern: access survives later
+    // envelope changes).
+    function taskOutputReadable(taskId, data) {
+      return isAdmin()
+        || (isFullMember() && request.auth.uid in data.get('audienceUids', []))
+        || (exists(/databases/$(database)/documents/sim_task_envelopes/$(taskId))
+            && envelopeReadable(get(/databases/$(database)/documents/sim_task_envelopes/$(taskId)).data));
+    }
+
+    // §9 helpers: the §9.4 spawn cross-checks — a cited NPC must exist,
+    // belong to the requester, and serve the target city; a cited
+    // mandate must belong to that NPC.
+    function envelopeLinksOk(data) {
+      return (data.get('npcId', null) == null
+              || (exists(/databases/$(database)/documents/sim_npcs/$(data.get('npcId', '')))
+                  && get(/databases/$(database)/documents/sim_npcs/$(data.get('npcId', ''))).data.get('ownerUid', '') == request.auth.uid
+                  && get(/databases/$(database)/documents/sim_npcs/$(data.get('npcId', ''))).data.get('cityId', '') == data.get('cityId', '')))
+        && (data.get('mandateId', null) == null
+              || (exists(/databases/$(database)/documents/sim_mandates/$(data.get('mandateId', '')))
+                  && get(/databases/$(database)/documents/sim_mandates/$(data.get('mandateId', ''))).data.get('npcId', '') == data.get('npcId', '')));
+    }
+
+    // §9 helpers: the §9.7 handler fences expressible in rules — an
+    // always-waiting rule's handler IS wait-for-owner, and a cited
+    // handler NPC must be the author's own, serving the rule's city.
+    // (The Tier B composer guardrail is not rules-enforceable — brief
+    // §9.7 says so; the shared delegation validator asserts it.)
+    function delegationHandlerOk(data) {
+      return (data.get('alwaysWait', false) != true
+              || data.get('handler', {}).get('mode', '') == 'wait-for-owner')
+        && (data.get('handler', {}).get('npcId', null) == null
+              || (exists(/databases/$(database)/documents/sim_npcs/$(data.get('handler', {}).get('npcId', '')))
+                  && get(/databases/$(database)/documents/sim_npcs/$(data.get('handler', {}).get('npcId', ''))).data.get('ownerUid', '') == request.auth.uid
+                  && get(/databases/$(database)/documents/sim_npcs/$(data.get('handler', {}).get('npcId', ''))).data.get('cityId', '') == data.get('cityId', '')));
+    }
+
+    // §9.1 NPC records. The member authoring path: the owner of the
+    // city, born pending_activation with no mandate pointer and no
+    // seqs, a valid mode, the §2.1 character link serving the city,
+    // the freeform cap, and the §2.1 field fence. While pending, the
+    // owner may correct authoring fields; identity/status/seq/mandate
+    // fields never move client-side. Activation, mode snapshots,
+    // retirement — every effectiveness flip — are the committer's.
+    match /sim_npcs/{npcId} {
+      allow read: if isViewer();
+      allow create: if isFabricCommitter()
+        || (isFullMember()
+            && request.resource.data.npcId == npcId
+            && request.resource.data.ownerUid == request.auth.uid
+            && simCityOwner(request.resource.data.cityId)
+            && request.resource.data.status == 'pending_activation'
+            && request.resource.data.activationSeq == null
+            && request.resource.data.retiredSeq == null
+            && request.resource.data.currentMandateId == null
+            && request.resource.data.currentMandateVersion == null
+            && request.resource.data.permissionMode in ['act-for-me', 'ask-first', 'silent']
+            && characterServesCity(request.resource.data.characterId, request.resource.data.cityId)
+            && request.resource.data.scopeFreeform is string
+            && request.resource.data.scopeFreeform.size() <= 4000
+            && request.resource.data.keys().hasOnly(['npcId', 'characterId', 'cityId', 'ownerUid', 'displayNameSnapshot', 'titleFreeform', 'roleTemplate', 'personality', 'scopeFreeform', 'permissionMode', 'status', 'currentMandateId', 'currentMandateVersion', 'activationSeq', 'retiredSeq', 'stateVersion', 'createdAt', 'updatedAt']));
+      allow update: if isFabricCommitter()
+        || (isFullMember()
+            && resource.data.ownerUid == request.auth.uid
+            && resource.data.status == 'pending_activation'
+            && request.resource.data.status == 'pending_activation'
+            && request.resource.data.npcId == resource.data.npcId
+            && request.resource.data.ownerUid == resource.data.ownerUid
+            && request.resource.data.cityId == resource.data.cityId
+            && request.resource.data.characterId == resource.data.characterId
+            && request.resource.data.activationSeq == resource.data.activationSeq
+            && request.resource.data.retiredSeq == resource.data.retiredSeq
+            && request.resource.data.currentMandateId == resource.data.currentMandateId
+            && request.resource.data.currentMandateVersion == resource.data.currentMandateVersion
+            && request.resource.data.permissionMode in ['act-for-me', 'ask-first', 'silent']);
+      // §9.8: the committer's undo path; members may not delete records.
+      allow delete: if isFabricCommitter();
+    }
+
+    // §9.2 Teams: fabric-derived rosters — read-only to every member
+    // identity; the fabric (committer) writes and, per §9.8, erases.
+    match /sim_teams/{cityId} {
+      allow read: if isViewer();
+      allow create, update, delete: if isFabricCommitter();
+    }
+
+    // §9.3 Mandate roots: group-readable (the negotiated-against
+    // surface; contrast delegation rules, §9.7). A member authors a
+    // PENDING root for their own city, born with no effective version
+    // (currentVersion 0, or 1 where the first version is authored with
+    // the root per lib/npcs buildMandateRoot) and no seqs; every later
+    // root write (pointer flips, revocation, undo restore) is the
+    // committer's.
+    match /sim_mandates/{mandateId} {
+      allow read: if isViewer();
+      allow create: if isFabricCommitter()
+        || (isFullMember()
+            && request.resource.data.ownerUid == request.auth.uid
+            && simCityOwner(request.resource.data.cityId)
+            && request.resource.data.status == 'pending'
+            && request.resource.data.createdSeq == null
+            && request.resource.data.revokedSeq == null
+            && request.resource.data.expiresAtSeq == null
+            && request.resource.data.currentVersion is int
+            && request.resource.data.currentVersion >= 0
+            && request.resource.data.currentVersion <= 1);
+      allow update: if isFabricCommitter();
+      allow delete: if isFabricCommitter();
+
+      // §9.3 versions: immutable payloads. The owner authors the next
+      // version (or the root's born first version) PENDING — a version
+      // becomes effective only in the committer's mandate.set
+      // resolution. Payload validation (§2.3 negotiation bounds) runs
+      // in the shared builder/validator — substring action-type
+      // detection is not rules-expressible; the caps and freeform
+      // fences below are. The ONE update any identity may make is the
+      // undo-restore flip (committer, effective version, the
+      // supersededSeq key alone); §9.8's exemption holds: an effective
+      // version may be DELETED by no identity, inside a restore or out.
+      match /versions/{version} {
+        allow read: if isViewer();
+        allow create: if isFabricCommitter()
+          || (isFullMember()
+              && request.resource.data.ownerUid == request.auth.uid
+              && simCityOwner(request.resource.data.cityId)
+              && request.resource.data.effectiveSeq == null
+              && request.resource.data.supersededSeq == null
+              && (request.resource.data.version
+                    == get(/databases/$(database)/documents/sim_mandates/$(mandateId)).data.currentVersion + 1
+                  || request.resource.data.version
+                    == get(/databases/$(database)/documents/sim_mandates/$(mandateId)).data.currentVersion)
+              && request.resource.data.scopeFreeform is string
+              && request.resource.data.scopeFreeform.size() <= 4000
+              && request.resource.data.responseStyle is string
+              && request.resource.data.responseStyle.size() <= 4000
+              && (request.resource.data.caps.perActionRubars == null
+                  || (request.resource.data.caps.perActionRubars is int && request.resource.data.caps.perActionRubars >= 0))
+              && (request.resource.data.caps.perWakeRubars == null
+                  || (request.resource.data.caps.perWakeRubars is int && request.resource.data.caps.perWakeRubars >= 0))
+              && (request.resource.data.caps.maxResolutionsPerWake == null
+                  || (request.resource.data.caps.maxResolutionsPerWake is int && request.resource.data.caps.maxResolutionsPerWake >= 0)));
+        allow update: if isFabricCommitter()
+          && resource.data.effectiveSeq != null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['supersededSeq']);
+        allow delete: if resource.data.effectiveSeq == null
+          && ((isFullMember() && resource.data.ownerUid == request.auth.uid) || isFabricCommitter());
+      }
+    }
+
+    // §9.4 Task envelopes: the spawn is a member write (it is advice-
+    // seeking, not authority); everything after spawn — claim, run,
+    // outcome — is the fabric's. Spawn fences: requester == caller,
+    // born QUEUED with no claim/run/output/outcome, mayCommit false
+    // (the envelope's own shape already refuses commitment), the task
+    // text cap, and the NPC/mandate linkage cross-checks.
+    match /sim_task_envelopes/{taskId} {
+      allow read: if isFabricService() || envelopeReadable(resource.data);
+      allow create: if isFabricCommitter()
+        || (isFullMember()
+            && request.resource.data.requestingMemberId == request.auth.uid
+            && request.resource.data.status == 'QUEUED'
+            && request.resource.data.claim == null
+            && request.resource.data.run == null
+            && request.resource.data.outputId == null
+            && request.resource.data.logOutcomeSeq == null
+            && request.resource.data.failure == null
+            && request.resource.data.bounds is map
+            && request.resource.data.bounds.mayCommit == false
+            && request.resource.data.task is string
+            && request.resource.data.task.size() <= 8000
+            && envelopeLinksOk(request.resource.data));
+      allow update: if isFabricCommitter();
+      // §9.4/§9.8: members never delete; the committer's undo path does.
+      allow delete: if isFabricCommitter();
+    }
+
+    // §9.5 Task outputs: created by the fabric alone and IMMUTABLE
+    // forever — no update or delete for any identity (§9.8: undo
+    // never rewrites an output).
+    match /sim_task_outputs/{taskId} {
+      allow read: if isFabricService() || taskOutputReadable(taskId, resource.data);
+      allow create: if isFabricCommitter();
+      allow update, delete: if false;
+    }
+
+    // §9.6 Situations: the fabric mints them; the read audience is the
+    // recipient and the audience city's owners (plus admins). The one
+    // member write is the handling decision: while the situation is
+    // open, an audience member may write ONLY the handling fields —
+    // never the status (closure is the fabric's, on the outcome).
+    match /sim_situations/{situationId} {
+      allow read: if isFabricService()
+        || isAdmin()
+        || (isFullMember() && resource.data.get('recipientUid', '') == request.auth.uid)
+        || (isFullMember()
+            && resource.data.get('audienceCityId', null) != null
+            && ownsListedCity(resource.data.get('audienceCityId', '')));
+      allow create: if isFabricCommitter();
+      allow update: if isFabricCommitter()
+        || (isFullMember()
+            && resource.data.status == 'open'
+            && request.resource.data.status == resource.data.status
+            && (resource.data.get('recipientUid', '') == request.auth.uid
+                || (resource.data.get('audienceCityId', null) != null
+                    && ownsListedCity(resource.data.get('audienceCityId', ''))))
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['handling', 'updatedAt'])
+            && request.resource.data.handling.decidedByUid == request.auth.uid
+            && request.resource.data.handling.mode in ['self', 'delegated', 'silent']);
+      // §9.8: situations an unwound event created are committer-erasable.
+      allow delete: if isFabricCommitter();
+    }
+
+    // §9.7 Delegation rules: AUTHOR-private reads (the P5-D4 contrast
+    // with mandates — your automation posture is yours; a city co-owner
+    // and admins also read). Authoring mirrors mandates: a pending
+    // root for the author's own city; versions author-pending; the
+    // committer makes them effective. The handler fences live in
+    // delegationHandlerOk above.
+    match /sim_delegation_rules/{ruleId} {
+      allow read: if isFabricService()
+        || isAdmin()
+        || (isFullMember() && resource.data.ownerUid == request.auth.uid)
+        || (isFullMember() && ownsListedCity(resource.data.cityId));
+      allow create: if isFabricCommitter()
+        || (isFullMember()
+            && request.resource.data.ownerUid == request.auth.uid
+            && simCityOwner(request.resource.data.cityId)
+            && request.resource.data.status == 'pending'
+            && request.resource.data.effectiveSeq == null
+            && delegationHandlerOk(request.resource.data));
+      allow update: if isFabricCommitter();
+      allow delete: if isFabricCommitter();
+
+      match /versions/{version} {
+        allow read: if isFabricService()
+          || isAdmin()
+          || (isFullMember()
+              && get(/databases/$(database)/documents/sim_delegation_rules/$(ruleId)).data.ownerUid == request.auth.uid)
+          || (isFullMember()
+              && ownsListedCity(get(/databases/$(database)/documents/sim_delegation_rules/$(ruleId)).data.cityId));
+        allow create: if isFabricCommitter()
+          || (isFullMember()
+              && request.resource.data.ownerUid == request.auth.uid
+              && simCityOwner(request.resource.data.cityId)
+              && request.resource.data.effectiveSeq == null
+              && (request.resource.data.version
+                    == get(/databases/$(database)/documents/sim_delegation_rules/$(ruleId)).data.version + 1
+                  || request.resource.data.version
+                    == get(/databases/$(database)/documents/sim_delegation_rules/$(ruleId)).data.version)
+              && delegationHandlerOk(request.resource.data));
+        // Mirrors §9.3: the undo-restore flip is the only update, and
+        // an effective version is deletable by no identity (§9.8).
+        allow update: if isFabricCommitter()
+          && resource.data.effectiveSeq != null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['supersededSeq']);
+        allow delete: if resource.data.effectiveSeq == null
+          && ((isFullMember() && resource.data.ownerUid == request.auth.uid) || isFabricCommitter());
+      }
+    }
   }
 }

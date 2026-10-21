@@ -348,6 +348,81 @@
         { "fieldPath": "corporationId", "order": "ASCENDING" },
         { "fieldPath": "seq", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "sim_task_envelopes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "availableAt", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_task_envelopes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "claim.leaseExpiresAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_task_envelopes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "requestingMemberId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_situations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "audienceCityId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_situations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "recipientUid", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_situations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "dedupeKey", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_npcs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cityId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_npcs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerUid", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "sim_pending_consequences",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "needsAttention", "order": "ASCENDING" },
+        { "fieldPath": "attentionSituationId", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -394,6 +469,26 @@
     {
       "collectionGroup": "sim_log_entries",
       "fieldPath": "stateHeadsAfter",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_task_envelopes",
+      "fieldPath": "task",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_task_envelopes",
+      "fieldPath": "bounds",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_task_outputs",
+      "fieldPath": "structuredOutput",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sim_situations",
+      "fieldPath": "detail",
       "indexes": []
     }
   ]

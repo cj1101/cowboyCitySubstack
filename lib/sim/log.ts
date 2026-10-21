@@ -19,7 +19,7 @@
 
 import { sha256Hex } from "./canonical";
 import { computeLogEntryHash as computeLogEntryHashV1 } from "./template";
-import type { LogEntryDraft } from "./state";
+import type { LogEntryDraft, SimActor } from "./state";
 
 export const HASH_VERSION_V2 = "cowboy-canonical-json-v2";
 
@@ -155,6 +155,27 @@ export interface EntryAllocation {
   stateHeadsAfter?: { path: string; afterHash: string; stateVersion: number | null }[];
 }
 
+/**
+ * The stored form of an entry's actor (Phase 5, P5-K13 hash discipline):
+ * the additive `characterId` field is stored ONLY when it carries a
+ * value. Absent ≡ null in canonical form (decisions record P5-K13):
+ * entries minted before Phase 5 lack the key, a null would add a key
+ * their hashes never had, and the v2 hashed field list is unchanged —
+ * so an actor that is not acting in character stores byte-identically
+ * to its pre-Phase-5 form. Every other key passes through untouched;
+ * no builder that exists today emits the key at all, which makes this
+ * a no-op for every landed path (the regression battery proves it).
+ */
+export function entryActorForm(actor: SimActor): SimActor {
+  if (actor.characterId === null || actor.characterId === undefined) {
+    if (!("characterId" in actor)) return actor;
+    const copy: SimActor = { ...actor };
+    delete copy.characterId;
+    return copy;
+  }
+  return actor;
+}
+
 export function buildLogEntry(
   draft: LogEntryDraft,
   alloc: EntryAllocation
@@ -167,7 +188,7 @@ export function buildLogEntry(
     kind: draft.kind,
     resolvedAt: alloc.resolvedAt,
     rulesVersion: alloc.rulesVersion,
-    actor: draft.actor,
+    actor: entryActorForm(draft.actor),
     actionId: draft.actionId,
     actionText: draft.actionText,
     classification: draft.classification,
