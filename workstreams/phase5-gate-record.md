@@ -1107,3 +1107,117 @@ the fire entry for the first time; then N5 (now citation-bearing),
 N7 trigger candidacy, N9(b) `DEPENDENTS_EXIST` as before.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 7, 2026-10-21.*
+
+---
+
+## PR #45 CI fix round 8 — §3.2 trigger citation missing on standing NPC entries
+
+**Evidence (round-7 run, remote head `8efa9c2`).** Install + Rules +
+Vercel GREEN. Sim core: N0–N3 pass; N4 passes :751 (round 6) AND
+:803 (round 7); the stop is N4's `verifyOk()`
+(`tests/npc-core.test.ts:312`, invoked at :825): the standing
+verifier returns EXACTLY two findings —
+**`NPC_TRACE_TRIGGER_MISSING` at seq 13 and seq 14** ("npc entry
+carries no classification.trigger citation — an orphan (§3.2)").
+Log: `pr45-simcore-log-r7.txt`.
+
+**Seq identification (from the builders, not assumed).** Genesis =
+seq 1 (N0 asserts `headSeq() == 1`); N1–N3 bring the head to 11 —
+the suite itself proves this: it seeds the N4 card with
+`createdSeq = await headSeq()` = 11. N4's owner
+`situation.handle` touch is a single member-actor summary
+(seq 12). The wake's delegation pass then produces exactly three
+NPC-actor entries, in order: the delegation **FIRE entry**
+(seq 13), the delegated action's **rule-effect DETAIL entry**
+(seq 14), and its **summary** (seq 15). `fixture_adjust`'s handler
+emits detail + summary; only the summary carried a citation, so
+exactly {13, 14} flag — matching the evidence uniquely.
+
+**The seam.** The verifier's traceability (c) reads
+`classification.trigger` on EVERY standing entry whose actor is an
+NPC — no kind/status exemption, rejected entries included. Round 6
+put the citation on the delegated ACTION (so the stage's check 5
+passes); round 7 put the mandate on the fire entry's ACTOR. But
+the ENTRY classifications were stamped at most once per resolution
+(the summary) or never. This round swept every producer of an
+NPC-actor Log entry and fixed the whole class at the producers;
+every stamp is the citation the producer/stage actually verified,
+never a reconstructed guess.
+
+**Producer audit (complete sweep).**
+
+| Producer | Actor | Verdict |
+|---|---|---|
+| `buildRuleFireEntry` (delegation.ts) | NPC standing | **GAP — seq 13.** Classification had no `trigger`. Fixed: the §3.2 situation citation `{kind:"situation", sourceId, sourceSeq: situation.createdSeq, deliberation: null}` — the same citation the delegated action carries. |
+| Delegated-action resolutions via `stampMandateCitation` (authorityStage.ts) | NPC standing | **GAP — seq 14.** Stamped the summary ONLY; multi-entry handler plans (fixture_adjust, chains, finance, …) left every detail entry orphaned. Fixed: the stamp now lands on EVERY entry of the resolution (each entry's own classification keys preserved). |
+| Stage verdict plans — escalate / draft-only / blocked-fairness | NPC standing | CLEAR (already carried `mandateId`/`mandateVersion`/`trigger: triggerClassification(stage)`). |
+| Stage REJECT plan (planForStageVerdict) | NPC standing | **GAP.** Classification carried no mandate keys, no trigger. Fixed for parity: `mandateId` + `mandateVersion` + `trigger: triggerClassification(stage)`. Residual named below. |
+| Stage SILENCE verdict plan | NPC standing | **GAP.** `trigger: {sourceKind, …}` — no `kind` key, read as missing. Fixed: `trigger: triggerClassification(stage)`. |
+| `buildSilenceCommit` (situations.ts) — wake silence pass, silence-rule fires, `situation.silence` | NPC for `npc-silent-mode`/`silence-rule` (member for owner-explicit/no-permission) | **GAP** (inherited by the stage mirror above). Same wrong shape: the SITUATION's source kind (e.g. `"manual-action"`) under `sourceKind`. Fixed: entry-vocab citation `{kind:"situation", sourceId: situationId, sourceSeq: triggerSeq, deliberation: null}`, where `triggerSeq` is the seq the entry's own summary text already cites. No other reader of the old shape exists (grep over lib/tests/app/components). N7 exercises this next. |
+| `buildEnvelopeOutcomeEntryDraft` (envelopes/lifecycle.ts) | NPC envelope | **GAP.** No `trigger`. Fixed: `{kind:"envelope", sourceId: env.taskId, sourceSeq: env.createdSeq ?? null, deliberation: null}` — mirroring `entryTriggerOf`'s envelope fallback. N5/N6 exercise this next. |
+| Attention conversion entry (`resolveAttentionStep`, wakeSteps.ts) | pending's `originActor` — **can be an NPC** | **CONDITIONAL GAP.** Classification had no trigger. Fixed: when the entry actor is an NPC, stamp `{kind:"log-event", sourceId: pendingId, sourceSeq: pending.originSeq, deliberation: null}`. Member-origin conversions keep their landed shape byte-identical. |
+| Ripening + voiding entries (`resolveRipening`/`resolveVoiding`, resolver.ts — R-33/R-34/R-32/cap/summary drafts; delivery + schedule family plans) | pending's `originActor` — **can be an NPC** (incl. banking occasion entries via the schedule path) | **GAP of the class.** Classifications null or family-shaped. Fixed at one choke point (`stampOriginActorTrigger`, applied in all three ripening branches + voiding, before validatePlan): NPC-actor entries lacking a trigger gain `{kind:"log-event", sourceId: pendingId, sourceSeq: originSeq, deliberation: null}` — the origin event, the same seq these entries already cite as `causedBySeq` (standing: voiding here is the ripeness verdict's own event, not an undo erasure). Member/system origins untouched. |
+| Committer `writeSetTooLargePlan` fallback | the attempted action's actor — can be an NPC | **CONDITIONAL GAP.** The fallback rebuilt the rejection entry from the raw action, stripping the stage's stamp. Fixed: the attempted plan summary's stamped `mandate` + `trigger` carry over verbatim when present. No dedicated pin (driving a >ceiling NPC plan is disproportionate); fixed by construction. |
+| `buildDelegationEvaluationEntry` (delegation.ts) | MEMBER (rule owner, §5.5 audit pattern) | CLEAR — not an NPC entry. |
+| Trigger-pass entries (`resolveTriggerStep`) | MEMBER (owner) | CLEAR — and carry a situation trigger anyway. |
+| Follow-up entries (`resolveSituationFollowupStep`), envelope-failure entry, claim pass | MEMBER | CLEAR. Envelope claims write no entry (doc transition only). |
+| Governance handlers (`npc.*`, `situation.*`, `envelope.spawn`) | MEMBER (owner-submitted) | CLEAR. NPC governance kinds are member actions; the spawn summary's actor is the submitter. |
+| Phase 4 data step / snapshot refresh / genesis | — / system | CLEAR — no NPC-actor entries (data step writes none by design). |
+| `wakePasses.ts` executor | — | CLEAR — writes no entry drafts; commits resolver/step plans only. |
+
+**Named residuals (recorded, not silently resolved).** (1) A
+genuinely triggerless NPC attempt (`NO_TRIGGER_ROOT`) now stamps
+the defaulted citation `{kind:"log-event", sourceSeq: null}` on its
+rejection entry; if such an entry ever stood, the verifier would
+flag it `NPC_TRACE_TRIGGER_UNRESOLVABLE` instead of MISSING. No
+landed path produces one: the wake executor stamps every delegated
+action (round 6), envelope executions root at the envelope
+(`entryTriggerOf` fallback), and clients cannot submit NPC actors
+(intake fences actor forms). Defense-in-depth only. (2) Ripening
+traceability (a)/(b) under NPC origin actors: (b)'s `usedBefore`
+re-citation is the verifier's designed mechanism and W25 exercises
+it across five citing resolutions cleanly; (a)'s active-window
+reading (an NPC retired before its pending ripens) is a
+verifier-design question for Vera, not a producer gap — untouched
+this round, and no landed suite exercises an NPC-origin ripening
+in the emulator venue yet.
+
+**The pin (W25, new — wake harness 24 → 25).** One check drives
+the real producers for five of the fixes and asserts their
+standing entries through the REAL verifier: the fire entry via
+`evaluateDelegationStep`; EVERY entry of the delegated
+`fixture_adjust` resolution via `buildDelegatedActionDoc` →
+`resolveAction` (mandate + trigger on detail and summary alike);
+the silence commit via `buildSilenceCommit`; the envelope outcome
+entry via the real terminal step; a determinate ripening under an
+NPC origin actor via `resolveRipening` — plus producer-level
+assertions for the stage's silence verdict (silent-mode world),
+the stage's reject plan (round 6's unstamped shape), and an
+NPC-origin attention conversion. The five produced entry sets are
+assembled into a standing world (genesis + member seed entries at
+the cited seqs) and `verifyStandingLog` returns **zero
+`NPC_TRACE_*` findings**; falsifiability halves strip the fire
+entry's and the detail entry's citations and the verifier flags
+`NPC_TRACE_TRIGGER_MISSING` at exactly seqs 7 and 8 of the
+assembly. The assertion scope is the §3.2 family per the round's
+brief — the synthetic assembly's empty manifest write sets are not
+the bijection's subject; the emulator suite's `verifyOk` runs the
+full verifier over committed worlds. One existing expectation was
+updated: the governance harness's stage-silence check asserted the
+pre-fix `{sourceKind, …}` trigger shape — it now asserts the
+entry vocabulary (`kind`/`sourceId`/`sourceSeq`); no count
+changed (governance stays 59).
+
+**Local regression (branch tip after this round):** `tsc --noEmit`
+clean · scoped ESLint on the nine touched files 0 errors · full
+pure battery green (governance 59, banking 54, situations 32, wake
+**25** incl. the new W25, closeout 29, chains 34, cat2 34, cat1
+all, defense 12, acq 14, market 27, lore 27; npc-core harness 37,
+authority + envelopes harnesses all-pass) · `next build` green. No
+gate-suite assertion was touched. Emulator suites are CI's venue
+on this push; watch items: N4 completes through `verifyOk()`; N5
+(envelope outcome entry now cited; same-wake claim parity), N7
+(silence entries now entry-vocab; trigger candidacy), N8, N9(b)
+`DEPENDENTS_EXIST` as before.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 8, 2026-10-21.*
