@@ -1517,3 +1517,446 @@ function settleMemberExecutions(args: {
   });
   return { ok: true, settled };
 }
+
+// ---------------------------------------------------------------------------
+// The standing float offer (custody, P4-K21): the founder's committed
+// float IS this resting limit sell. Placing/growing it moves no
+// shares — it commits shares already in the founder's holding.
+// ---------------------------------------------------------------------------
+
+function placeOrGrowFloatOffer(args: {
+  plan: ResolutionPlan;
+  snapshot: SimSnapshot;
+  acc: ChangeAcc;
+  corporationId: string;
+  homeCityId: string;
+  founderMemberId: string;
+  addQuantity: number;
+  priceRubars: number | null;
+  seq: number;
+  resolutionId: string;
+  now: Date;
+  formula: string;
+}): void {
+  const orderId = floatOfferOrderId(args.corporationId);
+  const existing = plannedDoc(args.plan, args.snapshot, orderPath(orderId));
+  if (existing && existing.status === "resting") {
+    const patch: Partial<MarketOrderRecord> = {
+      quantityShares: intOr(existing, "quantityShares", 0) + args.addQuantity,
+      originalQuantityShares: intOr(existing, "originalQuantityShares", 0) + args.addQuantity,
+    };
+    if (args.priceRubars !== null) patch.limitPriceRubars = args.priceRubars;
+    patchOrder(args.plan, args.snapshot, args.acc, orderId, patch, args.formula);
+    return;
+  }
+  const doc = buildOrderDoc({
+    orderId,
+    corporationId: args.corporationId,
+    homeCityId: args.homeCityId,
+    memberId: args.founderMemberId,
+    side: "sell",
+    type: "limit",
+    kind: "float-offer",
+    quantityShares: args.addQuantity,
+    limitPriceRubars: args.priceRubars,
+    placedAtSeq: args.seq,
+    expiresAtSeq: null,
+    sourceActionId: args.resolutionId,
+    lastResolutionId: args.resolutionId,
+    now: args.now,
+  });
+  planWrite(args.plan, args.snapshot, orderPath(orderId), doc, "state", [
+    "quantityShares",
+    "limitPriceRubars",
+    "status",
+  ]);
+  accChange(args.acc, null, orderField(orderId, "quantityShares"), null, args.addQuantity, args.formula);
+  accChange(args.acc, null, orderField(orderId, "status"), null, "resting", args.formula);
+}
+
+// ---------------------------------------------------------------------------
+// M-00 — found the Market Account (genesis-class founding act).
+// ---------------------------------------------------------------------------
+
+function foundMarketAccountHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-00";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId) {
+    return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "M-00: the Market Account's founding act is confirmed by a named member (the operator's act, run as the exchange's data step).");
+  }
+  if (snapshotDoc(ctx.snapshot, MARKET_ACCOUNT_PATH)) {
+    return rejectedPlan(descriptorId, "market-already-founded", [descriptorId], "M-00: the Market Account already stands — it is founded exactly once, and its seed is never re-minted.");
+  }
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const now = new Date(ctx.snapshot.now);
+  const doc = buildMarketAccountDoc({
+    seedRubars: MARKET_ACCOUNT_SEED_RUBARS,
+    seededAtSeq: seq,
+    lastResolutionId: ctx.resolutionId,
+    now,
+  });
+  planWrite(plan, ctx.snapshot, MARKET_ACCOUNT_PATH, doc, "state", [
+    "cashRubars",
+    "seedRubars",
+    "status",
+    "seedRuleId",
+  ]);
+  plan.entries.push(
+    ruleEffectDraft({
+      kind: "genesis",
+      actor: ctx.action.actor,
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange(
+          "marketAccount.cashRubars",
+          null,
+          MARKET_ACCOUNT_SEED_RUBARS,
+          "M-00 founding seed (mint, finance §3.3 closed list — the Market Account seed joins it with this act)"
+        ),
+        fieldChange("mint:M-00", 0, MARKET_ACCOUNT_SEED_RUBARS, "mint leg — Market Account seed"),
+      ],
+      recordsCreated: [MARKET_ACCOUNT_PATH],
+      summaryText: `M-00: the Market Account is founded at sim_market_account/main with a seed of ${MARKET_ACCOUNT_SEED_RUBARS} R (mint under finance §3.3's closed list). The account is the exchange operator's float ledger (fees, §1.7 custody): it holds no shares, takes no positions, and moves only by published rule. Until this act stands, market money lines fail and trade handlers reject market-account-missing — the account is never lazy-invented inside a trade.`,
+    })
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "found-market-account",
+    scope: "market",
+    cityId: null,
+    summaryText: `Founded the Market Account with its ${MARKET_ACCOUNT_SEED_RUBARS} R seed (M-00, genesis-class).`,
+    major: true,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M-01 — list a company. Two branches:
+//  (a) completion: a corporation Catalogue II's listed founding left
+//      flagged `listed` with founding figures standing but no listing
+//      record and/or no founder holding (the PR #33 backfill
+//      obligation) — the repair is exactly the founder-holding
+//      backfill planner's output, executed as the owner's act.
+//  (b) full listing of an unlisted company (§2.2 eligibility): paid-in
+//      capital moves, shares issue to the founder, the opening price
+//      is computed by the M-06 input assembly + formula with no prior
+//      price (the step cap cannot bind a first price), judgment from
+//      the prepared payload only.
+// ---------------------------------------------------------------------------
+
+function listCompanyHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "M-01";
+  const npc = rejectNpc(ctx, descriptorId);
+  if (npc) return npc;
+  const actorId = actorMemberId(ctx.action.actor);
+  if (!actorId) {
+    return rejectedPlan(descriptorId, "not-a-member", [descriptorId], "M-01: the actor carries no member identity — a listing is its owner member's act.");
+  }
+  const corporationId = stringField(ctx.action, "corporationId");
+  const homeCityId = stringField(ctx.action, "homeCityId");
+  if (!corporationId || !homeCityId) {
+    return rejectedPlan(descriptorId, "malformed-listing", [descriptorId], "M-01: list_company requires corporationId and homeCityId (the record's home).");
+  }
+  const corpPath = corporationPath(homeCityId, corporationId);
+  const corp = snapshotDoc(ctx.snapshot, corpPath);
+  if (!corp) {
+    return rejectedPlan(descriptorId, "company-not-found", [descriptorId], `M-01: no corporation record for ${corporationId} in ${homeCityId}.`);
+  }
+  if (corp.status === "dissolved") {
+    return rejectedPlan(descriptorId, "company-dissolved", [descriptorId], `M-01: ${corporationId} is dissolved — a dissolved company cannot list.`);
+  }
+  const ownerGate = requireOwner(ctx, descriptorId, corp, corporationId);
+  if (isPlan(ownerGate)) return ownerGate;
+  const ownerId = ownerGate;
+  const listing = readListing(ctx.snapshot, corporationId);
+  if (listing) {
+    return rejectedPlan(descriptorId, "already-listed", [descriptorId], `M-01: ${corporationId} already has a standing listing record — listing is a once-only act (delisting is M-10).`);
+  }
+
+  const plan = emptyPlan(descriptorId);
+  const seq = ctx.snapshot.counterHead.lastSeq + 1;
+  const now = new Date(ctx.snapshot.now);
+  const acc: ChangeAcc = new Map();
+
+  // ---- Branch (a): completion of a founding-listed corporation. ----
+  if (corp.listed === true) {
+    const opening = num(corp, "openingReferencePriceRubars");
+    if (opening === null || !Number.isInteger(opening) || opening <= 0) {
+      return rejectedPlan(descriptorId, "opening-price-missing", [descriptorId], `M-01: ${corporationId} is flagged listed at founding but no openingReferencePriceRubars stands on its record — the completion branch repairs records from founding figures and invents no price. The figure must be restored by the correction path (M-11) before listing can complete.`);
+    }
+    const live = liveShares(corp);
+    if (live <= 0) {
+      return rejectedPlan(descriptorId, "no-shares-issued", [descriptorId], `M-01: ${corporationId} is flagged listed but no live shares stand on its record — there is nothing to hold or trade.`);
+    }
+    const standing = readHolding(ctx.snapshot, ownerId, corporationId);
+    const standingQty = standing ? standing.quantityShares : 0;
+    if (standingQty > live) {
+      return rejectedPlan(descriptorId, "share-ledger-inconsistent", [descriptorId], `M-01: the founder holding for ${corporationId} stands at ${standingQty} shares against ${live} live shares — the records disagree and the market halts rather than papers over it (§1.8 ledger-inconsistency posture; remedy is the correction path, M-11).`);
+    }
+    const floatShares = nonNegativeAmount(ctx.action, "floatShares") ?? 0;
+    if (floatShares > live) {
+      return rejectedPlan(descriptorId, "float-exceeds-issued", [descriptorId], `M-01: float ${floatShares} exceeds the ${live} live shares of ${corporationId}.`);
+    }
+    const shortfall = live - standingQty;
+    const listingDoc = buildListingDoc({
+      corporationId,
+      homeCityId,
+      ownerMemberId: ownerId,
+      openingPriceRubars: opening,
+      committedFloatShares: floatShares,
+      listedAtSeq: seq,
+      sourceActionId: ctx.action.actionId,
+      lastResolutionId: ctx.resolutionId,
+      now,
+    });
+    planWrite(plan, ctx.snapshot, listingPath(corporationId), listingDoc, "state", [
+      "referencePriceRubars",
+      "officialPriceRubars",
+      "tradingStatus",
+      "committedFloatShares",
+    ]);
+    accChange(acc, null, listingField(corporationId, "referencePriceRubars"), null, opening, "M-01 completion: the listing record takes the founding opening reference price from the corporation record");
+    accChange(acc, null, listingField(corporationId, "officialPriceRubars"), null, opening, "M-01 completion: official = reference until a trade prints (§4.1)");
+    if (shortfall > 0 || floatShares > 0) {
+      mutateHolding(plan, ctx.snapshot, acc, {
+        memberId: ownerId,
+        corporationId,
+        homeCityId,
+        deltaQuantity: shortfall,
+        deltaCommitted: floatShares,
+        deltaCostBasis: standing ? 0 : intOr(corp, "paidInCapitalRubars", 0),
+        create: true,
+        seq,
+        resolutionId: ctx.resolutionId,
+        now,
+        formula: "M-01 completion (M-02 obligation): the founder holding is created for exactly the founding shortfall — the backfill planner's repair figures",
+      });
+    }
+    if (floatShares > 0) {
+      placeOrGrowFloatOffer({
+        plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+        founderMemberId: ownerId, addQuantity: floatShares, priceRubars: opening,
+        seq, resolutionId: ctx.resolutionId, now,
+        formula: "M-01 completion: the founder's float is offered as the standing float-offer order at the opening price (custody, P4-K21)",
+      });
+    }
+    const anchorNote = maybeAnchorIndexDivisor(plan, ctx.snapshot, acc, corporationId);
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: null,
+        cityIds: [],
+        ruleIds: [descriptorId],
+        changes: accChangesFor(acc, null),
+        recordsCreated: [
+          listingPath(corporationId),
+          ...(shortfall > 0 || floatShares > 0 ? [holdingPath(ownerId, corporationId)] : []),
+          ...(floatShares > 0 ? [orderPath(floatOfferOrderId(corporationId))] : []),
+        ],
+        summaryText: `M-01 completion for ${corporationId}: the corporation was listed at founding (R-06) before market records existed; this act creates the listing record at the founding opening price ${opening} R and the founder holding for the planner's exact shortfall (${standingQty} standing of ${live} live shares; ${shortfall} created now, cost basis = paid-in capital ${intOr(corp, "paidInCapitalRubars", 0)} R on a fresh holding). Float committed: ${floatShares} shares as the standing float offer. No new judgment, no repricing — founding figures stand as recorded.${anchorNote ? ` ${anchorNote}` : ""}`,
+      })
+    );
+    pruneRecordClaims(plan);
+    return finishPlan(plan, ctx, {
+      ruleId: descriptorId,
+      verb: "list-company",
+      scope: "company",
+      cityId: homeCityId,
+      summaryText: `Completed the listing of ${corporationId} from its founding figures: listing record and founder holding now stand (${live} live shares, opening ${opening} R, float ${floatShares}).`,
+      major: true,
+      extraClassification: { listing: { branch: "completion", openingPriceRubars: opening, liveShares: live, floatShares } },
+    });
+  }
+
+  // ---- Branch (b): full listing of an unlisted company (§2.2). ----
+  if (corp.status !== "active") {
+    return rejectedPlan(descriptorId, "company-not-active", [descriptorId], `M-01: ${corporationId} stands "${String(corp.status)}" — §2.2 eligibility requires status "active".`);
+  }
+  if (!snapshotDoc(ctx.snapshot, cityPath(homeCityId))) {
+    return rejectedPlan(descriptorId, "city-not-found", [descriptorId], `M-01: no city record for the home city ${homeCityId} — an unclaimed/inactive city has no sim presence and can host no listing (§2.2).`);
+  }
+  const fundingSource = stringField(ctx.action, "fundingSource") ?? "personal";
+  if (fundingSource === "treasury") {
+    return rejectedPlan(descriptorId, "treasury-source-suspended", [descriptorId, "P4-K21"], "M-01: paid-in capital sourced from a city treasury is suspended in Phase 4 (P4-K21(ii)) — listing capital is the founder's personal funds in this slice.");
+  }
+  if (fundingSource !== "personal") {
+    return rejectedPlan(descriptorId, "malformed-listing", [descriptorId], `M-01: fundingSource "${fundingSource}" is not a lawful paid-in capital source (personal is the Phase 4 source).`);
+  }
+  if (issuedShares(corp) > 0) {
+    return rejectedPlan(descriptorId, "shares-already-issued", [descriptorId], `M-01: ${corporationId} already carries ${issuedShares(corp)} issued shares while unlisted — an anomalous record state; issuance belongs to listed companies (M-02) and founding (R-06).`);
+  }
+  const paidIn = nonNegativeAmount(ctx.action, "paidInCapitalRubars");
+  const sharesIssued = positiveAmount(ctx.action, "sharesIssued");
+  if (paidIn === null || sharesIssued === null) {
+    return rejectedPlan(descriptorId, "malformed-listing", [descriptorId], "M-01: a full listing states paidInCapitalRubars (≥ 0; capital may already stand on the record) and sharesIssued (> 0) — the opening price derives from them (§4.2).");
+  }
+  const floatShares = nonNegativeAmount(ctx.action, "floatShares") ?? 0;
+  if (floatShares > sharesIssued) {
+    return rejectedPlan(descriptorId, "float-exceeds-issued", [descriptorId], `M-01: float ${floatShares} exceeds the ${sharesIssued} shares to issue.`);
+  }
+  const judgment = judgmentFromPrepared(ctx);
+  if (!judgment) {
+    return rejectedPlan(descriptorId, "judgment-required", [descriptorId], "M-01: a listing prices from the market's judgment (quality / scale / importance scores), which arrives only in the worker-prepared payload bound at preview. The action carries no lawful judgment — the founder never supplies the judgment of their own company — so the listing cannot resolve.");
+  }
+
+  // Step 0 (§1.4): the founder's account lazy-opens before the capital
+  // line, the grant ordered first.
+  composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: ownerId, viaActionKind: "list_company" });
+  if (paidIn > 0) {
+    const line: TransferLine = {
+      from: personalRef(ownerId),
+      to: companyRef(homeCityId, corporationId),
+      amountRubars: paidIn,
+      ruleId: descriptorId,
+      memo: `paid-in capital at listing of ${corporationId}`,
+    };
+    const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+    if (!applied.ok) {
+      return rejectedPlan(
+        descriptorId,
+        applied.code === "INSUFFICIENT_FUNDS" ? "insufficient-funds" : applied.code.toLowerCase().replace(/_/g, "-"),
+        [descriptorId],
+        `M-01: the paid-in capital of ${paidIn} R refused in full (transfer class): ${applied.message}`
+      );
+    }
+    pushMovementEntries(plan, ctx, [descriptorId], applied.changes, (entryCityId) =>
+      entryCityId === null
+        ? `M-01: ${ownerId}'s personal account paid ${paidIn} R of paid-in capital into ${corporationId} (funding source: founder's personal account, recorded distinctly).`
+        : `M-01: ${corporationId}'s company cash received ${paidIn} R of paid-in capital at listing.`
+    );
+  }
+
+  // Record the issuance on the corporation record, then price the
+  // opening from the M-06 coded inputs over the PLANNED record (post
+  // capital) — one valuation path for founding and later listings.
+  setField(plan, ctx.snapshot, acc, {
+    path: corpPath, docField: "listed", entryCityId: homeCityId,
+    field: corpField(corporationId, "listed"), value: true,
+    formula: "M-01: the company lists in this event",
+  });
+  setField(plan, ctx.snapshot, acc, {
+    path: corpPath, docField: "sharesOutstanding", entryCityId: homeCityId,
+    field: corpField(corporationId, "sharesOutstanding"), value: sharesIssued,
+    formula: "M-01: shares issued at listing, all to the founder (§4.2)",
+  });
+  setField(plan, ctx.snapshot, acc, {
+    path: corpPath, docField: "paidInCapitalRubars", entryCityId: homeCityId,
+    field: corpField(corporationId, "paidInCapitalRubars"),
+    value: intOr(corp, "paidInCapitalRubars", 0) + paidIn,
+    formula: "M-01: paid-in capital accumulates the listing payment",
+  });
+  const plannedCorp = plannedDoc(plan, ctx.snapshot, corpPath) ?? corp;
+  const { inputs, notes: inputNotes } = assembleCodedInputs(plan, ctx.snapshot, plannedCorp, homeCityId);
+  if (inputs.companyCashRubars + inputs.operatingStructureValueRubars <= 0) {
+    return rejectedPlan(descriptorId, "listing-unpriced", [descriptorId], "M-01: a listing with zero capital and zero operating footprint has nothing to price and is refused (§2.2 check 4) — no opening price is invented. Commit paid-in capital in the action or build an operating footprint first.");
+  }
+  const valuation = computeValuation(inputs, judgment);
+  const opening = applyStepCap(0, valuation.uncappedReferencePriceRubars).appliedPriceRubars;
+  setField(plan, ctx.snapshot, acc, {
+    path: corpPath, docField: "openingReferencePriceRubars", entryCityId: homeCityId,
+    field: corpField(corporationId, "openingReferencePriceRubars"), value: opening,
+    formula: "M-01/§4.2: opening reference price from the §4.4 formula over post-money coded inputs (no prior price — the step cap cannot bind a first price)",
+  });
+  setField(plan, ctx.snapshot, acc, {
+    path: corpPath, docField: "valuationRubars", entryCityId: homeCityId,
+    field: corpField(corporationId, "valuationRubars"), value: opening * sharesIssued,
+    formula: "M-01/§4.1: valuationRubars cache at listing = opening official price × shares issued",
+  });
+  const afterJudgment = {
+    quality: judgment.quality,
+    scale: judgment.scale,
+    importance: judgment.importance,
+    inputHash: ctx.prepared?.inputHash ?? null,
+  };
+  planMutate(plan, ctx.snapshot, corpPath, "state", ["lastJudgment"], (doc) =>
+    doc ? { ...doc, lastJudgment: afterJudgment } : doc
+  );
+  accChange(acc, homeCityId, corpField(corporationId, "lastJudgment"), (corp.lastJudgment as Record<string, unknown> | null) ?? null, afterJudgment, "M-01/§4.5: the listing judgment is recorded as the company's carried scores");
+
+  const listingDoc = buildListingDoc({
+    corporationId,
+    homeCityId,
+    ownerMemberId: ownerId,
+    openingPriceRubars: opening,
+    committedFloatShares: floatShares,
+    listedAtSeq: seq,
+    sourceActionId: ctx.action.actionId,
+    lastResolutionId: ctx.resolutionId,
+    now,
+  });
+  planWrite(plan, ctx.snapshot, listingPath(corporationId), listingDoc, "state", [
+    "referencePriceRubars",
+    "officialPriceRubars",
+    "tradingStatus",
+    "committedFloatShares",
+    "earningsWindowStartSeq",
+  ]);
+  accChange(acc, null, listingField(corporationId, "referencePriceRubars"), null, opening, "M-01: opening reference price (§4.2)");
+  accChange(acc, null, listingField(corporationId, "officialPriceRubars"), null, opening, "M-01: official = reference until a trade prints (§4.1)");
+  mutateHolding(plan, ctx.snapshot, acc, {
+    memberId: ownerId,
+    corporationId,
+    homeCityId,
+    deltaQuantity: sharesIssued,
+    deltaCommitted: floatShares,
+    deltaCostBasis: intOr(plannedCorp, "paidInCapitalRubars", 0),
+    create: true,
+    seq,
+    resolutionId: ctx.resolutionId,
+    now,
+    formula: "M-01: all issued shares to the founder (§4.2); the float portion is committed behind the float offer (custody, P4-K21)",
+  });
+  if (floatShares > 0) {
+    placeOrGrowFloatOffer({
+      plan, snapshot: ctx.snapshot, acc, corporationId, homeCityId,
+      founderMemberId: ownerId, addQuantity: floatShares, priceRubars: opening,
+      seq, resolutionId: ctx.resolutionId, now,
+      formula: "M-01: the founder's float is offered as the standing float-offer order at the opening price",
+    });
+  }
+  const anchorNote = maybeAnchorIndexDivisor(plan, ctx.snapshot, acc, corporationId);
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId, "M-06"],
+      changes: accChangesFor(acc, null),
+      recordsCreated: [
+        listingPath(corporationId),
+        holdingPath(ownerId, corporationId),
+        ...(floatShares > 0 ? [orderPath(floatOfferOrderId(corporationId))] : []),
+      ],
+      summaryText: `M-01 listing of ${corporationId}: opening price ${opening} R/share from the §4.4 formula over coded inputs — companyCash ${inputs.companyCashRubars} R (post-money); operatingStructureValue ${inputs.operatingStructureValueRubars} R; earningsProxy ${inputs.earningsProxyRubars === null ? "skipped: unset" : `${inputs.earningsProxyRubars} R`}; tier ${inputs.legalExposureTier}; downtime ${inputs.downtimeFlag ? "set" : "clear"}; shares ${sharesIssued}. Judgment (prepared payload only): quality ${judgment.quality}, scale ${judgment.scale}, importance ${judgment.importance} — multiplier ${valuation.judgmentMultiplier.toFixed(4)}; rationale: ${judgmentRationaleFromPrepared(ctx) ?? "not supplied with the prepared payload"}. legacyBookRubars is not an input (P4-G6).${inputNotes.length > 0 ? ` Input notes: ${inputNotes.join("; ")}.` : ""}${anchorNote ? ` ${anchorNote}` : ""} ${indexNote(plan, ctx.snapshot)}`,
+    })
+  );
+  const corpChanges = accChangesFor(acc, homeCityId);
+  if (corpChanges.length > 0) {
+    plan.entries.push(
+      ruleEffectDraft({
+        actor: ctx.action.actor,
+        cityId: homeCityId,
+        cityIds: [homeCityId],
+        ruleIds: [descriptorId],
+        changes: corpChanges,
+        recordsUpdated: [corpPath],
+        summaryText: `M-01: ${corporationId} is now listed — ${sharesIssued} shares issued to the founder, paid-in capital stands at ${intOr(plannedCorp, "paidInCapitalRubars", 0)} R, opening reference ${opening} R.`,
+      })
+    );
+  }
+  pruneRecordClaims(plan);
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "list-company",
+    scope: "company",
+    cityId: homeCityId,
+    summaryText: `Listed ${corporationId}: ${sharesIssued} shares issued to the founder at an opening reference of ${opening} R (paid-in ${paidIn} R from the founder's personal account; float ${floatShares} offered).`,
+    major: true,
+    extraClassification: {
+      listing: { branch: "full", openingPriceRubars: opening, sharesIssued, floatShares, judgment: { ...judgment, source: "prepared-payload" } },
+      invokesRules: ["M-06"],
+    },
+  });
+}
