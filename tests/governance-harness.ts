@@ -32,12 +32,15 @@ import assert from "node:assert/strict";
 import {
   collectActionReadPaths,
   collectActionReadPlan,
+  digestQueryResults,
   resolveAction,
   snapshotFromDocs,
 } from "../lib/sim/resolver";
+import { NPC_PERIOD_QUERY_ID } from "../lib/sim/authorityStage";
+import type { SnapshotQueryRecord } from "../lib/sim/state";
 import { buildFixtureBaselineRegistry } from "../lib/sim/baseline/fixtures";
 import { buildActionDoc } from "../lib/sim/intake";
-import { buildLogEntry, computeEntryHash, entryActorForm } from "../lib/sim/log";
+import { buildLogEntry, computeEntryHash, entryActorForm, headHashOf } from "../lib/sim/log";
 import { summaryDraft } from "../lib/sim/rules/planHelpers";
 import {
   ACTION_KIND_INDEX,
@@ -114,8 +117,33 @@ function runAction(
   for (const path of readPlan.paths) {
     if (!snapshotDocs.has(path)) snapshotDocs.set(path, docs.get(path) ?? null);
   }
-  assert.equal(readPlan.queries.length, 0, "governance descriptors declare no collection queries");
-  const snapshot = snapshotFromDocs(snapshotDocs, nowIso);
+  // Governance DESCRIPTORS declare no collection queries; the only
+  // query a governance-adjacent resolution may carry is the authority
+  // stage's period-usage Log query (PR-2), present only for npc actors
+  // citing a mandate. Materialize it from the fixture docs (equality
+  // filters over sim_log_entries) exactly as the dispatcher would.
+  const queryRecords: SnapshotQueryRecord[] = [];
+  for (const spec of readPlan.queries) {
+    assert.equal(spec.id, NPC_PERIOD_QUERY_ID, "only the stage period query may appear");
+    const results: { path: string; doc: Record<string, unknown> }[] = [];
+    for (const [path, doc] of docs) {
+      if (!path.startsWith(`${spec.collectionPath}/`) || doc === null) continue;
+      const matches = spec.filters.every((f) => {
+        const fieldValue = f.field
+          .split(".")
+          .reduce<unknown>((acc, part) => (acc !== null && typeof acc === "object" ? (acc as Record<string, unknown>)[part] : undefined), doc);
+        return fieldValue === f.value;
+      });
+      if (matches) results.push({ path, doc });
+    }
+    for (const r of results) snapshotDocs.set(r.path, r.doc);
+    queryRecords.push({
+      spec,
+      resultPaths: results.map((r) => r.path),
+      digest: digestQueryResults(spec, results.map((r) => ({ path: r.path, hash: headHashOf(r.doc) }))),
+    });
+  }
+  const snapshot = snapshotFromDocs(snapshotDocs, nowIso, queryRecords);
   return resolveAction(snapshot, action, { baselineRegistry: fixtureRegistry, mode: "commit" });
 }
 
@@ -281,7 +309,7 @@ check("a numeric personality is refused with the module's own code", () => {
   assert.equal(plan.rejection?.code, "NUMERIC_PERSONALITY");
 });
 
-check("an NPC actor cannot perform governance (ACTOR_NOT_MEMBER)", () => {
+check("an NPC actor cannot perform governance (stage refuses first, PR-2)", () => {
   const npc = npcActorStanding({
     npcId: "charA1",
     ownerUid: "ownerA",
@@ -291,7 +319,12 @@ check("an NPC actor cannot perform governance (ACTOR_NOT_MEMBER)", () => {
   const action = memberAction(npc as SimActor, "ownerA", "npc.create", CREATE_INPUT, "req-create-8");
   const plan = runAction(worldDocs(), action, NOW_A);
   assert.equal(plan.outcome, "rejected");
-  assert.equal(plan.rejection?.code, "ACTOR_NOT_MEMBER");
+  // PR-2: the authority stage runs before descriptor dispatch for EVERY
+  // npc-actor action, so this fixture (no standing NPC record) is
+  // refused by the stage with NPC_NOT_FOUND. The handler's own
+  // ACTOR_NOT_MEMBER gate still stands behind the stage for an NPC
+  // whose mandate passes.
+  assert.equal(plan.rejection?.code, "NPC_NOT_FOUND");
 });
 
 // ---------------------------------------------------------------------------
