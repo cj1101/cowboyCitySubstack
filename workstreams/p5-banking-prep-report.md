@@ -574,3 +574,412 @@ B-11, DIF founding + premiums B-12, B-13/B-14, controller bar, §7.5 exports
 > B-09's `curesFailedPayment` stamp certifies the arithmetic cure; the
 > failed-payment form's coverability half awaits Vera/Osei's ruling on
 > the Log-slice seam (F2/F3 ride the same seam).
+
+---
+
+# Assembly addendum — PR-6 (Rafe, Phase 5 Build Lead)
+
+Felix's slice assembled onto current master. This addendum records
+the base, the compositions, the A1–A11 dispositions, the F1–F14
+dispositions, two assembly catches beyond Felix's list, the
+regression, and the PR draft of record. The branch is
+`phase5/banking-assembled` in phase5-clone; per the standing process
+the Lead does not push — Theo verifies and pushes.
+
+## Base verification + commit map
+
+- Target master: **`081c21a`** (PR #43, Baseline ratification),
+  tree `390e59976875cd16b7b608f9a30e496dd8240e85`, verified via
+  the GitHub API against the local reconstruction
+  (`assembly/base-master-081c21a` at `543dd38`, the baseline-flip
+  branch tip — tree byte-identical).
+- Felix's branch: `p5/banking` in p5-banking-clone, tip `8d91533`,
+  based on `d36088d` (PR-3 tip). **Nineteen commits** ride
+  `d36088d..8d91533` (the eighteenth is the last code commit; the
+  nineteenth is the prep-report commit itself). All nineteen
+  cherry-picked onto the base — **zero conflicts**: Felix's delta
+  is 13 files, none of which PR-4, PR-5, or #43 touched. Every file
+  sha256-verified byte-identical to his tip after the pick.
+- Assembly commits on top (Rafe): A4 census/effectPath (`e0a7a22`);
+  A1 resolver schedule dispatch (`32f1ec2`); A5 charter routing +
+  A6 freeShares (`8eaea89`); A2 rules/indexes + A11 matrix + A3
+  chain (`102569f`); fund-singleton rules block (`28be5a4`); A8
+  export runners (`6a927a2`); A1 completion — descriptor
+  permissions + resolver-drive coverage (`e4e65f7`); prefer-const
+  build fix; this addendum + README.
+
+## Shared files across the four deltas, and their compositions
+
+Felix's 13 files are disjoint from the PR-4 (17 files), PR-5 (19
+files), and #43 (3 files) deltas. The shared files are
+assembly-side only, composed as follows:
+
+- `README.md` — PR-6 section after PR-5's + changelog entry +
+  scripts-table row (this PR).
+- `package.json` — `test:sim` gains `tests/banking-harness.ts`
+  after situations-harness, before wake-harness (A3).
+- `firestore.rules` — `sim_bank_loans` holder-read branches (A2) +
+  the fund singleton block (assembly catch 2, below). No other
+  rules text moves; PR-4's delegated-action create fence and PR-5's
+  (none) are untouched.
+- `firestore.indexes.json` — four `sim_bank_loans` composites (A2)
+  + two runner composites (bankCorporationId + depositor.memberId
+  on deposits; bankCorporationId + borrower.memberId on loans).
+- `tests/rules.test.ts` — the loan-shaped posture matrix inside
+  the existing finance block + the fund singleton assertions (A11);
+  the shapeless reserved-loan seed's assertions stand unchanged
+  (still fabric-only under the new branches — no borrower/bankCityId
+  on that seed).
+- `tests/sim-core.test.ts` — **untouched**: Felix added no sim-core
+  scenarios (his delta carries none), so master's version stands,
+  including #43's CK4 ratified-posture asserts and PR-4 fix round
+  2's full collection list in `assembleWorld`. Nothing in the
+  assembly writes a collection a landed scenario reads without
+  collecting it. The suite is CI's venue on this PR.
+- `tests/governance-harness.ts` / `tests/closeout-harness.ts` —
+  A4 only (below).
+
+## A1–A11 dispositions
+
+- **A1 (resolver schedule dispatch) — DONE, with two Lead
+  decisions.** `resolveRipening` gains a schedule branch on the
+  kind's declared `effectPath` (E6), mirroring the delivery
+  branch: the plan comes from `buildScheduleRipeningPlan` over a
+  synthetic action standing in the origin action's place (the
+  wakeSteps delegation-fire precedent — actor and actionId copied
+  from the pending's origin, never a "system" actor), validated
+  and finalized through the same tail as every ripening.
+  **D-A1a (transition ownership):** Felix's composition pushes no
+  pending transition (his harness transitions manually); the
+  branch pushes `{pendingId, toStatus: "ripened", outcomeSummary}`
+  itself, per A1's text ("commit its plan + transition the
+  pending") and the R-33 tail's precedent. **D-A1b (refusal
+  channel):** a rejected composition plan converts to
+  `RipeningPreparationError` carrying the rejection code — no
+  ripening path in this engine commits rejections (R-33 throws;
+  delivery never rejects), and the throw routes Felix's designed
+  refusals (`ripening-kind-unrecognized`,
+  `ripening-read-incomplete` — "nothing ripens blind") into the
+  established attempts → needsAttention channel instead of an
+  infinite per-wake rejection loop. **Read wiring:**
+  `collectRipeningReadPaths` adds the loan doc (installments), the
+  bank corporation doc, and the fund singleton from the frozen
+  schedule spec; `collectRipeningReadQueries` declares the
+  bank-scoped set — `bankDeposits`, `bankLoans`, premium
+  markers/settlements via the family's own `premiumQueries` (now
+  exported for the collector), `assessmentMarkers`,
+  `situationsByKey*` for the bank city, and
+  `standingSchedulePendings` (the premium composition scans the
+  snapshot's doc set for an already-standing assessment; the
+  materializer binds query results into that set, so the scan now
+  sees them). `pending.ts` materializes declared queries
+  generically, so dispatcher and in-transaction recompute carry
+  the same set. **Named residual:** a cross-city company borrower's
+  corporation doc is not derivable from the pending alone, so
+  `situationAddressingFor`'s company case cannot resolve
+  `recipientUid` for installment cards in that case — the card
+  still files under the bank-city facet with the faction audience
+  (no leak, fewer readers). Follow-up shape: two-round ripening
+  seed reads, or B-06 freezing borrower read paths into the spec.
+  **Coverage:** the banking harness gains an A1 section (checks
+  52–54) driving a premium ripening through the real
+  `resolveRipening` — marker + transition + successor asserted —
+  and the refusal case (fund record deleted → throws
+  `ripening-read-incomplete`).
+- **A2 (rules + indexes for `sim_bank_loans`) — DONE.** Read
+  branches mirror the deposits matrix on the loan record's own
+  fields: personal borrower reads own; company/treasury borrower
+  loans public to viewers (§2.7); bank owner via the corporation
+  `ownerMemberId` fact; admin/fabric as before; writes
+  committer-only. Indexes: (bankCorporationId + status),
+  (borrower.memberId / cityId / corporationId + status).
+- **A3 (chain the harness) — DONE** (see shared files).
+- **A4 (census updates) — DONE exactly as Felix verified:**
+  governance-harness census 70 → 79 with the label corrected to
+  "74 landed + 5 governance registrations at census 79"; the
+  closeout S6 assert admits `"schedule"`. Both harnesses re-run
+  green (57 / 29).
+- **A5 (R-07/M-10 → B-10 routing) — DONE, minimal seam.** R-07
+  Dissolve refuses a company holding an ACTIVE charter on both
+  its paths (`bank-chartered-dissolution`, citing B-10);
+  M-10's `composeLiquidation` refuses the same
+  (`bank-chartered`). Unchartered mechanics byte-untouched; a
+  surrendered charter restores them. Fail-closed posture
+  preserved everywhere the routing does not reach. (Noted, not
+  changed: R-07's listed-dissolve rejection text still carries
+  its Phase 4-era rationale sentence although M-10 stands —
+  the rejection and its M-10 citation are correct; the stale
+  sentence is a copy follow-up, not a posture gap.)
+- **A6 (freeShares) — DONE.** `freeShares` reads quantity −
+  committed − pledged, exactly as B-06's pledge-commit change
+  text already stated; `ShareHoldingRecord` gains the additive
+  optional `pledgedShares` (absent ≡ 0). Closes F7's engine half.
+- **A7 (DIF founding venue) — disposition: composition landed,
+  execution operated.** `buildDifFoundingPlan` is exported and
+  harness-proven (singleton, second founding rejects, chains
+  seeded); no member action kind exists for it, by design — the
+  founding is an adoption act (BNK-D18 / REC-3), and no lawful
+  in-repo execution path stands today. Its execution rides the
+  P2-K15 production chain as an operated step (named in the PR
+  body beside the A-2 statement); the Phase 7 Town Hall charter
+  venue (B-15+) is the in-world successor. No route was invented.
+- **A8 (export runners) — DONE with one named narrowing.**
+  `lib/export/fetchBankingExport.ts` lands fetchers + download
+  runners for all four datasets in step 11's pattern
+  (as-requester reads; visibility inherited; fail-closed).
+  Depositor/borrower views use identity-constrained queries
+  (rules are not filters) served by two new cross composites.
+  The verified sheet derives through the family's own
+  `bankBalanceSheet` / `deriveBankHealth`; its per-bank created
+  supply is summed when readable and null when not (never
+  invented). **The failure statement is bank-owner-scoped in
+  this build**: Felix's §7.5 matrix designs it any-member (the
+  waterfall's figures are public Log facts), but the
+  per-depositor rows live on holder-scoped deposit records and
+  the B-10 event publishes totals, not the per-row table. The
+  runner serves the one identity who may read every row and
+  refuses the rest with the reason stated; opening the
+  any-member venue is a §2.7 posture decision **named for Vera**
+  in the PR body. No page touchpoints: no banking surface exists
+  yet (surfaces follow-up, June's line).
+- **A9 (sim-core scenarios) — nothing to assemble** (see shared
+  files): Felix added none; master's suite stands.
+- **A10 (registry) — VERIFIED, no edit needed.** The nine
+  B-descriptors fold through `FINANCE_DESCRIPTORS` (Felix's
+  step-0 import); a Lead probe over the assembled registry:
+  census 79, every descriptor's every action kind resolves
+  through `descriptorForActionKind` to its own descriptor with a
+  function handler. B-13 absent by design (committer step inside
+  B-10). The governance harness's G1 census asserts 79.
+- **A11 (rules-suite matrix) — DONE** (see A2): the loan-shaped
+  matrix beside the deposits one — borrower/bank-owner/fabric
+  reads, cross-city/guest/anon refusals, company-borrower viewer
+  reads, committer-only writes. CI's venue (the sandbox cannot
+  run the emulator).
+
+## Assembly catches beyond Felix's list
+
+1. **B-07/B-12 `mayCreatePendings`.** The first resolver drive of
+   a schedule ripening failed validation: "descriptor B-12 may
+   not create pendings." Felix set the permission by action
+   handler (B-01 charter seeding, B-06 schedule seeding — both
+   true), but B-07's and B-12's creates live in their RIPENING
+   compositions (successor installment/premium pendings; B-14
+   assessment pendings raised inside ripenPremium) — SPEC-1
+   perpetuation under their own descriptors. The permission now
+   stands on both, commented with the reason. Without this catch
+   every schedule ripening would have thrown in production.
+2. **The fund singleton's rules block was missing.** PR #30's
+   record states the DIF rules landed ("fund singleton
+   public-read + committer-write"); no match for
+   `sim_deposit_insurance_fund` stood in `firestore.rules` on
+   master — the singleton was default-denied to every
+   rules-evaluated identity (unnoticed because engine reads run
+   server-side). The block lands here exactly as recorded
+   (viewer read of `main`; committer-only writes), with the catch
+   noted in the block comment and posture assertions in the
+   rules suite.
+3. **`prefer-const` build error** in B-08's pool-form closing
+   (`let summarySeq`, never reassigned) — one-token fix,
+   behavior-identical; the assembled `next build` is green.
+
+## F1–F14 dispositions (for the PR body)
+
+- **F1 — SHIPS AS BUILT, NAMED RATIFICATION ITEM.** B-09's
+  `curesFailedPayment` stamp certifies the arithmetic cure only;
+  §5.4's coverability half is unverifiable from the handler by
+  design (the verifier venue). The stamp's scope is stated in
+  code (Felix §5) and in the PR body; **F1 is carried as a named
+  ratification item for Vera/Osei — the PR-7 gate records it;
+  nothing silently widens.**
+- **F2 / F3 — ride F1's seam, carried with it.** (B-10's
+  depositor trigger refuses a merely-insolvent bank
+  `bank-not-failed`, its text naming the seam — the owner may
+  always liquidate voluntarily; K2 episode minting rides the
+  same seam, candidate fix: stamp
+  `classification.banking.bankCorporationId` on banking
+  rejections.)
+- **F4 — RECORDED.** Pool closing is evaluated only in B-07's
+  paths; a pool-form B-08 that exhausts the book and a B-10 with
+  no loans / fully-paid claims leave deposits `assigned` with
+  `poolUnpaid == 0` and no D2 closing. The assigned-at-zero edge
+  is named here and in the PR body (candidate: evaluate
+  `maybeClosePool` in B-10 / pool-form B-08).
+- **F5 — as recorded** (pool-form excess-return source untested
+  by fixture; Vera to confirm the source reading).
+- **F6 — as built** (B-14 obligations arise at surviving banks'
+  premium ripenings; design decision taken at build, exact-figure
+  venue).
+- **F7 — engine half CLOSED at assembly (A6);** pledge marking
+  itself was already sim truth.
+- **F8 — as published** (BNK-D3 label tension; built as the
+  amendment's text directs, insider cap 2,500 bps of post-funding
+  net worth).
+- **F9 — BNK-D4 fallback taken as built** (seized shares land in
+  the bank owner's holding flagged `heldForBank`); Dana's
+  corporation-holder confirmation outstanding.
+- **F10 — as built, flagged for Vera** (structure pledges
+  narrowed to company borrowers, a §3.2 reading).
+- **F11 — as built** (unlisted-share pledges fund but cannot
+  seize until priced, `collateral-unvalued`).
+- **F12 — as built** (`"cancelled"` loan status is an additive
+  extension; derivations read it as inert).
+- **F13 — as built** (`residualInterestRubars` non-accruing
+  bucket, M14-safe).
+- **F14 — as built** (V-B7 preview parity is structural — one
+  code path; the harness drives commit mode through the real
+  resolver).
+
+## Regression (assembled tree, this machine)
+
+- Banking harness **54/54** (Felix's 51 + the Lead's 3 A1
+  resolver-drive checks); governance **57**; closeout **29**;
+  situations **32**; wake **23**; chains **34**; cat2 **34**;
+  cat1 all; defense **12**; acq **14**; market **27**; lore
+  **27**. Registry probe: census 79, all descriptors resolve.
+- `tsc --noEmit` clean; scoped ESLint clean on every assembled
+  file; `next build` green (after catch 3).
+- Emulator suites (Rules incl. the A11 matrix + fund assertions;
+  Sim core incl. CK4) are CI's venue on PR-6 — the sandbox cannot
+  run the Firestore emulator.
+- Terminology: engine PR — no new member-facing copy except the
+  export module's error strings and README text; both say "NPC"
+  where the concept appears (the A-8 battery's actor form) and
+  the forbidden synonym occurs in zero added lines.
+
+## PR draft of record (Theo: push as-is or edit)
+
+**Title:** Phase 5 PR-6: the banking slice — B-04 credited branch, REC-6 identity, loans B-05–B-08, recapitalization B-09, waterfall B-10, write-off B-11, DIF founding + premiums B-12, B-13/B-14, controller bar, §7.5 exports
+
+**Body:**
+
+Phase 5 PR-6 (of the seven-PR train) lands Felix's banking slice
+(prep report `workstreams/p5-banking-prep-report.md` §§1–7, Felix;
+§8 assembly list executed by the Lead — dispositions in the
+assembly addendum appended to that report) on the post-#43
+master. It completes the finance family under Banking Rider 1 /
+Addendum v2: the registry census lands at **79** (the nine
+B-verb descriptors B-05…B-12 + B-14 via the finance family;
+B-13 deliberately has none — a committer step inside B-10).
+
+What lands, by Felix's items: (0) the R-12 situational-awareness
+table completed for every B-verb (each family's `situationsFor`
+covers the banking kinds conjunctively inside its own family's
+rows); (1) **B-04 credited branch** — §4.1 interest settles into
+the claim itself at exact integer figures, liabilities paired
+(A-B1), zero cash movement, the claim-figure Log grammar
+extended across the accrual family; (2) the **REC-6
+balance-sheet identity** in the standing verifier — one
+aggregate-sourced sheet asserted per chartered bank every wake,
+with the equity bridge rebuilt per resolution from Log-stored
+opening equity (A-B8); (3) **B-05 loan offers** (insider
+aggregate derived at offer, Tier B, stated branch from the
+Phase 4 record); (4) **B-06 funding** on both branches — cash
+against real tracked cash; credit creating the paired deposit +
+claim under BNK-D8's solvency equality (never a silent
+overdraft), structure/share collateral marked with
+`pledgedShares` stamped; (5) **B-07 repayment + installment
+ripening** — the installment schedule on the frozen interval
+lattice (one outstanding per loan), fixed allocation order,
+principal-only netting under the §3.2 acceptance matrix, the
+pool form with subrogation; (6) **B-08 seizure** on both
+branches — third-party valuation as the satisfaction figure,
+excess returned, shortfall written down never forgiven,
+insurance-receivable recognition at seizure (REC-6's fifth
+account class input); (7) **B-09 recapitalization** — owner cash
+converts to equity live; member injections are equity-NEUTRAL
+(A-B8: the claim survives OR is subordinated into equity, never
+both); (8) **B-10 liquidation** — owner-voluntary and
+depositor-triggered forms, claims frozen on the REC-5 basis,
+BNK-D16 setoff without circularity, the waterfall (taxes →
+adjudicated → depositors → shareholders on the M-10 remainder),
+**B-13 senior-queue settlement inside the event** before its
+own top-ups, the loan book assigned to the depositor pool —
+a derivation over records + Log, never a stored object — whose
+closings state forgone claims in the open; (9) **B-11
+write-off** through the equity bridge (REC-2 credit loss, never
+a burn); (10) the **controller bar** — derived from the Log
+alone, barring a failed bank's controller from a new charter
+until uninsured depositors and the fund are whole or the seq
+term passes; (11) **DIF founding** (adoption-act composition;
+grandfathering NONE; chains seeded for chartered banks) +
+**B-12 premiums** on the exact ladder with the derivation shown
+in every marker; (12) **B-14 supplemental assessments** raised
+at surviving banks' premium ripenings from the fund's derived
+deficiency; (13) **GAP-1 occasion wiring** live for B-10/B-12/
+B-14 (the §6.5 producer composed into the B families; credit-
+alert anticipation for nonzero bank-equity deltas only, R-33
+excluded by construction); (14) the **W4 battery** — every
+B-verb's Tier B classification pinned from three sources, and
+**Osei's A-8 case: all fourteen B-verbs refuse an NPC-system
+actor structurally** (`npc-tier-b-structural`), closing
+**F-E11**; (15) the **§7.5 banking datasets** (bank book
+deposits + loans, verified sheet, failure statement) as pure
+builders with fail-closed scope assertions — verified tier
+throughout, created supply under its own name (G4).
+
+Assembly (Lead; addendum has the full record): **A1** the
+resolver's schedule-ripening branch — installment/premium
+pendings now ripen through the real wake path over a
+bank-scoped read set declared from the frozen schedule spec;
+composition refusals ride the ripening preparation channel,
+never a committed rejection; the banking harness drives the
+branch end-to-end (54 checks). **A5** R-07 Dissolve and M-10
+liquidation refuse an actively chartered company, citing
+**B-10** as the only lawful dissolution for a chartered bank;
+unchartered mechanics untouched. **A6** `freeShares` reads
+quantity − committed − pledged (F7's engine half closed).
+**A2/A11** `sim_bank_loans` holder-read rules + indexes and the
+loan-shaped posture matrix; **A3** the banking harness chained
+into `test:sim`. **A8** the §7.5 export runners
+(`lib/export/fetchBankingExport.ts`). Two assembly catches:
+B-07/B-12 `mayCreatePendings` now stands (their ripening
+compositions create successors by design — the first resolver
+drive caught it), and the deposit-insurance fund's rules block
+— recorded as landed in Phase 4 (PR #30) but absent from
+`firestore.rules` — lands here exactly as recorded, with suite
+assertions.
+
+**Named items carried, nothing silently widened:**
+
+- **F1 (ratification item for Vera/Osei, recorded at the PR-7
+  gate):** B-09's `curesFailedPayment` stamp certifies the
+  arithmetic cure only. §5.4's coverability half is unverifiable
+  from the handler by design (verifier venue); the PR ships as
+  built with the stamp's scope stated in code and here. **F2**
+  (B-10's depositor trigger refuses a merely-insolvent bank —
+  `bank-not-failed`, the text naming the seam; the owner may
+  always liquidate voluntarily) and **F3** (K2 episode minting
+  rides the same seam; candidate fix recorded) ride with it.
+- **F4 (recorded):** pool closing is evaluated only in B-07's
+  paths; the assigned-at-zero edge (pool-form B-08 exhausting
+  the book; a B-10 with no loans or fully-paid claims) leaves
+  deposits `assigned` with `poolUnpaid == 0` and no D2 closing.
+- **Failure-statement scope:** the §7.5 matrix designs the
+  failure statement any-member; its per-depositor rows live on
+  holder-scoped deposit records, so the landed runner is
+  bank-owner-scoped and refuses other identities with the
+  reason stated. Opening the any-member venue is a §2.7
+  posture decision named for Vera.
+- Felix's remaining flags (F5–F14) ride as built / recorded in
+  the addendum; BNK-D4/D5/D15/D18 postures stand as Felix built
+  them (F9's corporation-holder confirmation still Dana's).
+
+**Operated steps:** the DIF founding composition is landed and
+harness-proven; its execution is an operated adoption act
+riding the P2-K15 production chain — it is not a member action
+and no route was invented for it.
+
+**This PR is built, not live** (A-2): the P2-K15 production
+chain has not run — (1) no production fabric service user with
+the `fabric` claim and both `fabricRole` values (committer +
+worker); (2) no production rules deploy; (3) no production
+indexes deploy; (4) no production genesis; (5) no operated
+production wake path.
+
+Regression: banking 54, governance 57, closeout 29, situations
+32, wake 23, chains 34, cat2 34, cat1 all, defense 12, acq 14,
+market 27, lore 27; registry probe census 79 with every
+descriptor resolving; tsc clean; scoped lint clean; `next
+build` green. Rules + Sim core suites are CI's venue on this
+PR.
