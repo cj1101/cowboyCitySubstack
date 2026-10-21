@@ -433,3 +433,108 @@ governance 57, situations 32); tsc clean; ESLint clean on touched
 files; next build green. Emulator suites (sim-core incl. CK7e,
 play-core, rules) remain CI's venue — the sandbox emulator blocker
 is unchanged.
+
+### CI fix round 2 (PR #41, Sim core) — Rafe
+
+**Failure.** Round 1's seed fix worked — steps materialize and
+commit — and the suite advanced from line 999 to line 1035, where
+CK7e's closing verifyOk failed: verifier finding STATE_MISSING,
+"sim_situations/sit_7cfce0e57541acfadc4ff0bca76c_81 was written by
+wake_silence_cac89d45f92a3be07269 but does not stand". Log saved at
+~/workspace/cowboy-city/pr41-simcore-log-r2.txt. Install and Rules
+jobs green again; only Sim core failed.
+
+**The three dispatched leads, each tested against the code.**
+(a) *Manifest claims a write the transaction never performed* —
+DEAD. The committer builds the manifest's writeSet FROM finalWrites
+(committer.ts: `writeSet = finalWrites.map(...)`) and applies those
+same finalWrites in Step 7 of the SAME transaction (`tx.set` for
+every non-delete write; `tx.set` creates-or-replaces, so even an
+"update" op lands the full doc). A manifested state write is
+applied atomically with its manifest; there is no code path where
+the two diverge. (b) *Planned-vs-recomputed ID divergence* — DEAD
+by construction, twice over. The situation ID has exactly one
+computation (buildSituationDoc's): a pure function of the dedupe
+key and the source seq, where the conversion's sourceSeq is the
+pending's immutable originSeq (the `_81` suffix IS fund3's
+originSeq); planAttentionConversion reads the link stamp off the
+built card precisely so the stamp cannot diverge from the doc.
+And under recompute-governs, the manifest and the applied write
+both come from the in-transaction recomputed plan regardless.
+(c) *A later step deleted the doc* — DEAD. The only sim deletes
+are committer plan deletes (no plan deletes a situation) and
+undo.ts erasures (which erase the manifest with the resolution;
+no undo runs in CK7e). The verifier's own per-path writer sort
+names wake_silence — not a deleter — as last writer, op ≠ delete.
+
+**Positive proof the doc stands.** The silence step committed at
+all only because its in-transaction recompute (resolveSilenceStep)
+read the situation out of the transaction snapshot and returned a
+non-empty plan: a missing doc yields emptyPlan → PASS_STEP_NOOP
+abort → NO manifest. The wake_silence manifest exists, so the doc
+stood at silence-commit time; nothing after it in CK7e touches
+sim_situations (the final wake ripens the pending — P5-K8's patch
+lands on the pending only — and the card rests terminal-silent).
+
+**Root cause — the test's world assembly is stale, not the
+engine, not the verifier.** tests/sim-core.test.ts `assembleWorld`
+collects stateDocs from a fixed list written in Phase 2 (cities +
+subcollections, allocations, pendings, publications, intel,
+character extensions). `sim_situations` was never added: no
+sim-core scenario wrote the collection until PR-4's passes began
+converting CK7e's flagged pending (attention creates the card;
+silence updates it in the same wake). verifyStandingLog's
+bijection compares manifest writeSets (recordClass state/pending)
+against the CALLER-SUPPLIED stateDocs; a written-but-uncollected
+collection is indistinguishable from a vanished doc, and
+STATE_MISSING is the correct report for the input it was given.
+The verifier is right; its test-side input predates Phase 5. The
+pure harnesses were never exposed: they hand-build their
+StandingWorld inputs and include what they write (the governance
+harness's verifyWorld carries sim_npcs + sim_mandates/versions).
+
+**Fix (one line, at the indicted layer — the test).**
+assembleWorld now also collects `sim_situations`, with a comment
+stating the discipline: stateDocs covers every collection this
+venue's resolutions can write; sim_task_envelopes /
+sim_task_outputs join the list in the same change that first
+makes a scenario here write them. NO lib/ code changes in this
+round — the engine, committer, and verifier are untouched, and
+the verifier is deliberately NOT taught to ignore uncollected
+collections: STATE_MISSING is the undo-erasure tripwire, and
+blinding it to whole collections would defeat it.
+
+**Sweep of the other step kinds for the same class.** Every
+wake-step state-class write, by collection: attention →
+sim_situations (create) + sim_pending_consequences (collected);
+delegation fire → sim_task_envelopes (the spawn core's single
+write, re-claimed "state" at wakeSteps.ts:613) + sim_situations
+(transition); trigger → sim_situations (transition) + the
+delegated action's own resolution (its handler's writes, all in
+collections its venue collects); silence → sim_situations;
+envelope-terminal → sim_task_outputs + sim_task_envelopes (+ a
+sim_situations return-to-open on FAILED); envelope-failure →
+sim_task_envelopes + a system sim_situations card;
+situation-followup → sim_situations. In the CK7e fixture world
+only attention + silence can fire (no NPCs, teams, rules, or
+envelopes exist to contemplate), so sim_situations is the
+complete set for this venue today; envelopes/outputs get their
+standing-state coverage in tests/npc-core.test.ts, the Phase 5
+-native suite (PR-7 wiring per countersign A-1). play-core has no
+verifyStandingLog input at all — no second copy of the stale
+list exists.
+
+**Pin.** None added to the pure battery, deliberately: the seam
+is "an emulator test's hand-maintained collection list vs the set
+of collections manifested resolutions can write" — a pure check
+could only re-list the collections and drift against the very
+list it guards. This seam is emulator-venue only; CI's sim-core
+suite is the pin (it now drives a manifested sim_situations
+write end-to-end and asserts the standing Log verifies clean).
+
+**Local regression (2026-10-20).** Full pure battery green at
+landed counts (cat1, defense 12, chains 34, cat2 34, acq 14,
+market 27, lore 27, close-out 29, governance 57, situations 32,
+wake 23); tsc clean; ESLint clean on the touched test; next build
+green. Emulator suites remain CI's venue — CK7e's closing
+verifyOk is the case to watch in this round.
