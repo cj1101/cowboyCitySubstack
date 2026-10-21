@@ -461,7 +461,7 @@ export function handlerAuthorityView(
   const mandateId = rule.handler.mandateId ?? str(npcDoc?.currentMandateId);
   if (!mandateId) return { npc, mandate: null };
   const root = snapshotDoc(snapshot, `sim_mandates/${mandateId}`);
-  if (!root) return { npc, mandate: { found: false, rootStatus: null, version: null } };
+  if (!root) return { npc, mandate: { mandateId, found: false, rootStatus: null, version: null } };
   const currentVersion = num(root.currentVersion);
   const versionDoc =
     currentVersion !== null
@@ -470,6 +470,7 @@ export function handlerAuthorityView(
   return {
     npc,
     mandate: {
+      mandateId,
       found: true,
       rootStatus: str(root.status),
       version: (versionDoc as unknown as SimMandateVersion | null) ?? null,
