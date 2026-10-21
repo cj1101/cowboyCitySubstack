@@ -590,3 +590,138 @@ round bisects inside `executeDelegatedAction`/`commitStep` with
 labeled catches; the stage markers bound that search.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 3 (interim), 2026-10-21.*
+
+---
+
+## CI fix round 4 (PR #45) — INTERIM: round-3 hypothesis REFUTED; full census + bisection DIAG
+
+**Verdict on round 3, recorded plainly: the seed-query hypothesis is
+DEAD.** The CI run on `005bf42` printed all four round-3 probes
+ALLOWED — **Q1** `sim_delegation_rules where cityId==cityA` as
+fabricSvc: **ALLOWED (size 2)**; Q2 `sim_npcs` control ALLOWED (size
+2); Q3 member-side `ownerUid` control ALLOWED (size 2); Q4
+`sim_situations` control ALLOWED (size 0) — and after the stage
+markers ("card seeded; submitting the owner's touch + wake") the
+suite died on the same uncaught `FirebaseError: No matching allow
+statements`, exactly as before. The contingent rules split from the
+round-3 note is **NOT applied** and is withdrawn: the delegation
+seed query was never the failing operation. The round-3 note's
+sibling-pattern reasoning was sound as a suspicion and wrong as a
+conviction — the probes did their job.
+
+**Round 4 (this note's commit pair: DIAG `3fab1df` + this note)** is
+the round-3 note's recorded fallback, extended to a full census
+plus in-situ bisection, in one DIAG round. No fix is pre-applied;
+the fix lands in round 5 on this round's prints.
+
+### Prong A — the full query census (suite-side, between N3 and N4)
+
+Every query the N4 touch + wake cycle performs, replicated
+standalone as the identity the wake uses (the suite's `committerFs`
+— the fabricSvc context with `fabricRole: committer`, which `deps()`
+hands to BOTH `fabricDb` and `committerDb`), against the standing
+world right before N4's wake. Round-3 Q1–Q4 are removed; Q1 is
+folded into the census as `delegation_rules-cityId`. Each probe
+prints `DIAG Q-<label>: ALLOWED (size n) / DENIED (code) message`.
+
+| Census label | Operation (performing call site) | First emulator-venue precedent | Read-rule pattern |
+|---|---|---|---|
+| `actions-status-confirmed` | `sim_actions where status=="confirmed" orderBy createdAt limit 10` (dispatcher `runWake`, fabricDb) | Phase 2 sim-core; N1–N3 wakes here | combined: auth-only fabric disjunct + resource-derived member branches (`actor.memberId`, `audienceUids`) |
+| `undo_operations-status-in` | `sim_undo_operations where status in (requested, checking) orderBy createdAt limit 10` (dispatcher) | Phase 2 sim-core; N1–N3 wakes | combined: fabric disjunct + `requesterUid` member branch |
+| `pending_consequences-status-pending` | `sim_pending_consequences where status=="pending" orderBy createdAtSeq, pendingId limit 25` (`scanRipeness` candidates) | Phase 2 sim-core; N1–N3 wakes | combined: fabric disjunct + `audienceUids` member branch |
+| `pending_consequences-status-ripening-claimed` | `sim_pending_consequences where status=="ripening-claimed" limit 25` (`scanRipeness`) | same | same |
+| `pending_consequences-needsAttention` | `sim_pending_consequences where needsAttention==true limit 25` (attention pass) | PR-4 sim-core; N1–N3 wakes (pass runs every wake) | same |
+| `task_envelopes-status-QUEUED` / `-RUNNING` | `sim_task_envelopes where status==… limit 50` (claim pass) | PR-4 sim-core; N1–N3 wakes | fabric disjunct + `envelopeReadable(resource.data)` resource-derived |
+| `delegation_rules-cityId` | `sim_delegation_rules where cityId=="cityA"` (`WAKE_RULES_QUERY_ID`, delegation/silence step seed queries) | FIRST candidate-bearing step is N4 — but standalone-probed ALLOWED in round 3 | fabric/admin disjuncts + author + `ownsListedCity(resource.data.cityId)` (get()-on-resource-path branches) |
+| `log_entries-actor.mandateId` | `sim_log_entries where actor.mandateId=="mand-steward-1"` (`NPC_PERIOD_QUERY_ID`, authority-stage read plan in `collectActionReadPlan`) | **NONE — first npc-actor materialization in any emulator suite** (the N4 delegated action; N1–N3 actors are members) | fabric disjunct + viewer branch dereferencing `resource.data.actor.memberId` — the member branch keys on `actor.memberId`; the query filters `actor.mandateId`, a field NO branch references |
+| `log_entries-recent` | `sim_log_entries orderBy seq desc limit 30` (snapshot refresh `listRecentEntries`, LATEST_SUMMARIES_CAP×3) | Phase 3 sim-core; every world-changing wake — but the refresh is failure-isolated (never throws) | same rule as above |
+| `log_entries-headline-cityA` | `sim_log_entries where cityIds array-contains cityA, visibility=="public" orderBy seq desc limit 1` (refresh `getCityHeadlineEntry` per faction) | same, failure-isolated | same |
+| `factions-scan` | `factions` full-collection getDocs (refresh `listFactions`) | same, failure-isolated | `isMember()` only — auth-only, no resource reference |
+| `sim_cities-scan` | `sim_cities` full-collection getDocs (refresh `listSimCities`) | same, failure-isolated | `isViewer()` — auth-only |
+
+GET census (the materialization read sets — doc reads no query
+probe can see; each prints `DIAG Q-<label>: ALLOWED (exists b) /
+DENIED …`):
+
+| Census label | Path | Read-rule pattern |
+|---|---|---|
+| `world-get-current` | `sim_world/current` | `isViewer() && docId=='current'` (viewer-gated singleton; fabric user record seeded — PR #44 precedent) |
+| `counters-get-log` | `sim_counters/log` | `isAdmin() \|\| isFabricService()` — auth-only |
+| `factions-get-cityA` | `factions/cityA` | `isMember()` — auth-only |
+| `sim_cities-get-cityA` | `sim_cities/cityA` | `isViewer()` |
+| `npcs-get-charA2` | `sim_npcs/charA2` | `isViewer()` |
+| `teams-get-cityA` | `sim_teams/cityA` | `isViewer()` |
+| `mandates-get-mand-steward-1` (+`-v1`) | `sim_mandates/mand-steward-1`, `…/versions/1` | `isViewer()` both |
+| **`terms-get-current`** | **`sim_terms/current`** | **NO MATCH BLOCK EXISTS. `firestore.rules` contains no `sim_terms` rule at all (grep-verified) — there is no allow statement any identity can match, for a get or a query. The authority stage's read plan adds `TERMS_PATH` for EVERY npc-actor action (`collectNpcStageReadPlan`), and the design's own posture (dashboard registry comment; the stage's absence handling at `authorityStage.ts:582`) is that no `sim_terms` record stands until Phase 7 — the read is expected to return absent, but a rules-denied get is not an absent doc: it throws. First npc-actor materialization in the venue is N4's delegated action.** |
+| `situations-get-absent` | `sim_situations/diag-absent` (posture probe, absent doc) | fabric disjunct + recipient/`ownsListedCity` branches |
+| `actions-get-absent` | `sim_actions/diag-absent` | fabric disjunct + resource-derived member branches |
+| `resolutions-get-absent` | `sim_resolutions/diag-absent` | `isAdmin() \|\| isFabricService()` — auth-only |
+
+Not performed in N4 (censused as absent, for completeness): the
+ripening read queries (`collectRipeningReadQueries` — no candidate
+ripens; the fixture pendings arrive in N7); descriptor queries of
+other kinds (`NPC_ROSTER_QUERY_ID` rode N1's npc.create plans, not
+N4's kinds — `situationReadPlan` declares paths only and
+FIXTURE-ADJUST has no `readPlan`); direct `users` reads (none — the
+rules helpers' `get()` calls are rules-internal, not client ops).
+
+### Prong B — labeled bisection inside the wake (lib-side, print-and-rethrow)
+
+If the census all-alloweds, the failing op names itself in situ:
+
+- **The materialization funnel** (`lib/sim/resolver.ts`,
+  `buildSnapshot`/`materializeSnapshot`): every plan doc-get and
+  collection query the resolver executes prints, on denial,
+  `DIAG STEP materialize: DENIED get <path>` or
+  `DIAG STEP materialize: DENIED query <spec.id> <collectionPath>
+  <filters>`, then rethrows. This funnel serves the dispatcher's
+  action snapshots, every wake-step materialization, and the
+  delegated action's `snapshotForActionLike`.
+- **Step labels** (`diagStep`, print + rethrow, in
+  `lib/sim/dispatcher.ts` and `lib/sim/wakePasses.ts`):
+  `dispatcher.actions-query`, `dispatcher.scan`,
+  `dispatcher.undo-query`, `dispatcher.passes`;
+  `passes.attention-query`, `passes.claims-query-QUEUED`,
+  `passes.claims-query-RUNNING`,
+  `passes.attention-readback-materialize`,
+  `passes.delegation-materialize`, `passes.trigger-materialize`,
+  `commitStep-<kind>-materialize` (every step kind);
+  `delegatedAction.npc-get`, `delegatedAction.existing-get`,
+  `delegatedAction.create`, `delegatedAction.snapshot`,
+  `delegatedAction.preview-update`, `delegatedAction.claim-tx`.
+  (commitResolution's own errors stay on their existing caught
+  paths — a denial there surfaces as a step/action outcome, not the
+  uncaught death; the two commit call sites therefore carry no
+  label.) The suite's N4 stage markers from round 3 stay in place
+  to bound the prints.
+
+**What to read on the CI re-run:** (1) the census lines after
+`ok N3` — any `DENIED` there is a standalone conviction; (2) the
+first `DIAG STEP … DENIED` line inside N4 — the funnel line names
+the exact path/spec, the enclosing step label names the call site.
+**Expected signature if the census's one rule-less collection is the
+culprit:** `Q-terms-get-current: DENIED` in the census, then
+`DIAG STEP materialize: DENIED get sim_terms/current` wrapped by
+`DIAG STEP delegatedAction.snapshot: DENIED` during N4's wake, and
+the suite dies as before. If instead the census all-alloweds and a
+query-spec funnel line fires, the conviction is that spec. If NO
+DIAG line prints before the death, the operation sits outside the
+wrapped set (in-transaction reads are the named remainder — the
+committer's tx.get set is doc gets over already-probed paths plus
+the manifest get, all posture-probed above).
+
+Local regression for the DIAG commit (`3fab1df`): `tsc --noEmit`
+clean; scoped ESLint clean on all four touched files; full pure
+battery green at landed counts (governance 59, banking 54,
+situations 32, wake 23, closeout 29, chains 34, cat2 34, cat1 all,
+defense 12, acq 14, market 27, lore 27; npc-core harness 37;
+authority + envelopes harnesses all-pass); `next build` green. The
+suite's assertions are untouched; all DIAG code is catch-log-rethrow
+or catch-log only. The fix lands in round 5 on these prints — the
+leading candidate fix, stated now so round 5 can move directly: a
+`sim_terms` rules block matching the design's Phase 7 posture (the
+record does not stand yet; the committer/fabric read the stage
+needs, members none until the office exists) plus rules-suite
+assertions — but round 5 follows the prints, not this paragraph.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 4 (interim), 2026-10-21.*
