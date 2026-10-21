@@ -93,6 +93,7 @@ export function toSituation(data: DocumentData): SimSituation {
           actionId: asNullableString(handlingRaw.actionId),
           decidedAt: handlingRaw.decidedAt ?? null,
           decisionNote: asNullableString(handlingRaw.decisionNote),
+          outcomeVerb: asNullableString(handlingRaw.outcomeVerb),
         }
       : null;
   const sourceKinds = [
@@ -350,13 +351,19 @@ async function submitGovernance(
 }
 
 /** §6.3A — "I am handling this myself." Records the decision; the
- * handling flow itself is the deep-linked authoritative surface. */
+ * handling flow itself is the deep-linked authoritative surface.
+ * With `outcome: "declined"` (PR-4's F3 completion wiring) the
+ * same submission closes an `awaiting_owner` card as
+ * handled-by-declining in its own resolution — declining a
+ * delegate's draft is a complete outcome (§6.1), and the verb
+ * lands on the card (`handling.outcomeVerb`) and in the Log. */
 export function submitSituationHandle(
   uid: string,
   args: {
     situationId: string;
     cityId: string | null;
     decisionNote?: string;
+    outcome?: "declined";
   }
 ): Promise<DecisionSubmission> {
   return submitGovernance(
@@ -365,6 +372,7 @@ export function submitSituationHandle(
     {
       situationId: args.situationId,
       ...(args.decisionNote ? { decisionNote: args.decisionNote } : {}),
+      ...(args.outcome ? { outcome: args.outcome } : {}),
     },
     args.cityId ? [args.cityId] : []
   );

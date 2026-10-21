@@ -145,6 +145,9 @@ export function outcomeLine(
     case "silent":
       return `Closed as silent. ${silenceRecordLine(city, situation.resolvedSeq)}`;
     case "handled": {
+      if (situation.handling?.outcomeVerb === "declined") {
+        return "Closed as handled — declined by its owner. The draft binds nothing.";
+      }
       const mode = situation.handling?.mode;
       if (mode === "delegated" || mode === "auto-delegated") {
         return "Closed as handled — by the NPC it was delegated to.";

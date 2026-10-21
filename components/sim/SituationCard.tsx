@@ -23,6 +23,14 @@
  *  C. Let it sit — silence as an explicit, first-class decision:
  *     the Log records the non-response as a complete outcome.
  *
+ * A card in `awaiting_owner` — a delegate's draft is waiting —
+ * carries one more control: Decline the draft. PR-4 wired the
+ * completion (W4 flag F3): `situation.handle` with outcome
+ * "declined" closes the matter as handled-by-declining in the
+ * same resolution; the verb lands on the card
+ * (`handling.outcomeVerb`) and in the Log, and the declined
+ * draft stays inert in history, binding nothing.
+ *
  * Terminal cards are read-only history. A card that a delegate
  * escalated returns here with its cycle count showing.
  */
@@ -199,7 +207,9 @@ export function SituationCard({
 
       {handling && (handling.mode !== null || handling.npcId) && (
         <p className="text-sm text-text-muted">
-          {handling.mode === "delegated" || handling.mode === "auto-delegated" ? (
+          {handling.outcomeVerb === "declined" ? (
+            "You declined the draft."
+          ) : handling.mode === "delegated" || handling.mode === "auto-delegated" ? (
             <>
               Delegated to{" "}
               {handlingNpc
@@ -466,6 +476,40 @@ export function SituationCard({
                         </div>
                       )}
                     </>
+                  )}
+                </section>
+              )}
+
+              {/* ——— Decline the draft (awaiting_owner) ——— */}
+              {situation.status === "awaiting_owner" && (
+                <section className="rounded border border-darker-brown p-3 flex flex-col gap-2">
+                  <h4 className="font-bold">Decline the draft</h4>
+                  <p className="text-sm text-text-muted">
+                    The draft waiting on this card binds nothing on its own.
+                    Declining closes the matter as declined: your decision
+                    and its outcome are recorded on the card and in the Log,
+                    the draft stays in history exactly as it was written,
+                    and nothing in it is adopted or acted on. The underlying
+                    matter is closed as declined — it does not return to
+                    your queue.
+                  </p>
+                  {user && (
+                    <ActionRunner
+                      subtle
+                      ctaLabel="Decline the draft — close this matter"
+                      cityName={(id) => cityName(id)}
+                      onResolved={onChanged}
+                      submit={() =>
+                        submitSituationHandle(user.uid, {
+                          situationId: situation.situationId,
+                          cityId,
+                          outcome: "declined",
+                          ...(note.trim() !== ""
+                            ? { decisionNote: note.trim() }
+                            : {}),
+                        })
+                      }
+                    />
                   )}
                 </section>
               )}
