@@ -151,6 +151,7 @@ import {
   buildProposalSituation,
   buildRipeningOccasionSituation,
   dedupeKeyFor,
+  deterministicSituationId,
   episodeSourceId,
   markSituationHandled,
   occasionSpecFromPending,
@@ -546,6 +547,31 @@ export function findSituation(
  * conversion is field-for-field, and the doc's own dedupeKey is
  * what the standing card is matched by). Returns the record ids
  * the caller's entry claims (recordsCreated/recordsUpdated). */
+/** Re-key a built card for a multi-card event: the dedupe
+ * discipline keys a card by (source, kind, audience), and one
+ * Resolution Event that mints several cards of a kind to one
+ * audience (B-10's per-depositor D1s + per-borrower B6s) must give
+ * each card its own source identity — the source resolution stays
+ * in sourceResolutionId for traceability; sourceId gains the
+ * per-card suffix. The pool-closing D2 re-keys with the SAME
+ * suffix against the liquidation's resolution id, so it lands on
+ * its D1's key and supersedes it exactly (addendum §1 D2). */
+export function rekeyCard(doc: SimSituation, sourceIdSuffix: string): SimSituation {
+  const sourceId = `${doc.source.sourceResolutionId ?? "res"}:${sourceIdSuffix}`;
+  const dedupeKey = dedupeKeyFor({
+    sourceKind: doc.source.kind,
+    sourceId,
+    situationKind: doc.kind,
+    audienceKey: doc.audienceCityId ?? doc.cityId ?? doc.recipientUid,
+  });
+  return {
+    ...doc,
+    source: { ...doc.source, sourceId },
+    dedupeKey,
+    situationId: deterministicSituationId(dedupeKey, doc.source.sourceSeq),
+  };
+}
+
 export function mintSituation(
   plan: ResolutionPlan,
   ctx: HandlerContext,
@@ -2427,8 +2453,8 @@ function offerLoanHandler(ctx: HandlerContext): ResolutionPlan {
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
-      cityId,
-      cityIds: [cityId],
+      cityId: null,
+      cityIds: [],
       ruleIds: [descriptorId],
       changes: [
         fieldChange(`bankLoans/${loanId}.status`, null, "offered", "B-05 loan offer — the record is born offered; funding (B-06) is a separate event"),
@@ -2483,8 +2509,8 @@ function cancelLoanOfferHandler(ctx: HandlerContext): ResolutionPlan {
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
-      cityId: bank.cityId,
-      cityIds: [bank.cityId],
+      cityId: null,
+      cityIds: [],
       ruleIds: [descriptorId],
       changes: [
         fieldChange(`bankLoans/${loan.loanId}.status`, "offered", "cancelled", "B-05 cancel — the offer is withdrawn/declined before funding; nothing was disbursed and nothing is owed"),
@@ -2840,8 +2866,8 @@ function acceptLoanHandler(ctx: HandlerContext): ResolutionPlan {
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
-      cityId: bank.cityId,
-      cityIds: [bank.cityId],
+      cityId: null,
+      cityIds: [],
       ruleIds: [descriptorId],
       changes: [...fundingChanges, ...pledgeChanges],
       recordsCreated: [],
@@ -2961,6 +2987,13 @@ function maybeClosePool(
 
   let realizedLoss = 0;
   const claims = { created: [] as string[], updated: [] as string[] };
+  // The final dust figure (§5.6): whatever integer-floor remainders
+  // accumulated in the dissolved bank's frozen cash record over the
+  // pool's life — the planned view, so this event's own dust (a
+  // closing B-07/B-08 distribution) is already inside it.
+  const frozenCash = plannedDoc(plan, ctx.snapshot, args.bank.corpPath);
+  const finalDustRubars =
+    typeof frozenCash?.companyCashRubars === "number" ? frozenCash.companyCashRubars : 0;
   for (const deposit of assignedDeposits) {
     const unpaid = poolUnpaidRubars(deposit);
     realizedLoss += unpaid;
@@ -2979,7 +3012,7 @@ function maybeClosePool(
       const card = mintSituation(
         plan,
         ctx,
-        buildIncidentSituation({
+        rekeyCard(buildIncidentSituation({
           cityId: args.bank.cityId,
           audienceCityId: args.bank.cityId,
           audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
@@ -2991,11 +3024,11 @@ function maybeClosePool(
           sourceResolutionId: block.liquidationResolutionId,
           title: `Depositor pool closed — ${args.bank.corporationId}`,
           summary: `The depositor pool of the dissolved ${args.bank.corporationId} is exhausted and closes. Your frozen claim was ${block.frozenClaimRubars} R; total recovered ${recovered} R; realized loss ${unpaid} R.`,
-          consequenceSummary: `Pool closed: recovered ${recovered} R of your ${block.frozenClaimRubars} R frozen claim (estate ${block.estatePaidRubars} R, fund ${block.fundPaidRubars} R, pool distributions ${block.poolDistributedRubars} R); realized loss ${unpaid} R is written down on the record. The fund's final recovery on your claim was ${block.fundRecoveredRubars} R of its ${block.fundPaidRubars} R payment.`,
+          consequenceSummary: `Pool closed: recovered ${recovered} R of your ${block.frozenClaimRubars} R frozen claim (estate ${block.estatePaidRubars} R, fund ${block.fundPaidRubars} R, pool distributions ${block.poolDistributedRubars} R); realized loss ${unpaid} R is written down on the record. The fund's final recovery on your claim was ${block.fundRecoveredRubars} R of its ${block.fundPaidRubars} R payment. Final dust of ${finalDustRubars} R (integer-floor distribution remainders) remains in the dissolved bank's frozen cash record (§5.6).`,
           ask: "No action is required — this card closes the liquidation's account with you.",
           amountRubars: unpaid,
           subject: { kind: "corporation", id: args.bank.corporationId },
-        })
+        }), `d1:${refKey(deposit.depositor)}`)
       );
       claims.created.push(...card.created);
       claims.updated.push(...card.updated);
@@ -3194,6 +3227,21 @@ function repayLoanHandler(ctx: HandlerContext): ResolutionPlan {
         });
       }
     }
+    // Dust (§5.6): the integer-floor remainder of the two passes is
+    // part of the borrower's payment — it routes to the dissolved
+    // bank's frozen cash record, visible and unspendable, and the
+    // pool closing entry names the accumulated figure. The claims'
+    // unpaid balances fall only by what was actually distributed.
+    const dustRubars = interestPass.dustRubars + principalPass.dustRubars;
+    if (dustRubars > 0) {
+      lines.push({
+        from: loan.borrower,
+        to: corporationRef(bank.cityId, bank.corporationId),
+        amountRubars: dustRubars,
+        ruleId: descriptorId,
+        memo: `pool distribution dust on liquidation of ${bank.corporationId} — integer-floor remainder to the dissolved bank's frozen cash record (§5.6)`,
+      });
+    }
     if (lines.length > 0) {
       const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines, shortfallClass: "transfer" });
       if (!applied.ok) {
@@ -3218,7 +3266,7 @@ function repayLoanHandler(ctx: HandlerContext): ResolutionPlan {
         };
       });
     }
-    poolDistributionNote = ` Distributed across the pool's unpaid claims (interest portion first): ${[...perDeposit.entries()].map(([id, v]) => `${id} ${v.total} R${v.toFund > 0 ? ` (${v.toFund} R routed to the fund by subrogation)` : ""}`).join("; ")}.`;
+    poolDistributionNote = ` Distributed across the pool's unpaid claims (interest portion first): ${[...perDeposit.entries()].map(([id, v]) => `${id} ${v.total} R${v.toFund > 0 ? ` (${v.toFund} R routed to the fund by subrogation)` : ""}`).join("; ")}.${dustRubars > 0 ? ` Dust of ${dustRubars} R (integer-floor remainder) remains in the dissolved bank's frozen cash record (§5.6).` : ""}`;
   }
 
   // -- Loan record write --------------------------------------------
@@ -3331,8 +3379,8 @@ function repayLoanHandler(ctx: HandlerContext): ResolutionPlan {
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
-      cityId: bank.cityId,
-      cityIds: [bank.cityId],
+      cityId: null,
+      cityIds: [],
       ruleIds: [descriptorId],
       changes: [...loanChanges, ...releaseChanges],
       recordsUpdated: [loanPath, ...situationClaims.updated],
@@ -3368,6 +3416,40 @@ function repayLoanHandler(ctx: HandlerContext): ResolutionPlan {
   });
 }
 
+/** Pool-distribution reads (B-07/B-08 pool forms): a distribution
+ * credits every claimant of the bank's pool — personal depositors'
+ * member accounts, company depositors' corporation docs, treasury
+ * depositors' city docs. The recipient set is data-dependent (it
+ * derives from the bank's deposit records), so the read plan takes
+ * the same broad shape B-10's waterfall read plan takes: all member
+ * accounts, all cities, and the corporations of every target city. */
+function poolDistributionReads(
+  seeds: ReadPlanSeeds,
+  paths: string[],
+  queries: CollectionQuerySpec[]
+): void {
+  queries.push(
+    { id: "allMemberAccounts", collectionPath: "sim_member_accounts", filters: [] },
+    { id: "allCities", collectionPath: "sim_cities", filters: [] },
+    { id: "allDeposits", collectionPath: "sim_bank_deposits", filters: [] }
+  );
+  const cityIds = new Set<string>();
+  const record = seeds.action.structuredAction ?? {};
+  if (typeof record.cityId === "string") cityIds.add(record.cityId);
+  const targets = (seeds.action as { targetCityIds?: unknown }).targetCityIds;
+  if (Array.isArray(targets)) {
+    for (const t of targets) if (typeof t === "string") cityIds.add(t);
+  }
+  for (const cid of cityIds) {
+    queries.push({
+      id: `cityCorporations_${cid}`,
+      collectionPath: `sim_cities/${cid}/corporations`,
+      filters: [],
+    });
+    paths.push(cityPath(cid), `factions/${cid}`);
+  }
+}
+
 function repayLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   const record = seeds.action.structuredAction ?? {};
   const paths: string[] = [INSURANCE_FUND_PATH];
@@ -3389,6 +3471,7 @@ function repayLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
       }
     );
   }
+  poolDistributionReads(seeds, paths, queries);
   if (typeof record.loanId === "string" && record.loanId) {
     paths.push(bankLoanPath(record.loanId));
   }
@@ -3797,8 +3880,8 @@ function seizeCollateralHandler(ctx: HandlerContext): ResolutionPlan {
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
-      cityId: bank.cityId,
-      cityIds: [bank.cityId],
+      cityId: null,
+      cityIds: [],
       ruleIds: [descriptorId],
       changes: [
         fieldChange(`bankLoans/${loan.loanId}.outstandingRubars`, loan.outstandingRubars, outstandingAfter, "B-08 seizure — principal satisfied by collateral"),
@@ -3849,6 +3932,7 @@ function seizeCollateralReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
       }
     );
   }
+  poolDistributionReads(seeds, paths, queries);
   if (typeof record.loanId === "string" && record.loanId) paths.push(bankLoanPath(record.loanId));
   if (typeof record.claimantDepositId === "string" && record.claimantDepositId) {
     paths.push(bankDepositPath(record.claimantDepositId));
@@ -3951,8 +4035,8 @@ function writeOffLoanHandler(ctx: HandlerContext): ResolutionPlan {
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
-      cityId: bank.cityId,
-      cityIds: [bank.cityId],
+      cityId: null,
+      cityIds: [],
       ruleIds: [descriptorId],
       changes: [
         fieldChange(`bankLoans/${loan.loanId}.outstandingRubars`, loan.outstandingRubars, loan.outstandingRubars - writeOffAmount, "B-11 write-off — the asset falls; the loss posts through equity (credit-loss bridge)"),
@@ -4499,10 +4583,10 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
   const tagged: TaggedChange[] = [...appliedLines.changes];
 
   // -- Senior-queue record updates --------------------------------------
-  const recordChanges: SimChange[] = [
-    fieldChange(`corporations/${corporationId}.status`, bank.corp.status ?? null, "dissolved", "B-10 liquidation — the company dissolves in the event that runs its waterfall"),
-    fieldChange(`corporations/${corporationId}.bank.status`, "active", "surrendered", "B-10 liquidation — the charter surrenders; the premium chain ends (no successor after the charter ends, SPEC-1)"),
-  ];
+  // The corporation's own changes are appended at entry-build time
+  // (below), once every aggregate mutate has folded — F-02 chains
+  // the whole-block change to the write's final block.
+  const recordChanges: SimChange[] = [];
   const recordsUpdated: string[] = [bank.corpPath];
   for (const { deposit, paid } of seniorPaid) {
     const path = bankDepositPath(deposit.depositId);
@@ -4655,7 +4739,7 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
     const card = mintSituation(
       plan,
       ctx,
-      buildIncidentSituation({
+      rekeyCard(buildIncidentSituation({
         cityId,
         audienceCityId: cityId,
         audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
@@ -4671,11 +4755,10 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
         ask: "No action is required. Borrowers repay the pool under B-07's pool form; distributions arrive as events, each logged.",
         amountRubars: totals.frozen,
         subject: { kind: "corporation", id: corporationId },
-      })
+      }), `d1:${key}`)
     );
     situationClaims.created.push(...card.created);
     situationClaims.updated.push(...card.updated);
-    void key;
   }
   for (const [key, loans] of loansByBorrower) {
     const assigned = loans.filter((l) => l.status === "active");
@@ -4691,7 +4774,7 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
     const card = mintSituation(
       plan,
       ctx,
-      buildIncidentSituation({
+      rekeyCard(buildIncidentSituation({
         cityId,
         audienceCityId: cityId,
         audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
@@ -4706,18 +4789,17 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
         consequenceSummary: "Repayment continues under B-07's pool form — same schedule, same rates, same collateral. Excess obligations beyond your claims survive as unsecured pool obligations, stated per loan above.",
         ask: "Keep repaying on schedule — to the pool now. Nothing else changes.",
         subject: { kind: "corporation", id: corporationId },
-      })
+      }), `b6:${key}`)
     );
     situationClaims.created.push(...card.created);
     situationClaims.updated.push(...card.updated);
-    void key;
   }
   if (trigger === "depositor") {
     const addressing = situationAddressingFor(ctx.snapshot, personalRef(ownerId), cityId);
     const card = mintSituation(
       plan,
       ctx,
-      buildIncidentSituation({
+      rekeyCard(buildIncidentSituation({
         cityId,
         audienceCityId: cityId,
         audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
@@ -4732,7 +4814,7 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
         consequenceSummary: "The full waterfall, the frozen figures, and every payout stand in this event's Log entries. Your controller position is barred from a new charter under B-01's controller bar until its conditions pass.",
         ask: "No action is available — liquidation is final. The Log is the record.",
         subject: { kind: "corporation", id: corporationId },
-      })
+      }), "k5")
     );
     situationClaims.created.push(...card.created);
     situationClaims.updated.push(...card.updated);
@@ -4757,6 +4839,18 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
   }
 
   // -- Entries ------------------------------------------------------------
+  recordChanges.push(
+    fieldChange(`corporations/${corporationId}.status`, bank.corp.status ?? null, "dissolved", "B-10 liquidation — the company dissolves in the event that runs its waterfall"),
+    fieldChange(`corporations/${corporationId}.bank`, bank.bank, bankBlockOf(plannedDoc(plan, ctx.snapshot, bank.corpPath) ?? {}) ?? bank.bank, "B-10 liquidation — the charter surrenders (bank block status active → surrendered) and its aggregates zero as the claims sweep; the premium chain ends (no successor after the charter ends, SPEC-1)"),
+    fieldChange(`corporations/${corporationId}.retiredShares`, typeof bank.corp.retiredShares === "number" ? bank.corp.retiredShares : 0, (typeof bank.corp.retiredShares === "number" ? bank.corp.retiredShares : 0) + (typeof bank.corp.sharesOutstanding === "number" ? bank.corp.sharesOutstanding : 0), "B-10 — the dissolved bank's shares retire with the company")
+  );
+  // Split by F-02's grammar: the corporation's own changes are
+  // city-relative (they reconcile against the city doc); the
+  // top-level-collection changes (deposit blocks, holding
+  // retirements, the fund aggregate) ride a realm entry, the
+  // Phase 4 convention for such records.
+  const cityRecordChanges = recordChanges.filter((c) => c.field.startsWith("corporations/"));
+  const realmRecordChanges = recordChanges.filter((c) => !c.field.startsWith("corporations/"));
   plan.entries.push(
     ruleEffectDraft({
       actor: ctx.action.actor,
@@ -4764,10 +4858,23 @@ function liquidateBankHandler(ctx: HandlerContext): ResolutionPlan {
       cityIds: [cityId],
       ruleIds: [descriptorId],
       major: true,
-      changes: recordChanges,
-      recordsCreated: [...recordsCreated, ...situationClaims.created],
-      recordsUpdated: [...recordsUpdated, ...situationClaims.updated],
+      changes: cityRecordChanges,
+      recordsCreated: [],
+      recordsUpdated: [bank.corpPath],
       summaryText: `B-10: ${corporationId} liquidated (${trigger} trigger) — claims frozen at seq ${freezeSeq} on the REC-5 basis. Waterfall: (a) taxes ${taxPaidTotal} R; (b) adjudicated 0 R (no adjudicated payables stand); (c) depositors ${estatePaidTotal} R pro-rata on full frozen claims; B-13 paid ${seniorPaid.reduce((s, p) => s + p.paid, 0)} R of senior queued shortfalls BEFORE this failure's top-ups of ${[...figures.values()].reduce((s, f) => s + f.fundPaid, 0)} R; (d) shareholders ${dividendsTotal} R; ${cashLeft} R remains as dust on the dissolved record. ${activeLoans.length} loan(s) assigned to depositor-pool:${corporationId} with setoff applied in-event. No bank was liquidated recursively in this pass — interbank losses stand as propagation lines for the affected banks' own derivations.`,
+    })
+  );
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: null,
+      cityIds: [],
+      ruleIds: [descriptorId],
+      major: true,
+      changes: realmRecordChanges,
+      recordsCreated: [...recordsCreated, ...situationClaims.created],
+      recordsUpdated: [...recordsUpdated.filter((p) => p !== bank.corpPath), ...situationClaims.updated],
+      summaryText: `B-10: ${corporationId}'s claim records sweep to the depositor pool — deposit liquidation blocks stamped (frozen claim, coverage split, setoff, estate/fund payments), senior-queue settlements recorded, shares retired, and the fund's insured aggregate shed of this bank's contribution.`,
     })
   );
   pushMovementEntries(plan, ctx, descriptorId, tagged, (entryCityId) =>

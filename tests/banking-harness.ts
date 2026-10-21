@@ -627,3 +627,410 @@ check("item 12: premium ripening computes the due from Log inputs alone; zero-fi
 check("W1 conservation: paired posting + standing A-B assertions clean over the whole book", () => {
   assertConservationClean(w1, w1Events, "W1");
 });
+
+// ---------------------------------------------------------------------------
+// Shared helpers for the failure worlds
+// ---------------------------------------------------------------------------
+
+function foundDif(world: World, actor: SimActor, uid: string): void {
+  const snapshotDocs: World = new Map(world);
+  const queryRecords = materializeQueries(world, [{ id: "allDeposits", collectionPath: "sim_bank_deposits", filters: [] }], snapshotDocs);
+  const snapshot = snapshotFromDocs(snapshotDocs, NOW, queryRecords);
+  const act = action(actor, uid, "adopt_dif_founding", {});
+  const ctx: HandlerContext = {
+    snapshot, action: act, resolutionId: `res_founding_${counterSeq(world)}`,
+    baselineRegistry: registry, citableBaseline: null, citations: {} as HandlerContext["citations"],
+  };
+  const plan = buildDifFoundingPlan(ctx);
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  commitPlan(world, plan, ctx.resolutionId);
+}
+
+function charter(world: World, events: ConservationEvent[], owner: string, cityId: string, corporationId: string): void {
+  const { plan, event } = run(world, action(memberActor(owner), owner, "charter_bank", {
+    cityId, corporationId, reserveRatioBps: 2000, depositRateCeilingBpsPerKseq: 2000, loanRateCeilingBpsPerKseq: 3000,
+  }));
+  assert.equal(plan.outcome, "resolved", `charter ${corporationId}: ${plan.rejection?.summaryText ?? ""}`);
+  if (event) events.push(event);
+}
+
+function deposit(world: World, events: ConservationEvent[], member: string, cityId: string, corporationId: string, amount: number, rate = 500): BankDepositRecord {
+  const { plan, event } = run(world, action(memberActor(member), member, "deposit_funds", {
+    cityId, corporationId, depositor: { kind: "personal", memberId: member }, amountRubars: amount, rateBpsPerKseq: rate,
+  }));
+  assert.equal(plan.outcome, "resolved", `deposit at ${corporationId}: ${plan.rejection?.summaryText ?? ""}`);
+  if (event) events.push(event);
+  const rows = depositsOf(world, corporationId).filter((d) => d.depositor.kind === "personal" && d.depositor.memberId === member);
+  return rows[rows.length - 1];
+}
+
+function offerLoan(
+  world: World, events: ConservationEvent[], owner: string, cityId: string, corporationId: string,
+  terms: Record<string, unknown>
+): BankLoanRecord {
+  const { plan, event } = run(world, action(memberActor(owner), owner, "offer_loan", {
+    cityId, corporationId, ...terms,
+  }));
+  assert.equal(plan.outcome, "resolved", `offer at ${corporationId}: ${plan.rejection?.summaryText ?? ""}`);
+  if (event) events.push(event);
+  const loans = loansOf(world, corporationId).filter((l) => l.status === "offered");
+  return loans[loans.length - 1];
+}
+
+function acceptLoan(world: World, events: ConservationEvent[], borrower: SimActor, borrowerUid: string, cityId: string, loan: BankLoanRecord): ResolutionPlan {
+  const { plan, event } = run(world, action(borrower, borrowerUid, "accept_loan", {
+    cityId, corporationId: loan.bankCorporationId, loanId: loan.loanId,
+    borrower: loan.borrower, collateral: loan.collateral,
+  }));
+  if (event) events.push(event);
+  return plan;
+}
+
+function openSituations(world: World, needle: string): Record<string, unknown>[] {
+  return [...world.entries()]
+    .filter(([path, d]) => path.startsWith("sim_situations/") && d !== null)
+    .map(([, d]) => d as Record<string, unknown>)
+    .filter((d) => d.status === "open" && JSON.stringify(d).includes(needle));
+}
+
+// ---------------------------------------------------------------------------
+section("W2 — failure fixture v1 (cash-funded): charter → deposits → loans → default → write-off → failure → waterfall → pool recovery");
+
+const wF = seedWorld();
+const wFEvents: ConservationEvent[] = [];
+for (const m of [OWNER_F, OWNER_G, MEMBER_B, MEMBER_C, MEMBER_D, MEMBER_E]) seedAccount(wF, m, 900000);
+seedCorp(wF, { homeCityId: CITY, corporationId: "bankF", ownerMemberId: OWNER_F, companyCashRubars: 150000 });
+seedCorp(wF, { homeCityId: CITY, corporationId: "bankG", ownerMemberId: OWNER_G, companyCashRubars: 121100 });
+foundDif(wF, memberActor(OWNER_F), OWNER_F);
+charter(wF, wFEvents, OWNER_F, CITY, "bankF");
+
+const depFB = deposit(wF, wFEvents, MEMBER_B, CITY, "bankF", 300000);
+const depFC = deposit(wF, wFEvents, MEMBER_C, CITY, "bankF", 100000);
+
+check("W2 premium: ripened due recomputes from insured liabilities; B-12 pays it into the fund", () => {
+  advanceSeqs(wF, 1100);
+  ripen(wF, "prem_bankF_0");
+  const expected = premiumDueRubars({ insuredLiabilitiesRubars: 400000, riskMultiplier: 2, periodSeqs: 1000 });
+  assert.equal(expected, 800);
+  const { plan, event } = run(wF, action(memberActor(OWNER_F), OWNER_F, "pay_insurance_premium", {
+    cityId: CITY, corporationId: "bankF", amountRubars: expected,
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+  assert.equal(fundRecordOf(doc(wF, INSURANCE_FUND_PATH))?.fundCashRubars, 800);
+});
+
+const loanFD = offerLoan(wF, wFEvents, OWNER_F, CITY, "bankF", {
+  borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 440000, rateBpsPerKseq: 1000,
+  installmentCount: 2, dueIntervalSeqs: 50, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+});
+const loanFE = offerLoan(wF, wFEvents, OWNER_F, CITY, "bankF", {
+  borrower: { kind: "personal", memberId: MEMBER_E }, principalRubars: 25000, rateBpsPerKseq: 0,
+  installmentCount: 2, dueIntervalSeqs: 10000, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+});
+
+check("W2 loans fund (cash branch); pendings == installmentCount at exact due seqs", () => {
+  const acceptD = acceptLoan(wF, wFEvents, memberActor(MEMBER_D), MEMBER_D, CITY, loanFD);
+  assert.equal(acceptD.outcome, "resolved", acceptD.rejection?.summaryText ?? "");
+  const acceptE = acceptLoan(wF, wFEvents, memberActor(MEMBER_E), MEMBER_E, CITY, loanFE);
+  assert.equal(acceptE.outcome, "resolved", acceptE.rejection?.summaryText ?? "");
+  const funded = loansOf(wF, "bankF").find((l) => l.loanId === loanFD.loanId) as BankLoanRecord;
+  assert.equal(funded.status, "active");
+  for (let k = 1; k <= 2; k += 1) {
+    const pending = doc(wF, `sim_pending_consequences/inst_${loanFD.loanId}_${k}`);
+    assert.equal(
+      (pending.ripenCondition as Record<string, unknown>).requiredSeq,
+      (funded.originatedAtSeq as number) + k * 50
+    );
+  }
+  assert.equal(bankBlock(wF, CITY, "bankF").loanBookRubars, 465000);
+});
+
+check("W2 default derives at the crossing ripening (B2 card + remedies-armed K1); seizure of an unsecured loan refuses no-collateral", () => {
+  advanceSeqs(wF, 60);
+  ripen(wF, `inst_${loanFD.loanId}_1`);
+  const loan = loansOf(wF, "bankF").find((l) => l.loanId === loanFD.loanId) as BankLoanRecord;
+  assert.equal(deriveLoanStanding(loan, counterSeq(wF)).inDefault, true);
+  assert.ok(openSituations(wF, loanFD.loanId).length >= 2, "borrower B2 card + bank K1 card stand open");
+  const seize = run(wF, action(memberActor(OWNER_F), OWNER_F, "seize_collateral", {
+    cityId: CITY, corporationId: "bankF", loanId: loanFD.loanId, borrower: loan.borrower, collateral: { kind: "none" },
+  }));
+  assert.equal(seize.plan.outcome, "rejected");
+  assert.equal(seize.plan.rejection?.code, "no-collateral");
+});
+
+let w2FundShortfalls = { b: 0, c: 0 };
+check("W2 write-off drives derived failure; B-10 waterfall + B-13 + assignment land exactly as recomputed", () => {
+  const writeOff = run(wF, action(memberActor(OWNER_F), OWNER_F, "write_off_loan", {
+    cityId: CITY, corporationId: "bankF", loanId: loanFD.loanId, borrower: loanFD.borrower, amountRubars: 440000,
+  }));
+  assert.equal(writeOff.plan.outcome, "resolved", writeOff.plan.rejection?.summaryText ?? "");
+  if (writeOff.event) wFEvents.push(writeOff.event);
+  assert.equal(deriveBankHealth(doc(wF, corpPath(CITY, "bankF"))), "insolvent");
+
+  // Recompute the waterfall from the standing records (REC-5 basis).
+  const corp = doc(wF, corpPath(CITY, "bankF"));
+  const cash = corp.companyCashRubars as number;
+  const freezeSeq = counterSeq(wF) + 1;
+  const claims = [depFB, depFC].map((d) => {
+    const live = depositsOf(wF, "bankF").find((x) => x.depositId === d.depositId) as BankDepositRecord;
+    return { deposit: live, frozen: live.principalRubars + live.creditedInterestRubars + accruedUnsettledRubars(live, freezeSeq) };
+  });
+  const totalClaims = claims.reduce((s, c) => s + c.frozen, 0);
+  const estateFor = (frozen: number) => Math.floor((cash * frozen) / totalClaims);
+  const { plan, event } = run(wF, action(memberActor(OWNER_F), OWNER_F, "liquidate_bank", {
+    cityId: CITY, corporationId: "bankF", trigger: "owner",
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+  let fundPaidTotal = 0;
+  for (const { deposit: live, frozen } of claims) {
+    const after = depositsOf(wF, "bankF").find((x) => x.depositId === live.depositId) as BankDepositRecord;
+    assert.equal(after.status, "assigned");
+    const block = after.liquidation as unknown as Record<string, number>;
+    assert.equal(block.frozenClaimRubars, frozen, "REC-5 frozen claim");
+    const covered = Math.min(frozen, 250000);
+    assert.equal(block.coveredRubars, covered);
+    const estate = estateFor(frozen);
+    assert.equal(block.estatePaidRubars, estate, "tier (c) pro-rata on the full frozen claim");
+    const estateOnCovered = Math.floor((estate * covered) / frozen);
+    const due = covered - estateOnCovered;
+    assert.ok(block.fundPaidRubars <= due, "B-13 pays at most the covered shortfall");
+    assert.equal(block.fundPaidRubars + block.fundShortfallRubars, due, "paid + queued == due (REC-7 three-state)");
+    fundPaidTotal += block.fundPaidRubars;
+    if (live.depositor.kind === "personal" && live.depositor.memberId === MEMBER_B) w2FundShortfalls.b = block.fundShortfallRubars;
+    if (live.depositor.kind === "personal" && live.depositor.memberId === MEMBER_C) w2FundShortfalls.c = block.fundShortfallRubars;
+  }
+  assert.equal(fundRecordOf(doc(wF, INSURANCE_FUND_PATH))?.fundCashRubars, 800 - fundPaidTotal, "the fund paid only inside B-10");
+  const assignedE = loansOf(wF, "bankF").find((l) => l.loanId === loanFE.loanId) as BankLoanRecord;
+  assert.equal(assignedE.status, "assigned");
+  assert.equal(assignedE.outstandingRubars, 25000);
+  const writtenOff = loansOf(wF, "bankF").find((l) => l.loanId === loanFD.loanId) as BankLoanRecord;
+  assert.equal(writtenOff.status, "written-off", "a written-off loan is not the pool's — it was already forgiven");
+  assert.equal(doc(wF, corpPath(CITY, "bankF")).status, "dissolved");
+  assert.equal(bankBlock(wF, CITY, "bankF").status, "surrendered");
+  const allSituations = [...wF.entries()].filter(([path]) => path.startsWith("sim_situations/"));
+  assert.ok(openSituations(wF, "has been liquidated").length >= 2, "D1 cards stand for both depositors");
+});
+
+check("W2 pool recovery: E's pool-form repayment distributes across claims, subrogation routes the fund's share first", () => {
+  const unpaidB = poolUnpaidRubars(depositsOf(wF, "bankF").find((d) => d.depositId === depFB.depositId) as BankDepositRecord);
+  const unpaidC = poolUnpaidRubars(depositsOf(wF, "bankF").find((d) => d.depositId === depFC.depositId) as BankDepositRecord);
+  const fundBefore = fundRecordOf(doc(wF, INSURANCE_FUND_PATH))?.fundCashRubars as number;
+  const cashBBefore = (doc(wF, `sim_member_accounts/${MEMBER_B}`).cashRubars as number);
+  const frozenCashBefore = doc(wF, corpPath(CITY, "bankF")).companyCashRubars as number;
+  const cashEBefore = (doc(wF, `sim_member_accounts/${MEMBER_E}`).cashRubars as number);
+  const { plan, event } = run(wF, action(memberActor(MEMBER_E), MEMBER_E, "repay_loan", {
+    cityId: CITY, corporationId: "bankF", loanId: loanFE.loanId, borrower: { kind: "personal", memberId: MEMBER_E },
+    amountRubars: 20000, collateral: { kind: "none" },
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+  const total = unpaidB + unpaidC;
+  // §5.6 integer rules: each claim's share is floored; the remainder
+  // is dust to the dissolved bank's frozen cash record — it is NOT
+  // rounded into anyone's distribution.
+  const shareB = Math.floor((20000 * unpaidB) / total);
+  const shareC = Math.floor((20000 * unpaidC) / total);
+  const dust = 20000 - shareB - shareC;
+  const afterB = depositsOf(wF, "bankF").find((d) => d.depositId === depFB.depositId) as BankDepositRecord;
+  const afterC = depositsOf(wF, "bankF").find((d) => d.depositId === depFC.depositId) as BankDepositRecord;
+  assert.equal(afterB.liquidation?.poolDistributedRubars, shareB, "B's distribution is its floored pro-rata share");
+  assert.equal(afterC.liquidation?.poolDistributedRubars, shareC, "C's distribution is its floored pro-rata share");
+  assert.equal((doc(wF, corpPath(CITY, "bankF")).companyCashRubars as number) - frozenCashBefore, dust, "the floor remainder sits in the dissolved bank's frozen cash record (§5.6 dust)");
+  assert.equal(cashEBefore - (doc(wF, `sim_member_accounts/${MEMBER_E}`).cashRubars as number), 20000, "the borrower paid the full filed amount — dust is the pool's remainder, not a borrower rebate");
+  const fundAfter = fundRecordOf(doc(wF, INSURANCE_FUND_PATH))?.fundCashRubars as number;
+  const recoveredTotal = (afterB.liquidation?.fundRecoveredRubars ?? 0) + (afterC.liquidation?.fundRecoveredRubars ?? 0);
+  assert.equal(fundAfter - fundBefore, recoveredTotal, "subrogated recoveries are a fund inflow (derived routing, M10's closed set)");
+  assert.ok(recoveredTotal > 0, "the fund recovers before depositors see pool money on claims it topped up");
+  assert.equal((doc(wF, `sim_member_accounts/${MEMBER_B}`).cashRubars as number) - cashBBefore, shareB - (afterB.liquidation?.fundRecoveredRubars ?? 0));
+});
+
+check("W2 conservation clean (v1 failure fixture, every transition from the standing Log)", () => {
+  assertConservationClean(wF, wFEvents, "W2");
+});
+
+// ---------------------------------------------------------------------------
+section("W3 — failure fixture v2 (credit-created): creation pair, setoff, senior queue, pool recovery");
+
+charter(wF, wFEvents, OWNER_G, CITY, "bankG");
+const depGB = deposit(wF, wFEvents, MEMBER_B, CITY, "bankG", 500000);
+const depGC = deposit(wF, wFEvents, MEMBER_C, CITY, "bankG", 50000);
+
+check("W3 premium for bankG lands in the (drained) fund", () => {
+  advanceSeqs(wF, 1100);
+  ripen(wF, "prem_bankG_0");
+  const due = premiumDueRubars({ insuredLiabilitiesRubars: 550000, riskMultiplier: 2, periodSeqs: 1000 });
+  assert.equal(due, 1100);
+  const { plan, event } = run(wF, action(memberActor(OWNER_G), OWNER_G, "pay_insurance_premium", {
+    cityId: CITY, corporationId: "bankG", amountRubars: due,
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+});
+
+const loanGC = offerLoan(wF, wFEvents, OWNER_G, CITY, "bankG", {
+  borrower: { kind: "personal", memberId: MEMBER_C }, principalRubars: 300000, rateBpsPerKseq: 1000,
+  installmentCount: 3, dueIntervalSeqs: 40, defaultMissedCount: 2, collateral: { kind: "none" },
+  fundingSource: "credit", createdDepositRateBpsPerKseq: 0,
+});
+const loanGD = offerLoan(wF, wFEvents, OWNER_G, CITY, "bankG", {
+  borrower: { kind: "personal", memberId: MEMBER_D }, principalRubars: 500000, rateBpsPerKseq: 1000,
+  installmentCount: 2, dueIntervalSeqs: 40, defaultMissedCount: 1, collateral: { kind: "none" }, fundingSource: "cash",
+});
+
+check("item 5: B-06 credit branch — ΔCash 0, ΔAssets = ΔLiabilities = P, pair stamped (G1's positive proof)", () => {
+  const cashBefore = (doc(wF, corpPath(CITY, "bankG")).companyCashRubars as number);
+  const plan = acceptLoan(wF, wFEvents, memberActor(MEMBER_C), MEMBER_C, CITY, loanGC);
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  const corpAfter = doc(wF, corpPath(CITY, "bankG"));
+  assert.equal(corpAfter.companyCashRubars, cashBefore, "creation moves no cash");
+  const block = bankBlock(wF, CITY, "bankG");
+  assert.equal(block.loanBookRubars, 300000);
+  assert.equal(block.depositLiabilitiesRubars, 850000);
+  const created = depositsOf(wF, "bankG").find((d) => d.origin === "credit-created") as BankDepositRecord;
+  assert.ok(created);
+  assert.equal(created.principalRubars, 300000);
+  assert.equal(created.fundingLoanId, loanGC.loanId);
+  const fundedLoan = loansOf(wF, "bankG").find((l) => l.loanId === loanGC.loanId) as BankLoanRecord;
+  assert.equal(fundedLoan.proceedsDepositId, created.depositId);
+});
+
+check("item 5 boundary: cash funding at exactly lendable passes", () => {
+  const plan = acceptLoan(wF, wFEvents, memberActor(MEMBER_D), MEMBER_D, CITY, loanGD);
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  assert.equal((doc(wF, corpPath(CITY, "bankG")).companyCashRubars as number), 170000);
+});
+
+check("item 6: B-07 netting — principal nets against the loan's own created deposit; interest pays in cash only", () => {
+  const createdBefore = depositsOf(wF, "bankG").find((d) => d.origin === "credit-created") as BankDepositRecord;
+  const cashCBefore = (doc(wF, `sim_member_accounts/${MEMBER_C}`).cashRubars as number);
+  const { plan, event } = run(wF, action(memberActor(MEMBER_C), MEMBER_C, "repay_loan", {
+    cityId: CITY, corporationId: "bankG", loanId: loanGC.loanId, borrower: { kind: "personal", memberId: MEMBER_C },
+    amountRubars: 100000, netting: true, collateral: { kind: "none" },
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+  const summary = plan.entries[plan.entries.length - 1];
+  const loanClass = (summary.classification as Record<string, unknown>).loan as Record<string, unknown>;
+  const netted = loanClass.nettedPrincipalRubars as number;
+  assert.ok(netted > 0, "some principal netted");
+  const createdAfter = depositsOf(wF, "bankG").find((d) => d.depositId === createdBefore.depositId) as BankDepositRecord;
+  assert.equal(createdBefore.principalRubars - createdAfter.principalRubars, netted, "the deposit fell by exactly the netted principal");
+  assert.equal(cashCBefore - (doc(wF, `sim_member_accounts/${MEMBER_C}`).cashRubars as number), 100000 - netted, "cash moved only for the un-netted portion (interest + remaining principal)");
+});
+
+check("W3 failure derives (write-off of D's cash loan); B-10 pays the SENIOR queue before its own top-ups", () => {
+  advanceSeqs(wF, 50);
+  ripen(wF, `inst_${loanGD.loanId}_1`);
+  const writeOff = run(wF, action(memberActor(OWNER_G), OWNER_G, "write_off_loan", {
+    cityId: CITY, corporationId: "bankG", loanId: loanGD.loanId, borrower: loanGD.borrower, amountRubars: 200000,
+  }));
+  assert.equal(writeOff.plan.outcome, "resolved", writeOff.plan.rejection?.summaryText ?? "");
+  if (writeOff.event) wFEvents.push(writeOff.event);
+  assert.equal(deriveBankHealth(doc(wF, corpPath(CITY, "bankG"))), "insolvent");
+
+  const fundBefore = fundRecordOf(doc(wF, INSURANCE_FUND_PATH))?.fundCashRubars as number;
+  const shortfallsBefore = {
+    b: (depositsOf(wF, "bankF").find((d) => d.depositId === depFB.depositId) as BankDepositRecord).liquidation?.fundShortfallRubars ?? 0,
+    c: (depositsOf(wF, "bankF").find((d) => d.depositId === depFC.depositId) as BankDepositRecord).liquidation?.fundShortfallRubars ?? 0,
+  };
+  assert.equal(shortfallsBefore.b, w2FundShortfalls.b);
+  const { plan, event } = run(wF, action(memberActor(OWNER_G), OWNER_G, "liquidate_bank", {
+    cityId: CITY, corporationId: "bankG", trigger: "owner",
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+  const shortfallsAfter = {
+    b: (depositsOf(wF, "bankF").find((d) => d.depositId === depFB.depositId) as BankDepositRecord).liquidation?.fundShortfallRubars ?? 0,
+    c: (depositsOf(wF, "bankF").find((d) => d.depositId === depFC.depositId) as BankDepositRecord).liquidation?.fundShortfallRubars ?? 0,
+  };
+  const seniorPaidTotal = (shortfallsBefore.b - shortfallsAfter.b) + (shortfallsBefore.c - shortfallsAfter.c);
+  assert.ok(seniorPaidTotal > 0, "failure 1's queued shortfalls settled inside failure 2's liquidation");
+  assert.equal(seniorPaidTotal, Math.min(fundBefore, shortfallsBefore.b + shortfallsBefore.c), "the senior queue consumed the fund before any new top-up");
+  // bankG's own depositors: their top-ups could only come after the
+  // senior queue — with the fund exhausted by it, they queue in full.
+  const gTopUps = depositsOf(wF, "bankG").reduce((s, d) => s + (d.liquidation?.fundPaidRubars ?? 0), 0);
+  const seniorFirst = seniorPaidTotal >= Math.min(fundBefore, shortfallsBefore.b);
+  assert.ok(seniorFirst);
+  if (fundBefore - seniorPaidTotal <= 0) assert.equal(gTopUps, 0, "no top-up leapfrogged the senior queue");
+  // Setoff: C's assigned loan carries setoff; D's assigns whole.
+  const loanCAfter = loansOf(wF, "bankG").find((l) => l.loanId === loanGC.loanId) as BankLoanRecord;
+  assert.equal(loanCAfter.status, "assigned");
+  assert.ok((loanCAfter.setoffAppliedRubars ?? 0) > 0, "setoff applied in-event (BNK-D16)");
+  assert.equal(loanCAfter.outstandingRubars + (loanCAfter.setoffAppliedRubars ?? 0), 300000 - nettedPrincipalTotal(wF, loanGC.loanId));
+  const loanDAfter = loansOf(wF, "bankG").find((l) => l.loanId === loanGD.loanId) as BankLoanRecord;
+  assert.equal(loanDAfter.status, "assigned");
+  assert.equal(loanDAfter.outstandingRubars, 300000);
+});
+
+function nettedPrincipalTotal(world: World, loanId: string): number {
+  const loan = loansOf(world, "bankG").find((l) => l.loanId === loanId) as BankLoanRecord;
+  return loan.nettedPrincipalRubars ?? 0;
+}
+
+check("W3 pool recovery: D's pool-form repayment distributes to B and C by unpaid claim", () => {
+  const before = depositsOf(wF, "bankG").map((d) => ({ id: d.depositId, distributed: d.liquidation?.poolDistributedRubars ?? 0 }));
+  const frozenBefore = doc(wF, corpPath(CITY, "bankG")).companyCashRubars as number;
+  const { plan, event } = run(wF, action(memberActor(MEMBER_D), MEMBER_D, "repay_loan", {
+    cityId: CITY, corporationId: "bankG", loanId: loanGD.loanId, borrower: { kind: "personal", memberId: MEMBER_D },
+    amountRubars: 50000, collateral: { kind: "none" },
+  }));
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  if (event) wFEvents.push(event);
+  const gained = depositsOf(wF, "bankG").reduce((s, d) => {
+    const prior = before.find((b) => b.id === d.depositId)?.distributed ?? 0;
+    return s + ((d.liquidation?.poolDistributedRubars ?? 0) - prior);
+  }, 0);
+  // §5.6: distributions are integer floors; the remainder is dust
+  // in the dissolved bank's frozen cash record. Distributed + dust
+  // is the whole repayment — nothing vanishes, nothing rounds up.
+  const dustDelta = (doc(wF, corpPath(CITY, "bankG")).companyCashRubars as number) - frozenBefore;
+  assert.equal(gained + dustDelta, 50000, "distributed + dust == the repayment (interest portion first, then principal)");
+  assert.ok(gained > 0 && gained <= 50000);
+});
+
+check("item 14: the controller bar — barred while seqs short OR obligations stand; lifts only when both pass", () => {
+  seedCorp(wF, { homeCityId: CITY, corporationId: "bankF2", ownerMemberId: OWNER_F, companyCashRubars: 150000 });
+  const barred = run(wF, action(memberActor(OWNER_F), OWNER_F, "charter_bank", {
+    cityId: CITY, corporationId: "bankF2", reserveRatioBps: 2000, depositRateCeilingBpsPerKseq: 2000, loanRateCeilingBpsPerKseq: 3000,
+  }));
+  assert.equal(barred.plan.outcome, "rejected");
+  assert.equal(barred.plan.rejection?.code, "controller-barred");
+  // C controlled no bank, but C OWES the bankG pool: C is not a
+  // controller — the bar names controllers only. C charters freely
+  // (their obligation is a debt, not a bar) — asserted here so the
+  // bar's scope stays exactly BNK-D15's.
+  seedCorp(wF, { homeCityId: CITY, corporationId: "bankC1", ownerMemberId: MEMBER_C, companyCashRubars: 150000 });
+  const cCharters = run(wF, action(memberActor(MEMBER_C), MEMBER_C, "charter_bank", {
+    cityId: CITY, corporationId: "bankC1", reserveRatioBps: 2000, depositRateCeilingBpsPerKseq: 2000, loanRateCeilingBpsPerKseq: 3000,
+  }));
+  assert.equal(cCharters.plan.outcome, "resolved", cCharters.plan.rejection?.summaryText ?? "");
+  if (cCharters.event) wFEvents.push(cCharters.event);
+  // ownerG is bankG's controller: barred now; after 2,000 seqs AND
+  // with no personal obligations at bankG (G borrowed nothing),
+  // the bar lifts on seqs alone.
+  seedCorp(wF, { homeCityId: CITY, corporationId: "bankG2", ownerMemberId: OWNER_G, companyCashRubars: 150000 });
+  const gBarred = run(wF, action(memberActor(OWNER_G), OWNER_G, "charter_bank", {
+    cityId: CITY, corporationId: "bankG2", reserveRatioBps: 2000, depositRateCeilingBpsPerKseq: 2000, loanRateCeilingBpsPerKseq: 3000,
+  }));
+  assert.equal(gBarred.plan.rejection?.code, "controller-barred");
+  advanceSeqs(wF, 2100);
+  const gFree = run(wF, action(memberActor(OWNER_G), OWNER_G, "charter_bank", {
+    cityId: CITY, corporationId: "bankG2", reserveRatioBps: 2000, depositRateCeilingBpsPerKseq: 2000, loanRateCeilingBpsPerKseq: 3000,
+  }));
+  assert.equal(gFree.plan.outcome, "resolved", gFree.plan.rejection?.summaryText ?? "");
+  if (gFree.event) wFEvents.push(gFree.event);
+});
+
+check("M9: the pool's book is not the old owner's — B-11 on an assigned loan refuses", () => {
+  const attempt = run(wF, action(memberActor(OWNER_G), OWNER_G, "write_off_loan", {
+    cityId: CITY, corporationId: "bankG", loanId: loanGD.loanId, borrower: loanGD.borrower, amountRubars: 1000,
+  }));
+  assert.equal(attempt.plan.outcome, "rejected");
+  assert.equal(attempt.plan.rejection?.code, "loan-not-active");
+});
+
+check("W3 conservation clean (v2 fixture + senior queue + pool recovery, standing Log)", () => {
+  assertConservationClean(wF, wFEvents, "W3");
+});
