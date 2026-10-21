@@ -30,8 +30,11 @@ import assert from "node:assert/strict";
 import {
   collectActionReadPaths,
   collectActionReadPlan,
+  collectRipeningReadPaths,
+  collectRipeningReadQueries,
   digestQueryResults,
   resolveAction,
+  resolveRipening,
   snapshotFromDocs,
 } from "../lib/sim/resolver";
 import { buildActionDoc } from "../lib/sim/intake";
@@ -1704,6 +1707,69 @@ check("item 15 exports: §7.5 scope is fail-closed in the pure layer; the verifi
   assert.ok(rendered.includes("tracked_cash_rubars"), "tracked cash is labeled as tracked cash");
   assert.ok(rendered.includes("created_supply_rubars"), "created supply is labeled as created supply");
   assert.ok(!rendered.includes("money_supply"), "no unqualified money-supply label anywhere (G4)");
+});
+
+// ---------------------------------------------------------------------------
+section("A1 (PR-6 assembly) — the resolver's schedule branch drives a premium ripening end-to-end");
+
+const wA = seedWorld();
+const wAEvents: ConservationEvent[] = [];
+seedAccount(wA, OWNER_A, 900000);
+seedAccount(wA, MEMBER_B, 900000);
+seedCorp(wA, { homeCityId: CITY, corporationId: "bankA1", ownerMemberId: OWNER_A, companyCashRubars: 150000 });
+foundDif(wA, memberActor(OWNER_A), OWNER_A);
+charter(wA, wAEvents, OWNER_A, CITY, "bankA1");
+deposit(wA, wAEvents, MEMBER_B, CITY, "bankA1", 100000);
+advanceSeqs(wA, 1100);
+
+function driveScheduleRipening(world: World, pendingId: string) {
+  const pending = doc(world, `sim_pending_consequences/${pendingId}`);
+  const paths = collectRipeningReadPaths(pending);
+  const queries = collectRipeningReadQueries(pending);
+  const snapshotDocs: World = new Map();
+  for (const path of paths) snapshotDocs.set(path, world.get(path) ?? null);
+  const queryRecords = materializeQueries(world, queries as never[], snapshotDocs);
+  const snapshot = snapshotFromDocs(snapshotDocs, NOW, queryRecords);
+  return { pending, paths, queries, plan: resolveRipening(snapshot, pending, { baselineRegistry: registry }) };
+}
+
+check("A1: collectors declare the banking read set from the frozen schedule spec", () => {
+  const pending = doc(wA, "sim_pending_consequences/prem_bankA1_0");
+  const paths = collectRipeningReadPaths(pending);
+  assert.ok(paths.includes(INSURANCE_FUND_PATH), "the fund singleton is a declared read path");
+  assert.ok(paths.includes(corpPath(CITY, "bankA1")), "the bank corporation doc is a declared read path");
+  const queryIds = collectRipeningReadQueries(pending).map((q) => q.id);
+  for (const id of ["bankDeposits", "bankLoans", "premiumMarkers", "premiumSettlements", "assessmentMarkers", "standingSchedulePendings"]) {
+    assert.ok(queryIds.includes(id), `query ${id} declared`);
+  }
+  assert.ok(queryIds.some((id) => id.startsWith("situationsByKey")), "the bank city's Situation query is declared");
+});
+
+check("A1: resolveRipening lands the premium ripening + the Lead-owned transition + the successor", () => {
+  const { plan } = driveScheduleRipening(wA, "prem_bankA1_0");
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  assert.ok(
+    plan.pendingTransitions.some((t) => t.pendingId === "prem_bankA1_0" && t.toStatus === "ripened"),
+    "the branch transitions the driven pending to ripened"
+  );
+  assert.ok(
+    plan.entries.some((e) => e.ruleIds.includes("B-12")),
+    "the premium marker entry lands under B-12"
+  );
+  assert.ok(
+    plan.pendingCreates.some((c) => c.doc.pendingId === "prem_bankA1_1"),
+    "the successor premium pending is created in-event (SPEC-1 perpetuation)"
+  );
+});
+
+check("A1: a schedule ripening whose declared reads are absent refuses through the preparation channel", () => {
+  const wBroken = new Map(wA);
+  wBroken.delete(INSURANCE_FUND_PATH);
+  assert.throws(
+    () => driveScheduleRipening(wBroken, "prem_bankA1_0"),
+    /refused \(ripening-read-incomplete\)/,
+    "nothing ripens blind: the composition's refusal surfaces as a ripening preparation failure, never a committed rejection"
+  );
 });
 
 console.log(`\nbanking harness: ${checks} checks passed`);

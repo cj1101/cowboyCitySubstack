@@ -6007,7 +6007,12 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     visibility: "public",
     requiresBaseline: false,
     defaultBaselineSections: [],
-    mayCreatePendings: false,
+    // PR-6 assembly (A1): the installment ripening composition
+    // creates the successor installment pending in-event (SPEC-1
+    // perpetuation) under this descriptor — the permission B-01 /
+    // B-06 already carry for their own seeding. The action handler
+    // itself creates none.
+    mayCreatePendings: true,
     handlers: { repay_loan: repayLoanHandler },
     readPlan: repayLoanReadPlan,
     summary: "Repay a loan (Tier A, borrower-initiated only, never auto-debit): fixed allocation (interest, fee at payoff, principal), principal-only netting against the loan's own created deposit, and the pool form for assigned loans with subrogation routing.",
@@ -6062,7 +6067,12 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     visibility: "public",
     requiresBaseline: false,
     defaultBaselineSections: [],
-    mayCreatePendings: false,
+    // PR-6 assembly (A1): the premium ripening composition creates
+    // the successor premium pending — and any B-14 assessment
+    // pending the fund's deficiency raises — in-event, under this
+    // descriptor (SPEC-1 perpetuation). The action handler itself
+    // creates none.
+    mayCreatePendings: true,
     handlers: { pay_insurance_premium: payInsurancePremiumHandler },
     readPlan: insurancePaymentReadPlan("B-12"),
     summary: "Pay deposit-insurance premiums in full against ripened markers (Tier A, never auto-debit); the settlement classification is the delinquency ladder's input — cure derives, no flag flips.",
