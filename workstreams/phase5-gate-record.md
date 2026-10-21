@@ -725,3 +725,111 @@ needs, members none until the office exists) plus rules-suite
 assertions — but round 5 follows the prints, not this paragraph.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 4 (interim), 2026-10-21.*
+
+## CI fix round 5 (PR #45) — sim_terms rules block lands; all DIAG removed
+
+**Root cause (final, convicted on the round-4 census):** `firestore.rules`
+carried NO `sim_terms` match block at all. The authority stage's read plan
+(`collectNpcStageReadPlan`, `lib/sim/authorityStage.ts`) adds
+`TERMS_PATH = sim_terms/current` for EVERY NPC-actor action, and the stage
+handles the record's absence from the snapshot by design — no term record
+stands until the Phase 7 election act (Phase 5 brief line 35: "No term
+records are created by this phase"). But a rules-denied get is not an
+absent doc: with no allow statement it throws `permission-denied` ("No
+matching allow statements"), for the production fabric identity exactly as
+for the suite. CI evidence (run on `0db1660`, log
+`pr45-simcore-log-r4diag.txt`): the census of 25 operations printed 24
+ALLOWED and exactly ONE denied — `Q-terms-get-current: DENIED` — and the
+bisection funnel named it in situ: `DIAG STEP materialize: DENIED get
+sim_terms/current` ← `delegatedAction.snapshot: DENIED` ←
+`dispatcher.passes: DENIED`. N4's delegated action was the first NPC-actor
+materialization in any emulator suite (N1–N3 actors are members), which is
+why the seam was unreachable in every earlier venue. This is an
+engine/rules seam fix, not a suite fix: no test was changed to
+accommodate it, and no engine code changed.
+
+**The block, and its posture (design citation).** Dana's
+backend-architecture §3.2 specifies `sim_terms/{termId}` (fields `cityId`,
+`mayorUid`, `viceMayorUid`, `startedSeq`, `endedSeq | null`,
+`sourceActionId`, `status: "current" | "closed"`) with the posture stated
+verbatim: "**Reads:** members and guests. **Writes:** fabric committer only
+through R-22/close-season actions." §A.3 + the election design add that
+certification is one Resolution Event resolved by the fabric, closing the
+outgoing record and opening the new one atomically — i.e. the design DOES
+name a committer write posture, and this block implements exactly it:
+
+```
+match /sim_terms/{termId} {
+  allow read: if isViewer();
+  allow create, update: if isFabricCommitter();
+  allow delete: if false;
+}
+```
+
+- Read `isViewer()` is the rules dialect's "members and guests" (the same
+  translation `sim_world/current` carries). It covers the fabric
+  identities the stage runs as: in the engine's operating model the fabric
+  service user holds a `users` record and satisfies `isViewer()` — the
+  PR #44 lesson, seeded in both suites' fixtures and proven by the census
+  itself (the viewer-gated `sim_world` get was ALLOWED as fabricSvc). No
+  separate fabric disjunct was needed, and none was added.
+- Write committer-only, through the Phase 7 R-22 actions when they land.
+  No landed Phase 5 code path writes `sim_terms` (grep: the stage reads
+  it; nothing else in `lib/` references it as a write), so carrying the
+  branch now stands no record up early — the same posture `sim_world`'s
+  committer branch carried from Phase 2, before genesis.
+- Delete denied to everyone: term records are historical (a closed term
+  persists on the record series), matching the three sibling core-state
+  singletons (`sim_world`, `sim_counters`, `sim_fabric_status`), and the
+  election design's undo posture for certifications (undo-locked,
+  cascaded) gives no delete path.
+- One divergence from round 4's interim sketch, recorded plainly: the
+  sketch guessed "members none until the office exists" for reads. The
+  design text found at fix time says members AND guests — the block
+  follows the design, and the sketch is superseded.
+
+**Rules-suite assertions added** (tests/rules.test.ts, "ok sim terms
+posture"): fabric committer AND fabric worker gets on the ABSENT
+`sim_terms/current` succeed (the absence posture the stage depends on);
+guest + member gets succeed; anon + suspended gets fail; member and
+fabric-worker creates fail; committer create (Dana §3.2 shape) and update
+succeed; member update fails; delete fails for member AND committer. The
+Rules suite is CI's venue for execution; the block + assertions are
+written to run to its final ok line.
+
+**DIAG removal (grep proof).** Round 3's probes (`521a762`) and round 4's
+census + bisection labels (`3fab1df`) are reverted wholesale. The four
+touched files — `lib/sim/resolver.ts`, `lib/sim/dispatcher.ts`,
+`lib/sim/wakePasses.ts`, `tests/npc-core.test.ts` — are verified
+BYTE-IDENTICAL to their pre-DIAG state at `f9686af` (`git diff f9686af`
+over those paths: empty), so rounds 1–2's suite fixes stand exactly as
+written and no assertion was touched by the removal. Tree-wide grep over
+`lib/ tests/ app/ components/` for `DIAG`: **0 occurrences**.
+
+**Completeness sweep** — every collection the engine reads or writes
+(grep of read plans, query specs, path constants, and committer write
+paths across `lib/sim`, `lib/npcs`, `lib/authority`, `lib/envelopes`,
+`lib/finance`) vs `firestore.rules` match blocks:
+
+| Engine-touched collection | Rules block | Verdict |
+|---|---|---|
+| sim_terms | **was MISSING** | FIXED this round (the convicted gap) |
+| sim_actions, sim_resolutions, sim_log_entries, sim_counters, sim_world, sim_cities (+ structures/households/figures/corporations/laws/budgets/funds/projects subcollections), sim_stat_allocations (+ versions), sim_pending_consequences, sim_undo_operations, sim_publications, sim_intel_records, sim_cases, sim_collection_means, sim_collection_posture, sim_verification_adoptions, sim_wiki_entry_drafts, sim_member_accounts, sim_bank_deposits, sim_bank_loans, sim_deposit_insurance_fund, sim_market_account, sim_market_listings, sim_market_orders, sim_market_trades, sim_holdings, sim_npcs, sim_teams, sim_mandates (+ versions), sim_task_envelopes, sim_task_outputs, sim_situations, sim_delegation_rules (+ versions), factions, characters, wiki_entries | present | covered — every one exercised green in CI across Phases 2–5 or in the round-4 census |
+| sim_seasons | MISSING | **Named finding, NOT fixed:** zero references anywhere in this repo's `lib/ app/ components/ scripts/` — Dana §3.2's other half stands up only with Phase 7 close-season actions. Same missing-block class, unreachable by any landed code path. Phase 7 must land its block with its first read/write path, the way this round did for terms. |
+| sim_elections (+ ballots subcollection) | MISSING | **Named finding, NOT fixed:** same posture — the election engine lives in its own clone for Phase 7; nothing in this repo references the collection. Phase 7 carries the same obligation. |
+
+`sim_terms` was the only REACHABLE gap of the class.
+
+**Local regression (assembled branch tip):** `tsc --noEmit` clean ·
+scoped ESLint on the five touched files 0 errors (one pre-existing
+`_dropped` warning in tests/rules.test.ts, untouched region, carried since
+PR #44) · full pure battery green at landed counts (cat1 all, defense 12,
+chains 34, cat2 34, acq 14, market 27, lore 27, closeout 29, governance
+59, situations 32, banking 54, wake 23; npc-core harness 37, authority +
+envelopes harnesses all-pass) · `next build` green. The emulator suites
+(Rules incl. the new terms block; npc-core N4→N11 running for the first
+time) are CI's venue on this push. Remaining known watch items, unchanged
+from the gate build: N5 same-wake claim parity, N7 trigger candidacy,
+N9(b) `DEPENDENTS_EXIST`.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 5, 2026-10-21.*
