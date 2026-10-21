@@ -34,12 +34,12 @@ export interface EnvelopeBounds {
 /** `sim_task_envelopes/{taskId}` (brief §2.5, FINAL shape). */
 export interface TaskEnvelopeRecord {
   taskId: string;
-  requesterUid: string;
+  requestingMemberId: string;
   npcId: string;
   cityId: string;
   threadRef: { kind: string; id: string } | null;
   taskType: EnvelopeTaskType;
-  intentText: string;
+  task: string;
   structuredIntent: Record<string, unknown> | null;
   bounds: EnvelopeBounds;
   status: EnvelopeStatus;
@@ -79,6 +79,12 @@ export interface TaskOutputRecord {
   outputText: string;
   structuredOutput: EnvelopeStructuredOutput;
   createdSeq: number | null;
+  /** The envelope's read audience at completion (PR-2, F-S1 follow-up):
+   * the §9.5 rules branch (`taskOutputReadable`) reads this stored
+   * snapshot so output access survives later envelope changes (Dana
+   * §5.5 pattern). Supplied by the caller at completion; never derived
+   * inside this module. */
+  audienceUids: string[];
 }
 
 /** Who caused an envelope to exist. Owner-direct spawns carry the
@@ -87,12 +93,12 @@ export interface TaskOutputRecord {
 export type EnvelopeSpawnSource = "owner-direct" | "delegation-rule";
 
 export interface EnvelopeSpawnInput {
-  requesterUid: string;
+  requestingMemberId: string;
   npcId: string;
   cityId: string;
   threadRef: { kind: string; id: string } | null;
   taskType: EnvelopeTaskType;
-  intentText: string;
+  task: string;
   structuredIntent: Record<string, unknown> | null;
   /** Bounds as supplied; `mayCommit` is accepted only as false/absent —
    * the builder throws on true (three-deep, layer 2). */

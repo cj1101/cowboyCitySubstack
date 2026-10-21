@@ -138,6 +138,10 @@ export function buildTaskOutput(
     questions?: string[];
     findings?: unknown;
     createdSeq?: number | null;
+    /** The envelope's read audience at completion (§9.5 stored branch);
+     * defaults to the requesting member alone when the caller supplies
+     * nothing — the narrowest honest audience. */
+    audienceUids?: string[];
   }
 ): TaskOutputRecord {
   return {
@@ -154,6 +158,7 @@ export function buildTaskOutput(
       mayCommit: false,
     },
     createdSeq: opts.createdSeq ?? null,
+    audienceUids: opts.audienceUids ?? [env.requestingMemberId],
   };
 }
 
@@ -205,7 +210,7 @@ export function envelopeContextHash(
 ): string {
   return sha256Hex({
     taskId: env.taskId,
-    intentText: env.intentText,
+    task: env.task,
     structuredIntent: env.structuredIntent,
     bounds: env.bounds,
     mandateVersion,
