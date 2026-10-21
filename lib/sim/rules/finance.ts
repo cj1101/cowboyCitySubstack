@@ -154,6 +154,7 @@ import {
   type RipeningOccasionSpec,
   type SimSituation,
 } from "../situations";
+import { buildHoldingDoc, holdingPath, listingPath } from "../marketRecords";
 import { corporationPath } from "../corporations";
 
 // ---------------------------------------------------------------------------
@@ -2097,10 +2098,11 @@ function parseLoanTarget(
   if (!loanId) {
     return rejectedPlan(descriptorId, "malformed-action", [descriptorId], `${descriptorId}: the action requires loanId.`);
   }
-  const bankOrPlan = parseBankTarget(ctx, descriptorId);
-  if ("outcome" in bankOrPlan) return bankOrPlan;
-  const cityId = stringField(ctx.action, "cityId") as string;
-  const corporationId = stringField(ctx.action, "corporationId") as string;
+  const cityId = stringField(ctx.action, "cityId");
+  const corporationId = stringField(ctx.action, "corporationId");
+  if (!cityId || !corporationId) {
+    return rejectedPlan(descriptorId, "malformed-action", [descriptorId], `${descriptorId}: the action requires cityId and corporationId naming the bank.`);
+  }
   const loanPath = bankLoanPath(loanId);
   const loan = loanRecordOf(snapshotDoc(ctx.snapshot, loanPath));
   if (!loan) {
@@ -2109,7 +2111,23 @@ function parseLoanTarget(
   if (loan.bankCorporationId !== corporationId || loan.bankCityId !== cityId) {
     return rejectedPlan(descriptorId, "loan-bank-mismatch", [descriptorId], `${descriptorId}: loan ${loanId} names bank ${loan.bankCorporationId} in ${loan.bankCityId}; the action names ${corporationId} in ${cityId}. The stored record governs.`);
   }
-  return { loanPath, loan, bank: { ...bankOrPlan, cityId, corporationId } };
+  const corpPath = corporationPath(cityId, corporationId);
+  const corp = snapshotDoc(ctx.snapshot, corpPath);
+  if (!corp) {
+    return rejectedPlan(descriptorId, "corporation-not-found", [descriptorId], `${descriptorId}: no corporation record at ${corpPath}.`);
+  }
+  const bank = bankBlockOf(corp);
+  if (!bank) {
+    return rejectedPlan(descriptorId, "bank-not-chartered", [descriptorId], `${descriptorId}: ${corporationId} holds no bank charter block.`);
+  }
+  // A live loan needs a live charter; a pool-ASSIGNED loan acts on
+  // a dissolved bank by design (its charter ended at liquidation)
+  // — the pool verbs resolve the dead bank's records, never its
+  // charter powers.
+  if (bank.status !== "active" && loan.status !== "assigned") {
+    return rejectedPlan(descriptorId, "bank-not-chartered", [descriptorId], `${descriptorId}: ${corporationId} holds no active bank charter.`);
+  }
+  return { loanPath, loan, bank: { corpPath, corp, bank, cityId, corporationId } };
 }
 
 /** Control of a borrower ref by the actor (the B-03 depositor
@@ -2879,6 +2897,955 @@ function acceptLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
   }
   const collateral = parseCollateral(record.collateral);
   if (collateral?.kind === "shares") {
+    queries.push({
+      id: "pledgeHoldings",
+      collectionPath: "sim_holdings",
+      filters: [{ field: "corporationId", op: "==", value: collateral.corporationId }],
+    });
+  }
+  if (collateral?.kind === "structure") {
+    paths.push(`sim_cities/${collateral.cityId}/structures/${collateral.structureId}`);
+  }
+  return { paths, queries };
+}
+
+// ---------------------------------------------------------------------------
+// Pool closing (§5.6) — shared by the pool-form verbs. The book is
+// exhausted when nothing remains to collect (every assigned loan
+// at zero) or when every claim stands whole (nothing remains to
+// pay). At closing: each deposit's unpaid remainder is its
+// realized loss (writtenDownRubars stamped on credit-created
+// records — A-B5's bookkeeping; the figure itself derives from the
+// liquidation block for every class), records close, loans with
+// forgone outstanding are stamped poolClosed, and each depositor's
+// D1 card is superseded by their D2 pool-closing card.
+// ---------------------------------------------------------------------------
+
+interface PoolClosingResult {
+  closed: boolean;
+  realizedLossRubars: number;
+  situationClaims: { created: string[]; updated: string[] };
+}
+
+function maybeClosePool(
+  plan: ResolutionPlan,
+  ctx: HandlerContext,
+  args: {
+    bank: BankTarget & { cityId: string; corporationId: string };
+    deposits: BankDepositRecord[]; // PLANNED views of the bank's deposits
+    loans: BankLoanRecord[]; // PLANNED views of the bank's loans
+    summarySeq: number;
+    ruleId: string;
+  }
+): PoolClosingResult {
+  const none: PoolClosingResult = { closed: false, realizedLossRubars: 0, situationClaims: { created: [], updated: [] } };
+  const assignedDeposits = args.deposits.filter((d) => d.status === "assigned");
+  if (assignedDeposits.length === 0) return none;
+  const assignedLoans = args.loans.filter((l) => l.status === "assigned");
+  const loansExhausted = assignedLoans.every((l) => l.outstandingRubars <= 0);
+  const claimsWhole = assignedDeposits.every((d) => poolUnpaidRubars(d) <= 0);
+  if (!loansExhausted && !claimsWhole) return none;
+
+  let realizedLoss = 0;
+  const claims = { created: [] as string[], updated: [] as string[] };
+  for (const deposit of assignedDeposits) {
+    const unpaid = poolUnpaidRubars(deposit);
+    realizedLoss += unpaid;
+    const depositPath = bankDepositPath(deposit.depositId);
+    planMutate(plan, ctx.snapshot, depositPath, "state", ["status", "writtenDownRubars"], (current) => {
+      if (!current) return current;
+      const written = typeof current.writtenDownRubars === "number" ? current.writtenDownRubars : 0;
+      return { ...current, status: "closed", writtenDownRubars: written + unpaid };
+    });
+    // D2 supersedes D1 (same dedupe key: the liquidation's source).
+    const block = deposit.liquidation;
+    if (block) {
+      const addressing = situationAddressingFor(ctx.snapshot, deposit.depositor, args.bank.cityId);
+      const recovered =
+        block.frozenClaimRubars - block.setoffRubars - unpaid;
+      const card = mintSituation(
+        plan,
+        ctx,
+        buildIncidentSituation({
+          cityId: args.bank.cityId,
+          audienceCityId: args.bank.cityId,
+          audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+          recipientUid: addressing.recipientUid ?? null,
+          severity: "important",
+          createdSeq: args.summarySeq,
+          now: ctx.snapshot.now,
+          sourceSeq: args.summarySeq,
+          sourceResolutionId: block.liquidationResolutionId,
+          title: `Depositor pool closed — ${args.bank.corporationId}`,
+          summary: `The depositor pool of the dissolved ${args.bank.corporationId} is exhausted and closes. Your frozen claim was ${block.frozenClaimRubars} R; total recovered ${recovered} R; realized loss ${unpaid} R.`,
+          consequenceSummary: `Pool closed: recovered ${recovered} R of your ${block.frozenClaimRubars} R frozen claim (estate ${block.estatePaidRubars} R, fund ${block.fundPaidRubars} R, pool distributions ${block.poolDistributedRubars} R); realized loss ${unpaid} R is written down on the record. The fund's final recovery on your claim was ${block.fundRecoveredRubars} R of its ${block.fundPaidRubars} R payment.`,
+          ask: "No action is required — this card closes the liquidation's account with you.",
+          amountRubars: unpaid,
+          subject: { kind: "corporation", id: args.bank.corporationId },
+        })
+      );
+      claims.created.push(...card.created);
+      claims.updated.push(...card.updated);
+    }
+  }
+  for (const loan of assignedLoans) {
+    if (loan.outstandingRubars > 0) {
+      planMutate(plan, ctx.snapshot, bankLoanPath(loan.loanId), "state", ["poolClosedAtSeq"], (current) =>
+        current ? { ...current, poolClosedAtSeq: args.summarySeq } : current
+      );
+    }
+  }
+  return { closed: true, realizedLossRubars: realizedLoss, situationClaims: claims };
+}
+
+// ---------------------------------------------------------------------------
+// B-07 — repay_loan (amendment §3.5). Borrower-initiated ONLY:
+// nothing in this world auto-debits a borrower, ever (M5/M14). The
+// amount allocates in the fixed order (unsettled interest, then
+// principal, oldest installment first); a repayment the borrower
+// cannot cover rejects IN FULL. Netting (V2-§2.3) applies against
+// the principal portion only, and only against the loan's OWN
+// created deposit; interest always moves as cash. The pool form
+// (loan assigned) distributes the payment across the pool's unpaid
+// claims — interest portion first across claims, subrogation
+// routing the fund's recovery ahead of the depositor's (§5.6).
+// ---------------------------------------------------------------------------
+
+function repayLoanHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-07";
+  const targetOrPlan = parseLoanTarget(ctx, descriptorId);
+  if ("outcome" in targetOrPlan) return targetOrPlan;
+  const { loanPath, loan, bank } = targetOrPlan;
+  if (loan.status !== "active" && loan.status !== "assigned") {
+    return rejectedPlan(descriptorId, "loan-not-active", [descriptorId], `B-07: loan ${loan.loanId} is ${loan.status}; only an active or pool-assigned loan can be repaid.`);
+  }
+  const poolForm = loan.status === "assigned";
+  const namedBorrower = parseLedgerRef(sa(ctx.action).borrower);
+  if (!namedBorrower || !ledgerRefsEqual(namedBorrower, loan.borrower)) {
+    return rejectedPlan(descriptorId, "borrower-mismatch", [descriptorId], "B-07: the action's borrower ref does not match the loan record's borrower. The stored record governs.");
+  }
+  const control = borrowerControlRejection(ctx, descriptorId, loan.borrower);
+  if (control) return control;
+  const amount = positiveAmount(ctx.action);
+  if (amount === null) {
+    return rejectedPlan(descriptorId, "malformed-repayment", [descriptorId], "B-07: amountRubars must be a positive integer.");
+  }
+  const nettingElected = sa(ctx.action).netting === true;
+  if (poolForm && nettingElected) {
+    return rejectedPlan(descriptorId, "netting-not-available", [descriptorId], "B-07: netting does not apply to a pool-assigned loan — setoff already governed this debt at liquidation (BNK-D16), and pool repayments distribute in cash.");
+  }
+  let createdDeposit: BankDepositRecord | null = null;
+  let createdDepositPath: string | null = null;
+  if (nettingElected) {
+    if (fundingSourceOf(loan) !== "credit" || !loan.proceedsDepositId) {
+      return rejectedPlan(descriptorId, "netting-not-available", [descriptorId], "B-07: netting exists only against a credit-created loan's own created deposit (V2-§2.3) — this loan has none.");
+    }
+    createdDepositPath = bankDepositPath(loan.proceedsDepositId);
+    createdDeposit = depositRecordOf(snapshotDoc(ctx.snapshot, createdDepositPath));
+    if (
+      !createdDeposit ||
+      createdDeposit.status !== "active" ||
+      createdDeposit.fundingLoanId !== loan.loanId ||
+      !ledgerRefsEqual(createdDeposit.depositor, loan.borrower)
+    ) {
+      return rejectedPlan(descriptorId, "netting-not-available", [descriptorId], "B-07: the loan's created deposit does not stand active in the borrower's name — netting has nothing lawful to net against.");
+    }
+  }
+
+  const plan = emptyPlan(descriptorId);
+  if (loan.borrower.kind === "personal") {
+    composeLazyOpen({ plan, snapshot: ctx.snapshot, actor: ctx.action.actor, memberId: loan.borrower.memberId, viaActionKind: "repay_loan" });
+  }
+  // Interest basis seq: the loan entry's own seq (the B-04
+  // settlement-entry convention) — the allocation, the watermark,
+  // and the Log's stated figures all name this one seq.
+  const loanEntrySeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + 1;
+  const standing = deriveLoanStanding(loan, loanEntrySeq);
+  if (amount > standing.payoffWithFeeRubars) {
+    return rejectedPlan(descriptorId, "repayment-exceeds-payoff", [descriptorId], `B-07: repayment of ${amount} R exceeds the loan's payoff figure of ${standing.payoffWithFeeRubars} R at seq ${loanEntrySeq} (outstanding ${loan.outstandingRubars} + unsettled interest ${standing.accruedInterestRubars}${loan.prepaymentFeeRubars ? ` + prepayment fee ${loan.prepaymentFeeRubars}` : ""}). Excess money is not a tip jar; the borrower names a lawful amount.`);
+  }
+  if (
+    loan.prepaymentFeeRubars !== null &&
+    amount >= standing.payoffRubars &&
+    amount < standing.payoffWithFeeRubars
+  ) {
+    // The stated fee is part of the payoff figure (§3.5): an
+    // amount that covers principal + interest but not the fee is
+    // neither a lawful partial (it reaches the payoff line) nor a
+    // lawful payoff (the fee is unpaid) — it refuses with both
+    // figures named, and the borrower re-files.
+    return rejectedPlan(descriptorId, "repayment-fee-figure", [descriptorId], `B-07: repayment of ${amount} R reaches the payoff line (${standing.payoffRubars} R) but not the full payoff figure of ${standing.payoffWithFeeRubars} R — the offer's stated prepayment fee of ${loan.prepaymentFeeRubars} R is part of payoff. File a partial below ${standing.payoffRubars} R or the full ${standing.payoffWithFeeRubars} R.`);
+  }
+  if (loan.collateral.kind !== "none" && !collateralEchoMatches(ctx.action, loan)) {
+    return rejectedPlan(descriptorId, "collateral-mismatch", [descriptorId], "B-07: the action's collateral echo does not match the loan record's collateral. The stored record governs.");
+  }
+  const allocation = allocateRepayment(loan, amount, loanEntrySeq);
+
+  // Netting split (principal only, against the own created deposit).
+  let nettedPrincipal = 0;
+  if (nettingElected && createdDeposit) {
+    nettedPrincipal = Math.min(allocation.principalRubars, createdDeposit.principalRubars);
+  }
+  const cashPrincipal = allocation.principalRubars - nettedPrincipal;
+  const cashDue = allocation.interestRubars + cashPrincipal + allocation.feeRubars;
+
+  const tagged: TaggedChange[] = [];
+  const situationClaims = { created: [] as string[], updated: [] as string[] };
+  let poolDistributionNote = "";
+  let closing: PoolClosingResult = { closed: false, realizedLossRubars: 0, situationClaims: { created: [], updated: [] } };
+
+  if (!poolForm) {
+    if (cashDue > 0) {
+      const line: TransferLine = {
+        from: loan.borrower,
+        to: corporationRef(bank.cityId, bank.corporationId),
+        amountRubars: cashDue,
+        ruleId: descriptorId,
+        memo: `loan repayment for ${loan.loanId}`,
+      };
+      const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "transfer" });
+      if (!applied.ok) {
+        return rejectedPlan(descriptorId, applied.code.toLowerCase().replace(/_/g, "-"), [descriptorId], `B-07: repayment refused in full (never partial, never auto-debited): ${applied.message}`);
+      }
+      tagged.push(...applied.changes);
+    }
+    if (allocation.principalRubars > 0) {
+      tagged.push(applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", -allocation.principalRubars, descriptorId));
+      if (loan.insider) {
+        tagged.push(applyBankAggregateDelta(plan, ctx, bank, "insiderLoansRubars", -allocation.principalRubars, descriptorId));
+      }
+    }
+    if (nettedPrincipal > 0 && createdDeposit && createdDepositPath) {
+      const newPrincipal = createdDeposit.principalRubars - nettedPrincipal;
+      const closesDeposit = newPrincipal === 0 && createdDeposit.creditedInterestRubars === 0;
+      planMutate(plan, ctx.snapshot, createdDepositPath, "state", closesDeposit ? ["principalRubars", "status"] : ["principalRubars"], (current) =>
+        current
+          ? { ...current, principalRubars: newPrincipal, ...(closesDeposit ? { status: "closed" } : {}) }
+          : current
+      );
+      tagged.push(applyAggregateDelta(plan, ctx, bank, -nettedPrincipal, descriptorId));
+      const insuredChange = applyInsuredLiabilityDelta(plan, ctx, {
+        deposit: createdDeposit,
+        deltaRubars: -nettedPrincipal,
+        bank,
+        ruleId: descriptorId,
+      });
+      if (insuredChange) tagged.push(insuredChange);
+    }
+  } else {
+    // Pool form: distribute across the bank's unpaid pool claims.
+    const depositRows = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
+      .map(({ doc }) => depositRecordOf(doc))
+      .filter((d): d is BankDepositRecord => d !== null && d.status === "assigned");
+    const totalUnpaid = depositRows.reduce((sum, d) => sum + poolUnpaidRubars(d), 0);
+    if (amount > totalUnpaid) {
+      return rejectedPlan(descriptorId, "repayment-exceeds-pool-claims", [descriptorId], `B-07: repayment of ${amount} R exceeds the pool's unpaid claims of ${totalUnpaid} R at ${bank.corporationId} — the pool may not collect beyond what it is owed.`);
+    }
+    const shares = depositRows
+      .filter((d) => poolUnpaidRubars(d) > 0)
+      .map((d) => ({ key: d.depositId, weight: poolUnpaidRubars(d), cap: poolUnpaidRubars(d) }));
+    const interestPass = distributeProRata(allocation.interestRubars + allocation.feeRubars, shares);
+    const remainingShares = shares.map((s) => ({
+      ...s,
+      weight: s.weight - (interestPass.payouts.get(s.key) ?? 0),
+      cap: s.cap - (interestPass.payouts.get(s.key) ?? 0),
+    }));
+    const principalPass = distributeProRata(allocation.principalRubars, remainingShares);
+    const lines: TransferLine[] = [];
+    const perDeposit = new Map<string, { total: number; toFund: number }>();
+    for (const deposit of depositRows) {
+      const total =
+        (interestPass.payouts.get(deposit.depositId) ?? 0) +
+        (principalPass.payouts.get(deposit.depositId) ?? 0);
+      if (total <= 0) continue;
+      const block = deposit.liquidation;
+      const fundOwed = block ? Math.max(0, block.fundPaidRubars - block.fundRecoveredRubars) : 0;
+      const toFund = Math.min(total, fundOwed);
+      perDeposit.set(deposit.depositId, { total, toFund });
+      if (total - toFund > 0) {
+        lines.push({
+          from: loan.borrower,
+          to: deposit.depositor,
+          amountRubars: total - toFund,
+          ruleId: descriptorId,
+          memo: `pool distribution on deposit ${deposit.depositId} (liquidation of ${bank.corporationId})`,
+        });
+      }
+      if (toFund > 0) {
+        lines.push({
+          from: loan.borrower,
+          to: difRef(),
+          amountRubars: toFund,
+          ruleId: descriptorId,
+          memo: `subrogated recovery for the fund on deposit ${deposit.depositId} (§5.6: distributions route to the fund until its payment is recovered)`,
+        });
+      }
+    }
+    if (lines.length > 0) {
+      const applied = applyTransferLines({ plan, snapshot: ctx.snapshot, lines, shortfallClass: "transfer" });
+      if (!applied.ok) {
+        return rejectedPlan(descriptorId, applied.code.toLowerCase().replace(/_/g, "-"), [descriptorId], `B-07: pool repayment refused in full: ${applied.message}`);
+      }
+      tagged.push(...applied.changes);
+    }
+    for (const [depositId, { total, toFund }] of perDeposit) {
+      const depositPath = bankDepositPath(depositId);
+      planMutate(plan, ctx.snapshot, depositPath, "state", ["liquidation.poolDistributedRubars", "liquidation.fundRecoveredRubars"], (current) => {
+        if (!current) return current;
+        const record = current as unknown as BankDepositRecord;
+        const block = record.liquidation;
+        if (!block) return current;
+        return {
+          ...current,
+          liquidation: {
+            ...block,
+            poolDistributedRubars: block.poolDistributedRubars + total,
+            fundRecoveredRubars: block.fundRecoveredRubars + toFund,
+          },
+        };
+      });
+    }
+    poolDistributionNote = ` Distributed across the pool's unpaid claims (interest portion first): ${[...perDeposit.entries()].map(([id, v]) => `${id} ${v.total} R${v.toFund > 0 ? ` (${v.toFund} R routed to the fund by subrogation)` : ""}`).join("; ")}.`;
+  }
+
+  // -- Loan record write --------------------------------------------
+  const residualAfter = Math.max(
+    0,
+    (loan.residualInterestRubars ?? 0) - Math.min(loan.residualInterestRubars ?? 0, allocation.interestRubars)
+  );
+  const loanChanges: SimChange[] = [
+    fieldChange(`bankLoans/${loan.loanId}.outstandingRubars`, loan.outstandingRubars, loan.outstandingRubars - allocation.principalRubars, "B-07 repayment — principal portion (allocation: interest first, then principal, oldest installment first)"),
+    fieldChange(`bankLoans/${loan.loanId}.lastSettledSeq`, loan.lastSettledSeq, loanEntrySeq, "B-07 — interest settled through this entry's seq (the borrower-initiated settlement; nothing auto-debits)"),
+    fieldChange(`bankLoans/${loan.loanId}.totalInterestPaidRubars`, loan.totalInterestPaidRubars, loan.totalInterestPaidRubars + allocation.interestRubars, "B-07 — lifetime interest settled"),
+    fieldChange(`bankLoans/${loan.loanId}.installmentsSettled`, loan.installmentsSettled, allocation.installmentsSettledAfter, "B-07 — installments fully covered"),
+    fieldChange(`bankLoans/${loan.loanId}.nextDueSeq`, loan.nextDueSeq, allocation.nextDueSeqAfter, "B-07 — next unsettled installment's due seq"),
+  ];
+  if (residualAfter !== (loan.residualInterestRubars ?? 0)) {
+    loanChanges.push(fieldChange(`bankLoans/${loan.loanId}.residualInterestRubars`, loan.residualInterestRubars ?? 0, residualAfter, "B-07 — residual (post-seizure) interest settled"));
+  }
+  if (nettedPrincipal > 0) {
+    loanChanges.push(fieldChange(`bankLoans/${loan.loanId}.nettedPrincipalRubars`, loan.nettedPrincipalRubars, loan.nettedPrincipalRubars + nettedPrincipal, "B-07 netting — principal extinguished against the loan's own created deposit (no cash moved for this portion)"));
+  }
+  if (allocation.closesLoan) {
+    loanChanges.push(fieldChange(`bankLoans/${loan.loanId}.status`, loan.status, "repaid", "B-07 — full payoff: the loan closes; pledge/lien release in this same event"));
+  }
+  planMutate(plan, ctx.snapshot, loanPath, "state", ["outstandingRubars", "lastSettledSeq", "totalInterestPaidRubars", "installmentsSettled", "nextDueSeq", "residualInterestRubars", "nettedPrincipalRubars", "status"], (current) => {
+    if (!current) return current;
+    return {
+      ...current,
+      outstandingRubars: loan.outstandingRubars - allocation.principalRubars,
+      lastSettledSeq: loanEntrySeq,
+      totalInterestPaidRubars: loan.totalInterestPaidRubars + allocation.interestRubars,
+      installmentsSettled: allocation.installmentsSettledAfter,
+      nextDueSeq: allocation.nextDueSeqAfter,
+      residualInterestRubars: residualAfter,
+      nettedPrincipalRubars: loan.nettedPrincipalRubars + nettedPrincipal,
+      ...(allocation.closesLoan ? { status: "repaid" } : {}),
+    };
+  });
+
+  // Collateral release at full payoff (§3.5).
+  const releaseChanges: SimChange[] = [];
+  if (allocation.closesLoan && loan.collateral.kind === "shares") {
+    const sharesCollateral = loan.collateral;
+    const pledgor = pledgorMemberId(ctx, loan.borrower);
+    const row = queryDocs(ctx.snapshot, "pledgeHoldings", "sim_holdings").find(
+      ({ doc }) => doc.memberId === pledgor && doc.corporationId === sharesCollateral.corporationId
+    );
+    if (row) {
+      const before = typeof row.doc.pledgedShares === "number" ? row.doc.pledgedShares : 0;
+      planMutate(plan, ctx.snapshot, row.path, "state", ["pledgedShares"], (current) =>
+        current ? { ...current, pledgedShares: before - sharesCollateral.quantityShares } : current
+      );
+      releaseChanges.push(fieldChange(`holdings/${pledgor}__${sharesCollateral.corporationId}.pledgedShares`, before, before - sharesCollateral.quantityShares, "B-07 payoff — the pledge releases"));
+      situationClaims.updated.push(row.path);
+    }
+  }
+  if (allocation.closesLoan && loan.collateral.kind === "structure") {
+    const structurePath = `sim_cities/${loan.collateral.cityId}/structures/${loan.collateral.structureId}`;
+    planMutate(plan, ctx.snapshot, structurePath, "state", ["bankLien"], (current) =>
+      current ? { ...current, bankLien: null } : current
+    );
+    releaseChanges.push(fieldChange(`structures/${loan.collateral.structureId}.bankLien`, "lien", null, "B-07 payoff — the lien releases"));
+  }
+
+  // B2 cards: installments now fully covered terminal their cards
+  // in this transaction (partial coverage leaves them open).
+  if (!poolForm) {
+    let guard = 0;
+    let closedPath: string | null;
+    const settledThrough = allocation.installmentsSettledAfter;
+    while (
+      guard < loan.installmentCount &&
+      (closedPath = closeSituationWhere(
+        plan,
+        ctx,
+        (doc) =>
+          doc.kind === "loan-installment-due" &&
+          doc.detail?.loanId === loan.loanId &&
+          typeof doc.detail?.installmentIndex === "number" &&
+          (doc.detail.installmentIndex as number) <= settledThrough,
+        { resolvedSeq: loanEntrySeq, resolutionId: ctx.resolutionId }
+      )) !== null
+    ) {
+      situationClaims.updated.push(closedPath);
+      guard += 1;
+    }
+  }
+
+  // Pool closing (pool form): evaluate against PLANNED views.
+  let summarySeq = loanEntrySeq + groupChangesByEntryCity(tagged).size + 1;
+  if (poolForm) {
+    const plannedDeposits = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
+      .map(({ path }) => depositRecordOf(plannedDoc(plan, ctx.snapshot, path)))
+      .filter((d): d is BankDepositRecord => d !== null);
+    const plannedLoans = queryDocs(ctx.snapshot, "bankLoans", "sim_bank_loans")
+      .map(({ path }) => loanRecordOf(plannedDoc(plan, ctx.snapshot, path)))
+      .filter((l): l is BankLoanRecord => l !== null);
+    closing = maybeClosePool(plan, ctx, {
+      bank,
+      deposits: plannedDeposits,
+      loans: plannedLoans,
+      summarySeq,
+      ruleId: descriptorId,
+    });
+    if (closing.closed) {
+      situationClaims.created.push(...closing.situationClaims.created);
+      situationClaims.updated.push(...closing.situationClaims.updated);
+    }
+  }
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bank.cityId,
+      cityIds: [bank.cityId],
+      ruleIds: [descriptorId],
+      changes: [...loanChanges, ...releaseChanges],
+      recordsUpdated: [loanPath, ...situationClaims.updated],
+      recordsCreated: situationClaims.created,
+      summaryText: `B-07: loan ${loan.loanId} repaid ${amount} R — interest ${allocation.interestRubars} R, principal ${allocation.principalRubars} R${allocation.feeRubars > 0 ? `, prepayment fee ${allocation.feeRubars} R` : ""}${nettedPrincipal > 0 ? `; ${nettedPrincipal} R of the principal netted against the loan's own created deposit (no cash moved for it; interest always moves as cash)` : ""}${allocation.closesLoan ? `; the loan is REPAID in full — total interest paid over its life: ${loan.totalInterestPaidRubars + allocation.interestRubars} R; collateral released` : `; outstanding now ${loan.outstandingRubars - allocation.principalRubars} R`}.${poolDistributionNote}`,
+    })
+  );
+  pushMovementEntries(plan, ctx, descriptorId, tagged, (entryCityId) =>
+    entryCityId === bank.cityId
+      ? `B-07: ${bank.corporationId} received the cash portion of the repayment on loan ${loan.loanId} (interest ${allocation.interestRubars} R + principal ${cashPrincipal} R${allocation.feeRubars > 0 ? ` + fee ${allocation.feeRubars} R` : ""}); its loan book fell by ${allocation.principalRubars} R.`
+      : `B-07: ${ledgerLabel(loan.borrower)} paid toward loan ${loan.loanId} — borrower-initiated, as every repayment in this world is.`
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "repay-loan",
+    scope: "bank",
+    cityId: bank.cityId,
+    summaryText: poolForm
+      ? `Repaid ${amount} R on pool-assigned loan ${loan.loanId} — distributed across the ${bank.corporationId} pool's unpaid claims${closing.closed ? "; the pool is exhausted and CLOSES in this event (D2 cards issued)" : ""}.`
+      : `Repaid ${amount} R on loan ${loan.loanId} (interest ${allocation.interestRubars} R, principal ${allocation.principalRubars} R)${allocation.closesLoan ? " — loan closed, collateral released" : ""}.`,
+    major: closing.closed,
+    classificationExtra: {
+      loan: {
+        loanId: loan.loanId,
+        interestRubars: allocation.interestRubars,
+        principalRubars: allocation.principalRubars,
+        nettedPrincipalRubars: nettedPrincipal,
+        closesLoan: allocation.closesLoan,
+        poolForm,
+        poolClosed: closing.closed,
+      },
+    },
+  });
+}
+
+function repayLoanReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(
+      ...premiumQueries(record.corporationId),
+      ...situationKeyQueries(record.cityId),
+      {
+        id: "bankDeposits",
+        collectionPath: "sim_bank_deposits",
+        filters: [{ field: "bankCorporationId", op: "==", value: record.corporationId }],
+      },
+      {
+        id: "bankLoans",
+        collectionPath: "sim_bank_loans",
+        filters: [{ field: "bankCorporationId", op: "==", value: record.corporationId }],
+      }
+    );
+  }
+  if (typeof record.loanId === "string" && record.loanId) {
+    paths.push(bankLoanPath(record.loanId));
+  }
+  const borrower = parseLedgerRef(record.borrower);
+  if (borrower?.kind === "company") paths.push(corporationPath(borrower.cityId, borrower.corporationId));
+  if (borrower?.kind === "treasury") paths.push(cityPath(borrower.cityId), `factions/${borrower.cityId}`);
+  if (borrower?.kind === "personal") paths.push(memberAccountPath(borrower.memberId));
+  const collateral = parseCollateral(record.collateral);
+  if (collateral?.kind === "shares") {
+    queries.push({
+      id: "pledgeHoldings",
+      collectionPath: "sim_holdings",
+      filters: [{ field: "corporationId", op: "==", value: collateral.corporationId }],
+    });
+  }
+  return { paths, queries };
+}
+
+// ---------------------------------------------------------------------------
+// B-08 — seize_collateral (amendment §3.8). Lawful ONLY against a
+// loan in DERIVED default, re-derived on the claimed snapshot at
+// the seizure entry's seq — a loan previewed in default but cured
+// before commit does not seize (the commit-time snapshot governs).
+// Satisfaction values the collateral at its recorded basis (shares
+// at the listing's official price at the seizure seq; a structure
+// at its cumulative paidRubars) and applies interest-first. Any
+// EXCESS of value over the debt returns to the borrower as a
+// custodial line IN THE SAME EVENT — the return is a plan
+// validation: a seizure plan without it does not validate (the
+// handler constructs it unconditionally; the harness asserts the
+// standing Log carries it on every seizure with excess). The
+// remainder of the debt stays owed, unsecured. Pool form: a pool
+// claimant seizes for the pool; proceeds distribute in kind / by
+// custodian credit under §5.6's rules.
+// ---------------------------------------------------------------------------
+
+function seizeCollateralHandler(ctx: HandlerContext): ResolutionPlan {
+  const descriptorId = "B-08";
+  const tierB = rejectTierBNpc(ctx, descriptorId);
+  if (tierB) return tierB;
+  const targetOrPlan = parseLoanTarget(ctx, descriptorId);
+  if ("outcome" in targetOrPlan) return targetOrPlan;
+  const { loanPath, loan, bank } = targetOrPlan;
+  if (loan.status !== "active" && loan.status !== "assigned") {
+    return rejectedPlan(descriptorId, "loan-not-active", [descriptorId], `B-08: loan ${loan.loanId} is ${loan.status}; seizure acts on an active or pool-assigned loan.`);
+  }
+  const poolForm = loan.status === "assigned";
+  const actorId = actorMemberId(ctx.action.actor);
+  let claimantDeposit: BankDepositRecord | null = null;
+  if (!poolForm) {
+    if (!actorId || actorId !== bank.corp.ownerMemberId) {
+      return rejectedPlan(descriptorId, "not-bank-owner", [descriptorId], "B-08: seizure is the bank owner's act (the creditor's remedy), or a pool claimant's in the pool form.");
+    }
+  } else {
+    const claimantDepositId = stringField(ctx.action, "claimantDepositId");
+    if (!claimantDepositId) {
+      return rejectedPlan(descriptorId, "malformed-action", [descriptorId], "B-08: the pool form names claimantDepositId — the actor seizes as a claimant of the pool, and the record proves it.");
+    }
+    claimantDeposit = depositRecordOf(snapshotDoc(ctx.snapshot, bankDepositPath(claimantDepositId)));
+    if (
+      !claimantDeposit ||
+      claimantDeposit.bankCorporationId !== bank.corporationId ||
+      claimantDeposit.status !== "assigned"
+    ) {
+      return rejectedPlan(descriptorId, "not-pool-claimant", [descriptorId], "B-08: the named deposit is not an assigned claim in this bank's pool.");
+    }
+    const control = borrowerControlRejection(ctx, descriptorId, claimantDeposit.depositor);
+    if (control) {
+      return rejectedPlan(descriptorId, "not-pool-claimant", [descriptorId], "B-08: the actor does not control the named claimant deposit.");
+    }
+  }
+  if (loan.collateral.kind === "none") {
+    return rejectedPlan(descriptorId, "no-collateral", [descriptorId], "B-08: this loan is unsecured — default gives the creditor an unsecured claim and the ordinary legal path, not a seizure. Nothing here is a defect: the offer's terms stated no collateral.");
+  }
+  if (!collateralEchoMatches(ctx.action, loan)) {
+    return rejectedPlan(descriptorId, "collateral-mismatch", [descriptorId], "B-08: the action's collateral echo does not match the loan record's collateral. The stored record governs.");
+  }
+
+  const plan = emptyPlan(descriptorId);
+  const seizureSeq = ctx.snapshot.counterHead.lastSeq + plan.entries.length + 1;
+  const standing = deriveLoanStanding(loan, seizureSeq);
+  if (!standing.inDefault) {
+    return rejectedPlan(descriptorId, "loan-not-in-default", [descriptorId], `B-08: loan ${loan.loanId} does not derive in default at seq ${seizureSeq} — ${standing.missedCount} of ${loan.defaultMissedCount} required missed installments stand due-and-unsettled. Seizure follows the derived state on the claimed snapshot, never a stale preview; cure (B-07) un-happens default before any seizure can land.`);
+  }
+
+  // -- Satisfaction value (§3.8) -------------------------------------
+  let value = 0;
+  let valueBasis = "";
+  let sharePrice = 0;
+  if (loan.collateral.kind === "shares") {
+    const listing = snapshotDoc(ctx.snapshot, listingPath(loan.collateral.corporationId));
+    const price = typeof listing?.officialPriceRubars === "number" ? listing.officialPriceRubars : null;
+    if (price === null) {
+      return rejectedPlan(descriptorId, "collateral-unvalued", [descriptorId], `B-08: shares of ${loan.collateral.corporationId} carry no official price (no listing stands) — an unvalued pledge cannot satisfy a debt at a figure no record states. The lien rests until the shares are listed and priced.`);
+    }
+    sharePrice = price;
+    value = price * loan.collateral.quantityShares;
+    valueBasis = `${loan.collateral.quantityShares} shares at the official price ${price} R`;
+  } else {
+    const structure = snapshotDoc(ctx.snapshot, `sim_cities/${loan.collateral.cityId}/structures/${loan.collateral.structureId}`);
+    if (!structure) {
+      return rejectedPlan(descriptorId, "collateral-unavailable", [descriptorId], "B-08: the pledged structure's record does not stand.");
+    }
+    value = typeof structure.paidRubars === "number" ? structure.paidRubars : 0;
+    valueBasis = `the structure's recorded paidRubars of ${value} R`;
+  }
+  const debt = standing.payoffRubars;
+  const applied = Math.min(value, debt);
+  const interestCovered = Math.min(applied, standing.accruedInterestRubars);
+  const principalCovered = applied - interestCovered;
+  const excess = value - applied;
+  const remainder = debt - applied;
+  const outstandingAfter = loan.outstandingRubars - principalCovered;
+  // The watermark advances to the seizure seq; every Rubar of
+  // unsettled interest the satisfaction did not cover remains owed
+  // as residual (non-accruing, never principal — M14).
+  const residualAfter = standing.accruedInterestRubars - interestCovered;
+
+  const tagged: TaggedChange[] = [];
+  const situationClaims = { created: [] as string[], updated: [] as string[] };
+
+  // -- Excess return: the plan-validation line (§3.8) -----------------
+  if (excess > 0) {
+    const line: TransferLine = {
+      from: corporationRef(bank.cityId, bank.corporationId),
+      to: loan.borrower,
+      amountRubars: excess,
+      ruleId: descriptorId,
+      memo: `excess collateral value returned on loan ${loan.loanId}`,
+    };
+    const appliedLines = applyTransferLines({ plan, snapshot: ctx.snapshot, lines: [line], shortfallClass: "custodial" });
+    if (!appliedLines.ok) {
+      return rejectedPlan(descriptorId, "excess-return-uncoverable", [descriptorId], `B-08: the seizure's mandatory excess return of ${excess} R cannot be covered from ${bank.corporationId}'s unencumbered cash (${appliedLines.message}) — a seizure whose return line cannot land does not validate, so the seizure itself refuses. The collateral rests; the default stands.`);
+    }
+    tagged.push(...appliedLines.changes);
+  }
+
+  // -- Collateral transfer --------------------------------------------
+  const transferChanges: SimChange[] = [];
+  if (loan.collateral.kind === "shares") {
+    const sharesCollateral = loan.collateral;
+    const pledgor = pledgorMemberId(ctx, loan.borrower);
+    const rows = queryDocs(ctx.snapshot, "pledgeHoldings", "sim_holdings");
+    const pledgorRow = rows.find(({ doc }) => doc.memberId === pledgor && doc.corporationId === sharesCollateral.corporationId);
+    if (!pledgorRow) {
+      return rejectedPlan(descriptorId, "collateral-unavailable", [descriptorId], "B-08: the pledgor's holding carrying the pledged shares does not stand in the read set — seizure cannot move what the snapshot cannot see.");
+    }
+    if (pledgorRow) {
+      const pledgedBefore = typeof pledgorRow.doc.pledgedShares === "number" ? pledgorRow.doc.pledgedShares : 0;
+      const quantityBefore = typeof pledgorRow.doc.quantityShares === "number" ? pledgorRow.doc.quantityShares : 0;
+      planMutate(plan, ctx.snapshot, pledgorRow.path, "state", ["pledgedShares", "quantityShares"], (current) =>
+        current
+          ? {
+              ...current,
+              pledgedShares: pledgedBefore - sharesCollateral.quantityShares,
+              quantityShares: quantityBefore - sharesCollateral.quantityShares,
+            }
+          : current
+      );
+      transferChanges.push(
+        fieldChange(`holdings/${pledgor}__${sharesCollateral.corporationId}.quantityShares`, quantityBefore, quantityBefore - sharesCollateral.quantityShares, "B-08 seizure — the pledged shares leave the pledgor's holding"),
+        fieldChange(`holdings/${pledgor}__${sharesCollateral.corporationId}.pledgedShares`, pledgedBefore, pledgedBefore - sharesCollateral.quantityShares, "B-08 seizure — the pledge is consumed")
+      );
+      situationClaims.updated.push(pledgorRow.path);
+    }
+    if (!poolForm) {
+      // Bank form: the shares land in the bank OWNER's holding,
+      // flagged held for the bank (custody, not the owner's
+      // property — BNK-D4's fallback, flagged in the prep report).
+      const ownerId = bank.corp.ownerMemberId as string;
+      const ownerPath = holdingPath(ownerId, sharesCollateral.corporationId);
+      const ownerRow = rows.find(({ doc }) => doc.memberId === ownerId && doc.corporationId === sharesCollateral.corporationId);
+      if (ownerRow) {
+        const quantityBefore = typeof ownerRow.doc.quantityShares === "number" ? ownerRow.doc.quantityShares : 0;
+        planMutate(plan, ctx.snapshot, ownerRow.path, "state", ["quantityShares", "heldForBank"], (current) =>
+          current
+            ? {
+                ...current,
+                quantityShares: quantityBefore + sharesCollateral.quantityShares,
+                heldForBank: { bankCorporationId: bank.corporationId },
+              }
+            : current
+        );
+        transferChanges.push(fieldChange(`holdings/${ownerId}__${sharesCollateral.corporationId}.quantityShares`, quantityBefore, quantityBefore + sharesCollateral.quantityShares, "B-08 seizure — shares held by the bank's owner FOR the bank (heldForBank)"));
+        situationClaims.updated.push(ownerRow.path);
+      } else {
+        const doc = buildHoldingDoc({
+          memberId: ownerId,
+          corporationId: sharesCollateral.corporationId,
+          homeCityId: sharesCollateral.cityId,
+          quantityShares: sharesCollateral.quantityShares,
+          committedShares: 0,
+          costBasisRubars: applied,
+          sourceActionId: ctx.action.actionId,
+          sourceSeq: seizureSeq,
+          lastResolutionId: ctx.resolutionId,
+          now: new Date(ctx.snapshot.now),
+        });
+        planWrite(plan, ctx.snapshot, ownerPath, { ...doc, heldForBank: { bankCorporationId: bank.corporationId }, pledgedShares: 0 }, "state", ["quantityShares", "heldForBank"]);
+        transferChanges.push(fieldChange(`holdings/${ownerId}__${sharesCollateral.corporationId}.quantityShares`, null, sharesCollateral.quantityShares, "B-08 seizure — a holding opens for the bank's owner, holding the seized shares FOR the bank"));
+        situationClaims.created.push(ownerPath);
+      }
+      if (applied > 0) {
+        tagged.push(applyBankAggregateDelta(plan, ctx, bank, "seizedAssetsRubars", applied, descriptorId));
+      }
+    } else {
+      // Pool form: shares distribute integer pro-rata by unpaid
+      // claim (remainder to the largest unpaid claim, §5.6);
+      // treasury claimants take claim credit instead (holdings are
+      // member-keyed), their share quantity folding to the largest
+      // unpaid claimant.
+      const depositRows = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
+        .map(({ doc }) => depositRecordOf(doc))
+        .filter((d): d is BankDepositRecord => d !== null && d.status === "assigned" && poolUnpaidRubars(d) > 0);
+      const totalUnpaid = depositRows.reduce((sum, d) => sum + poolUnpaidRubars(d), 0);
+      if (totalUnpaid > 0) {
+        let remainingShares = sharesCollateral.quantityShares;
+        const perClaimant = depositRows
+          .map((d) => ({
+            deposit: d,
+            shares: Math.floor((sharesCollateral.quantityShares * poolUnpaidRubars(d)) / totalUnpaid),
+          }))
+          .sort((a, b) => poolUnpaidRubars(b.deposit) - poolUnpaidRubars(a.deposit));
+        for (const entry of perClaimant) remainingShares -= entry.shares;
+        if (perClaimant.length > 0 && remainingShares > 0) perClaimant[0].shares += remainingShares;
+        for (const { deposit, shares } of perClaimant) {
+          if (shares <= 0) continue;
+          const creditedValue = Math.min(poolUnpaidRubars(deposit), shares * sharePrice);
+          const depositPath = bankDepositPath(deposit.depositId);
+          planMutate(plan, ctx.snapshot, depositPath, "state", ["liquidation.poolDistributedRubars"], (current) => {
+            if (!current) return current;
+            const record = current as unknown as BankDepositRecord;
+            if (!record.liquidation) return current;
+            return {
+              ...current,
+              liquidation: { ...record.liquidation, poolDistributedRubars: record.liquidation.poolDistributedRubars + creditedValue },
+            };
+          });
+          const holderMember =
+            deposit.depositor.kind === "personal"
+              ? deposit.depositor.memberId
+              : deposit.depositor.kind === "company"
+                ? (() => {
+                    const corp = snapshotDoc(ctx.snapshot, corporationPath(deposit.depositor.kind === "company" ? deposit.depositor.cityId : "", deposit.depositor.kind === "company" ? deposit.depositor.corporationId : ""));
+                    return typeof corp?.ownerMemberId === "string" ? corp.ownerMemberId : null;
+                  })()
+                : null;
+          if (holderMember) {
+            const claimantRow = rows.find(({ doc }) => doc.memberId === holderMember && doc.corporationId === sharesCollateral.corporationId);
+            const targetPath = holdingPath(holderMember, sharesCollateral.corporationId);
+            if (claimantRow) {
+              const quantityBefore = typeof claimantRow.doc.quantityShares === "number" ? claimantRow.doc.quantityShares : 0;
+              planMutate(plan, ctx.snapshot, claimantRow.path, "state", ["quantityShares"], (current) =>
+                current ? { ...current, quantityShares: quantityBefore + shares } : current
+              );
+              transferChanges.push(fieldChange(`holdings/${holderMember}__${sharesCollateral.corporationId}.quantityShares`, quantityBefore, quantityBefore + shares, "B-08 pool seizure — shares distributed to a pool claimant"));
+              situationClaims.updated.push(claimantRow.path);
+            } else {
+              const doc = buildHoldingDoc({
+                memberId: holderMember,
+                corporationId: sharesCollateral.corporationId,
+                homeCityId: sharesCollateral.cityId,
+                quantityShares: shares,
+                committedShares: 0,
+                costBasisRubars: creditedValue,
+                sourceActionId: ctx.action.actionId,
+                sourceSeq: seizureSeq,
+                lastResolutionId: ctx.resolutionId,
+                now: new Date(ctx.snapshot.now),
+              });
+              planWrite(plan, ctx.snapshot, targetPath, { ...doc, pledgedShares: 0 }, "state", ["quantityShares"]);
+              transferChanges.push(fieldChange(`holdings/${holderMember}__${sharesCollateral.corporationId}.quantityShares`, null, shares, "B-08 pool seizure — a holding opens for a pool claimant"));
+              situationClaims.created.push(targetPath);
+            }
+          }
+        }
+      }
+    }
+  }
+  if (loan.collateral.kind === "structure") {
+    const structureCollateral = loan.collateral;
+    const structurePath = `sim_cities/${structureCollateral.cityId}/structures/${structureCollateral.structureId}`;
+    if (!poolForm) {
+      planMutate(plan, ctx.snapshot, structurePath, "state", ["bankLien", "seizedForBank"], (current) =>
+        current
+          ? {
+              ...current,
+              bankLien: null,
+              seizedForBank: { bankCorporationId: bank.corporationId, loanId: loan.loanId, satisfactionValueRubars: applied, atSeq: seizureSeq },
+            }
+          : current
+      );
+      transferChanges.push(fieldChange(`structures/${structureCollateral.structureId}.bankLien`, "lien", null, "B-08 seizure — the lien is consumed by the seizure"));
+      // The link moves from the borrower's corporation to the bank's.
+      if (loan.borrower.kind === "company") {
+        const borrowerCorpPath = corporationPath(loan.borrower.cityId, loan.borrower.corporationId);
+        planMutate(plan, ctx.snapshot, borrowerCorpPath, "state", ["linkedStructureIds"], (current) => {
+          if (!current) return current;
+          const linked = ((current.linkedStructureIds as unknown[] | undefined) ?? []).filter((id) => id !== structureCollateral.structureId);
+          return { ...current, linkedStructureIds: linked };
+        });
+        planMutate(plan, ctx.snapshot, bank.corpPath, "state", ["linkedStructureIds"], (current) => {
+          if (!current) return current;
+          const linked = ((current.linkedStructureIds as unknown[] | undefined) ?? []).slice();
+          if (!linked.includes(structureCollateral.structureId)) linked.push(structureCollateral.structureId);
+          return { ...current, linkedStructureIds: linked };
+        });
+      }
+      if (applied > 0) {
+        tagged.push(applyBankAggregateDelta(plan, ctx, bank, "seizedAssetsRubars", applied, descriptorId));
+      }
+    } else {
+      // Pool form: the largest unpaid claimant becomes custodian;
+      // their claim falls by the recorded value (excess paid onward
+      // in cash if the pool holds any, else their windfall, §5.6).
+      const depositRows = queryDocs(ctx.snapshot, "bankDeposits", "sim_bank_deposits")
+        .map(({ doc }) => depositRecordOf(doc))
+        .filter((d): d is BankDepositRecord => d !== null && d.status === "assigned" && poolUnpaidRubars(d) > 0)
+        .sort((a, b) => poolUnpaidRubars(b) - poolUnpaidRubars(a));
+      const custodian = depositRows[0];
+      if (custodian) {
+        const credited = Math.min(poolUnpaidRubars(custodian), value);
+        planMutate(plan, ctx.snapshot, structurePath, "state", ["bankLien", "poolCustodian"], (current) =>
+          current
+            ? {
+                ...current,
+                bankLien: null,
+                poolCustodian: { depositor: custodian.depositor, creditedValueRubars: credited },
+              }
+            : current
+        );
+        const custodianPath = bankDepositPath(custodian.depositId);
+        planMutate(plan, ctx.snapshot, custodianPath, "state", ["liquidation.poolDistributedRubars"], (current) => {
+          if (!current) return current;
+          const record = current as unknown as BankDepositRecord;
+          if (!record.liquidation) return current;
+          return {
+            ...current,
+            liquidation: { ...record.liquidation, poolDistributedRubars: record.liquidation.poolDistributedRubars + credited },
+          };
+        });
+        transferChanges.push(fieldChange(`structures/${structureCollateral.structureId}.bankLien`, "lien", null, "B-08 pool seizure — the lien is consumed; the structure passes to the pool's custodian"));
+      }
+    }
+  }
+
+  // -- Loan record write ----------------------------------------------
+  const extinguished = outstandingAfter === 0;
+  planMutate(plan, ctx.snapshot, loanPath, "state", ["outstandingRubars", "lastSettledSeq", "totalInterestPaidRubars", "residualInterestRubars", "seizure", "status"], (current) => {
+    if (!current) return current;
+    return {
+      ...current,
+      outstandingRubars: outstandingAfter,
+      lastSettledSeq: seizureSeq,
+      totalInterestPaidRubars: loan.totalInterestPaidRubars + interestCovered,
+      residualInterestRubars: residualAfter,
+      seizure: {
+        atSeq: seizureSeq,
+        byActorMemberId: actorId ?? "",
+        forPool: poolForm,
+        satisfactionValueRubars: applied,
+        grossValueRubars: value,
+        excessReturnedRubars: excess,
+        remainderRubars: remainder,
+      },
+      ...(extinguished ? { status: "seized" } : {}),
+    };
+  });
+  if (principalCovered > 0 && !poolForm) {
+    tagged.push(applyBankAggregateDelta(plan, ctx, bank, "loanBookRubars", -principalCovered, descriptorId));
+    if (loan.insider) {
+      tagged.push(applyBankAggregateDelta(plan, ctx, bank, "insiderLoansRubars", -principalCovered, descriptorId));
+    }
+  }
+  if (principalCovered > 0 && poolForm) {
+    // Pool loans stand outside the (dissolved) bank's aggregates —
+    // the loanBook was zeroed at liquidation; nothing pairs here.
+  }
+
+  // B4: the borrower's seizure card (major).
+  const addressing = situationAddressingFor(ctx.snapshot, loan.borrower, bank.cityId);
+  const card = mintSituation(
+    plan,
+    ctx,
+    buildIncidentSituation({
+      cityId: bank.cityId,
+      audienceCityId: bank.cityId,
+      audienceOwnerUidsSnapshot: addressing.audienceOwnerUidsSnapshot,
+      recipientUid: addressing.recipientUid ?? null,
+      severity: "major",
+      createdSeq: seizureSeq,
+      now: ctx.snapshot.now,
+      sourceSeq: seizureSeq,
+      sourceResolutionId: ctx.resolutionId,
+      title: `Collateral seized — loan ${loan.loanId}`,
+      summary: `${poolForm ? "A pool claimant" : bank.corporationId} seized the collateral on loan ${loan.loanId} after derived default (${standing.missedCount} missed installments). Satisfaction ${applied} R against a debt of ${debt} R; ${remainder} R remains owed unsecured${excess > 0 ? `; ${excess} R of excess value returned to the borrower in this event` : ""}.`,
+      consequenceSummary: `Seized: ${valueBasis} (gross value ${value} R). Applied interest-first: interest ${interestCovered} R, principal ${principalCovered} R. Remainder of the debt: ${remainder} R, unsecured. Excess returned: ${excess} R.`,
+      ask: "No action is required unless you contest the valuation basis stated — the recorded figures are the Log's.",
+      amountRubars: applied,
+      subject: { kind: "corporation", id: bank.corporationId },
+    })
+  );
+  situationClaims.created.push(...card.created);
+  situationClaims.updated.push(...card.updated);
+
+  plan.entries.push(
+    ruleEffectDraft({
+      actor: ctx.action.actor,
+      cityId: bank.cityId,
+      cityIds: [bank.cityId],
+      ruleIds: [descriptorId],
+      changes: [
+        fieldChange(`bankLoans/${loan.loanId}.outstandingRubars`, loan.outstandingRubars, outstandingAfter, "B-08 seizure — principal satisfied by collateral"),
+        fieldChange(`bankLoans/${loan.loanId}.seizure`, null, { satisfactionValueRubars: applied, grossValueRubars: value, excessReturnedRubars: excess, remainderRubars: remainder }, "B-08 seizure record (A-B7's satisfaction source)"),
+        ...transferChanges,
+      ],
+      recordsCreated: situationClaims.created,
+      recordsUpdated: [loanPath, ...situationClaims.updated],
+      summaryText: `B-08: collateral on loan ${loan.loanId} seized after derived default (missed ${standing.missedCount} ≥ ${loan.defaultMissedCount}). Satisfaction basis: ${valueBasis} — gross ${value} R; applied ${applied} R (interest ${interestCovered} R, principal ${principalCovered} R); excess ${excess} R returned to the borrower in this event (a seizure plan without the return line does not validate); remainder ${remainder} R owed unsecured.${extinguished ? " The debt is extinguished by the collateral; the loan closes as seized." : ""}`,
+    })
+  );
+  pushMovementEntries(plan, ctx, descriptorId, tagged, (entryCityId) =>
+    entryCityId === bank.cityId
+      ? `B-08: ${bank.corporationId}'s position after seizure on loan ${loan.loanId}: loan book fell by ${principalCovered} R; seized assets rose by ${applied} R (recorded satisfaction value); excess ${excess} R returned from unencumbered cash.`
+      : `B-08: ${ledgerLabel(loan.borrower)} received the ${excess} R excess-value return on loan ${loan.loanId}.`
+  );
+  return finishPlan(plan, ctx, {
+    ruleId: descriptorId,
+    verb: "seize-collateral",
+    scope: "bank",
+    cityId: bank.cityId,
+    summaryText: `Seized the collateral on loan ${loan.loanId} (derived default): satisfaction ${applied} R against ${debt} R of debt, excess ${excess} R returned, remainder ${remainder} R unsecured.`,
+    major: true,
+    classificationExtra: {
+      loan: { loanId: loan.loanId, satisfactionRubars: applied, excessReturnedRubars: excess, remainderRubars: remainder, poolForm },
+    },
+  });
+}
+
+function seizeCollateralReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const record = seeds.action.structuredAction ?? {};
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const queries: CollectionQuerySpec[] = [];
+  if (typeof record.cityId === "string" && typeof record.corporationId === "string") {
+    paths.push(corporationPath(record.cityId, record.corporationId));
+    queries.push(
+      ...premiumQueries(record.corporationId),
+      ...situationKeyQueries(record.cityId),
+      {
+        id: "bankDeposits",
+        collectionPath: "sim_bank_deposits",
+        filters: [{ field: "bankCorporationId", op: "==", value: record.corporationId }],
+      },
+      {
+        id: "bankLoans",
+        collectionPath: "sim_bank_loans",
+        filters: [{ field: "bankCorporationId", op: "==", value: record.corporationId }],
+      }
+    );
+  }
+  if (typeof record.loanId === "string" && record.loanId) paths.push(bankLoanPath(record.loanId));
+  if (typeof record.claimantDepositId === "string" && record.claimantDepositId) {
+    paths.push(bankDepositPath(record.claimantDepositId));
+  }
+  const borrower = parseLedgerRef(record.borrower);
+  if (borrower?.kind === "company") paths.push(corporationPath(borrower.cityId, borrower.corporationId));
+  if (borrower?.kind === "treasury") paths.push(cityPath(borrower.cityId), `factions/${borrower.cityId}`);
+  const collateral = parseCollateral(record.collateral);
+  if (collateral?.kind === "shares") {
+    paths.push(listingPath(collateral.corporationId));
     queries.push({
       id: "pledgeHoldings",
       collectionPath: "sim_holdings",

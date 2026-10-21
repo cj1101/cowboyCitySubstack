@@ -96,6 +96,12 @@ export interface BankLoanRecord {
    * credit record reads these totals from the Log; the record
    * carries the running figure its closing entry states). */
   totalInterestPaidRubars: number;
+  /** Interest left owed but non-accruing after a partial seizure
+   * satisfaction (B-08): satisfaction allocates interest-first and
+   * advances the watermark; the uncovered remainder is owed as a
+   * plain figure — never principal, never in the interest base
+   * (M14's no-capitalization rule is preserved by construction). */
+  residualInterestRubars: number;
   /** Σ principal extinguished by B-07 netting (Appendix C). */
   nettedPrincipalRubars: number;
   /** Outstanding extinguished by B-11 write-off (the equity-bridge
@@ -106,6 +112,11 @@ export interface BankLoanRecord {
   setoffAppliedRubars: number;
   assignee: string | null; // "depositor-pool:{bankCorporationId}" at assignment
   assignedAtSeq: number | null;
+  /** Stamped when the pool closes with this loan's obligation
+   * forgone (claims whole, book exhausted the other way, §5.6) —
+   * the obligation is extinguished as a pool asset, stated in the
+   * closing entry. */
+  poolClosedAtSeq: number | null;
   /** B-08 seizure record, when seizure has executed against this
    * loan (bank branch or pool branch). */
   seizure: {
@@ -180,11 +191,13 @@ export function buildLoanOfferDoc(args: {
     status: "offered",
     lastSettledSeq: 0,
     totalInterestPaidRubars: 0,
+    residualInterestRubars: 0,
     nettedPrincipalRubars: 0,
     writtenOffRubars: 0,
     setoffAppliedRubars: 0,
     assignee: null,
     assignedAtSeq: null,
+    poolClosedAtSeq: null,
     seizure: null,
     stateVersion: 1,
     lastChangedSeq: null,
@@ -306,7 +319,10 @@ export function loanAccruedInterest(loan: BankLoanRecord, atSeq: number): number
 
 export function deriveLoanStanding(loan: BankLoanRecord, atSeq: number): LoanStanding {
   const missed = missedInstallmentCount(loan, atSeq);
-  const accrued = loanAccruedInterest(loan, atSeq);
+  // Unsettled interest = the formula accrual since the watermark
+  // PLUS any residual interest a partial seizure left owed
+  // (non-accruing, never principal).
+  const accrued = loanAccruedInterest(loan, atSeq) + (loan.residualInterestRubars ?? 0);
   const live = loan.status === "active" || loan.status === "assigned";
   return {
     overdue:
