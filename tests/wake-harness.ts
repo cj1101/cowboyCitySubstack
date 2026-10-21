@@ -41,6 +41,14 @@
  *           producers and through the real standing verifier
  *           (no NPC_TRACE_* findings; a stripped citation flags)
  *           (PR #45 fix round 8's regression pin).
+ *   W26     a FIRE-SPAWNED envelope (ask-first, uncited handler —
+ *           the gate suite's N5 shape) chained through the real
+ *           claim planner, the real lifecycle claim, and the real
+ *           terminal step in one wake: claimable in its own wake
+ *           (the fire stamps availableAt with the wake's instant),
+ *           completing with exactly one output — addressed by doc
+ *           id, the record carrying outputId/envelopeTaskId and no
+ *           `taskId` field (PR #45 fix round 9's regression pin).
  *
  * Every composed plan runs the real validatePlan (the committer's
  * §5.6/§6.3 guards incl. F-02 reconciliation) before assertions.
@@ -96,7 +104,7 @@ import {
   wakeStepSeedPaths,
   type WakePassStep,
 } from "../lib/sim/wakeSteps";
-import { buildTaskEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../lib/envelopes";
+import { buildTaskEnvelope, claimEnvelope, envelopeTaskId, type TaskEnvelopeRecord } from "../lib/envelopes";
 import { buildMandateVersion } from "../lib/npcs";
 import { npcFromDoc } from "../lib/authority/view";
 import { readSituationActionSpec } from "../lib/sim/delegation";
@@ -1646,6 +1654,135 @@ check("W25 every NPC-actor producer stamps classification.trigger — the standi
     tamperedDetail.findings.some((f) => f.code === "NPC_TRACE_TRIGGER_MISSING" && f.seq === 8),
     "a triggerless detail entry is flagged at its seq"
   );
+});
+
+// ---------------------------------------------------------------------------
+section("W26 — a fire-spawned envelope, claimed + completed in the same wake (PR #45 CI round 9)");
+
+check("W26 an ask-first fire's envelope is claimable in its own wake and completes with exactly one output, addressed by doc id", () => {
+  // PR #45 CI round 9: the gate suite's N5 died at "exactly one
+  // output record stands" (0 !== 1) while its own earlier assertions
+  // proved the fire spawned the envelope, the claim pass claimed it
+  // (RUNNING observed), completed it (claims.completed DONE), and
+  // the envelope stood DONE. The terminal plan commits output +
+  // envelope patch + outcome entry wholesale, so the output stood —
+  // under its doc id. The suite read it with a field query on
+  // `taskId`, a field the output record never carries (the record
+  // binds by doc id + envelopeTaskId — §4.3's exactly-one mechanism;
+  // the lifecycle's own words: "the output's id is the task id, so
+  // this is an existence check, not a query"). The pure venues had
+  // never chained the joint: W13's planner fixtures and W14's
+  // terminal fixtures are hand-built envelopes. This check drives
+  // a FIRE-SPAWNED envelope (the real evaluator, N5's shape: an
+  // ask-first handler citing no mandate, a question card with no
+  // delegated spec) through the real claim planner, the real
+  // lifecycle claim, and the real terminal step — and pins the
+  // record shape the corrected suite reading rests on.
+  const askFirstWorld = () => {
+    const docs = baseDocs();
+    standingNpc(docs, {
+      npc: { permissionMode: "ask-first" },
+      version: { permissionMode: "ask-first" },
+      rule: ruleDoc({
+        match: { situationKinds: ["question"] },
+        handler: { npcId: "npc1", mode: "ask-first", mandateId: null },
+      }),
+    });
+    return docs;
+  };
+  const docs = askFirstWorld();
+  const sit = makeSituation({
+    kind: "question",
+    detail: { question: "What should the harbor watch rotation be?" },
+  });
+  putSituation(docs, sit);
+  const snapshot = snapshotOf(docs);
+  const step: WakePassStep = { kind: "delegation", situationId: sit.situationId };
+  const resolutionId = wakeStepResolutionId(step, CYCLE);
+  const { evaluation, plan } = evaluateDelegationStep(snapshot, sit.situationId, {
+    resolutionId, cycleId: CYCLE, baselineRegistry: registry,
+  });
+  assert.equal(evaluation?.outcome, "fire");
+  if (evaluation?.outcome !== "fire") throw new Error("unreachable");
+  assert.equal(evaluation.fire.kind, "envelope", "an ask-first handler fires an envelope, never an execution");
+  assertPlanValid(plan, snapshot);
+  const taskId = envelopeTaskId("ownerA", resolutionId);
+  const env = planWriteFor(plan, `sim_task_envelopes/${taskId}`)?.afterDoc as unknown as TaskEnvelopeRecord;
+  assert.ok(env, "the fire step's plan carries the envelope document");
+  assert.equal(env.status, "QUEUED");
+  // Claim eligibility, at the joint: the fire stamps availableAt
+  // with the wake's own instant (composeFirePlan injects
+  // snapshot.now), and the claim planner's availability floor reads
+  // that same instant — a same-wake spawn is claimable in its own
+  // wake, never not-yet-available.
+  assert.equal(env.availableAt, NOW, "the fire stamps the wake's own instant as availableAt");
+  const decisions = planEnvelopeClaims([env], { nowIso: NOW });
+  assert.deepEqual(
+    decisions.claims,
+    [{ taskId, recovered: false }],
+    "the claim planner claims the fire-spawned envelope in its own wake"
+  );
+  assert.equal(decisions.skipped.length, 0);
+  // The claim itself — the lifecycle claim claimEnvelopeTx applies.
+  const leaseId = "lease-w26";
+  const claimed = claimEnvelope(env, {
+    cycleId: CYCLE, leaseId, nowIso: NOW, leaseExpiresAt: "2026-10-20T15:15:00.000Z",
+  });
+  assert.ok(claimed.ok, "the lifecycle claim takes the envelope RUNNING");
+  if (!claimed.ok) throw new Error("unreachable");
+  assert.equal(claimed.envelope.status, "RUNNING");
+  // The terminal step over the claimed envelope, in a world where
+  // the fire entry stands at the envelope's createdSeq (its
+  // provenance) and the card carries the fire's transition.
+  const docsT = askFirstWorld();
+  docsT.set(`sim_task_envelopes/${taskId}`, claimed.envelope as unknown as Record<string, unknown>);
+  const afterSit = planWriteFor(plan, `sim_situations/${sit.situationId}`)?.afterDoc as unknown as SimSituation;
+  assert.ok(afterSit, "the fire transitioned the card");
+  putSituation(docsT, afterSit);
+  const fireDraft = plan.entries.find(
+    (e) => (e.classification as Record<string, unknown> | null)?.delegationFire === true
+  );
+  assert.ok(fireDraft, "the fire entry stands in the fire plan");
+  const fireEntry = buildLogEntry(fireDraft, {
+    seq: env.createdSeq,
+    resolutionSeq: env.createdSeq,
+    resolutionId,
+    entryIndexWithinResolution: 0,
+    resolvedAt: NOW,
+    rulesVersion: "sim-rules-0.5.0-phase5",
+    prevHash: "a".repeat(64),
+    wakeActionId: null,
+    executedDuringSeq: null,
+  }) as unknown as Record<string, unknown>;
+  docsT.set(`sim_log_entries/${String(env.createdSeq).padStart(12, "0")}`, fireEntry);
+  const snapshotT = snapshotOf(docsT);
+  const termPlan = resolveEnvelopeTerminalStep(
+    snapshotT,
+    { kind: "envelope-terminal", taskId, leaseId, outcome: DONE_OUTCOME },
+    { resolutionId: "wake_envterm_w26" }
+  );
+  assertPlanValid(termPlan, snapshotT);
+  // The bijection, addressed the way every reader addresses it: by
+  // doc id. The output record carries outputId/envelopeTaskId and
+  // NO `taskId` field — a field query on `taskId` can never match a
+  // standing output (the gate suite's pre-fix N5 reading).
+  const output = planWriteFor(termPlan, `sim_task_outputs/${taskId}`)?.afterDoc as unknown as Record<string, unknown>;
+  assert.ok(output, "the terminal plan writes the output at sim_task_outputs/{taskId}");
+  assert.equal(output.outputId, taskId);
+  assert.equal(output.envelopeTaskId, taskId);
+  assert.equal(output.outcome, "DONE");
+  assert.equal(
+    output.taskId,
+    undefined,
+    "the output record carries no taskId field — outputs are read by doc id, never by a taskId field query"
+  );
+  const afterEnv = planWriteFor(termPlan, `sim_task_envelopes/${taskId}`)?.afterDoc as unknown as TaskEnvelopeRecord;
+  assert.equal(afterEnv.status, "DONE");
+  assert.equal(afterEnv.outputId, taskId);
+  assert.equal(afterEnv.claim, null);
+  assert.equal(termPlan.entries.length, 1);
+  assert.deepEqual(termPlan.entries[0].recordsCreated, [`sim_task_outputs/${taskId}`]);
+  assert.equal(termPlan.entries[0].actor.envelopeId, taskId);
 });
 
 console.log(`\nwake-harness: ${checks} checks passed`);
