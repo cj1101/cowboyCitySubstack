@@ -62,7 +62,58 @@ import {
 } from "@/lib/npcs/client";
 import { ActionRunner } from "@/components/sim/ActionRunner";
 import { ConfirmationCard } from "@/components/sim/ConfirmationCard";
+import { downloadNpcRegister } from "@/lib/export/fetchPhase5Export";
 import { actionError } from "@/lib/async";
+
+/**
+ * §11.4 export touchpoint: the owner's NPC / mandate / rule
+ * register as a downloadable workbook. Scope is provable by
+ * construction (owner-scoped reads; the builder re-asserts
+ * ownership of every row) — the download fails closed with the
+ * reason rather than producing a partial file.
+ */
+function RegisterExportControls({ uid }: { uid: string }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const run = async (format: "xlsx" | "csv") => {
+    setBusy(true);
+    setNote("");
+    try {
+      await downloadNpcRegister(uid, format);
+      setNote("Your NPC register downloaded.");
+    } catch (err) {
+      setNote(actionError(err, "The export was refused — nothing was downloaded."));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 mt-4">
+      <span className="text-sm text-text-muted">Export my NPC register:</span>
+      <button
+        type="button"
+        className="btn btn-secondary text-sm px-4 py-2"
+        disabled={busy}
+        onClick={() => void run("xlsx")}
+      >
+        Excel (.xlsx)
+      </button>
+      <button
+        type="button"
+        className="btn btn-secondary text-sm px-4 py-2"
+        disabled={busy}
+        onClick={() => void run("csv")}
+      >
+        CSV
+      </button>
+      {note && (
+        <span className="text-sm text-text-muted" role="status">
+          {note}
+        </span>
+      )}
+    </div>
+  );
+}
 
 interface MandateBundle {
   root: SimMandateRoot;
@@ -212,6 +263,7 @@ export default function NpcSettingsPage() {
             </Link>
             .
           </p>
+          <RegisterExportControls uid={user.uid} />
         </header>
 
         {loadError && (
@@ -224,7 +276,7 @@ export default function NpcSettingsPage() {
           <p className="text-text-muted">Reading your NPCs…</p>
         ) : ownedCities.length === 0 ? (
           <p className="glass-panel p-6">
-            You don't own a city yet — NPCs serve a city, so there is nowhere
+            You don&rsquo;t own a city yet — NPCs serve a city, so there is nowhere
             for one to stand until you do.
           </p>
         ) : (
@@ -253,7 +305,7 @@ export default function NpcSettingsPage() {
                   </h2>
                   <p className="text-sm text-text-muted mt-1">
                     {teamActivityLine(activity, city.name)} This state is
-                    derived from the team's mandates — it is a display, not a
+                    derived from the team&rsquo;s mandates — it is a display, not a
                     setting.
                   </p>
                 </div>
@@ -381,7 +433,7 @@ function NpcDetail(props: {
       {npc.status !== "retired" && user && (
         <fieldset className="rounded border border-darker-brown p-3 flex flex-col gap-2">
           <legend className="font-bold px-1">
-            When something pops up in {npc.displayNameSnapshot}'s scope, they may:
+            When something pops up in {npc.displayNameSnapshot}&rsquo;s scope, they may:
           </legend>
           {MODE_OPTIONS.map((option) => (
             <label key={option.mode} className="flex gap-2 items-start text-sm">
@@ -468,7 +520,7 @@ function NpcDetail(props: {
             {mandate.root.status !== "revoked" && user && (
               <div className="flex flex-col gap-2">
                 <p className="text-sm text-text-muted">
-                  Revoking ends this mandate's authority. {NEXT_CYCLE_LINE}{" "}
+                  Revoking ends this mandate&rsquo;s authority. {NEXT_CYCLE_LINE}{" "}
                   Revocation never rewrites or deletes any version.
                 </p>
                 <ActionRunner
@@ -861,7 +913,7 @@ function MandateEditor(props: {
         )}
         <p className="text-xs text-text-muted">
           Periods are counted in actions or Log entries — this world has no
-          clock that moves on its own, so there is no "per week." A spending
+          clock that moves on its own, so there is no &ldquo;per week.&rdquo; A spending
           permission without both caps filled will be refused when it is
           previewed.
         </p>
@@ -906,7 +958,7 @@ function MandateEditor(props: {
       </label>
       <p className="text-xs text-text-muted">
         Fixed by the rules, cannot be removed: sign, accept, or adopt
-        anything; spend above caps; touch another city's anything; write
+        anything; spend above caps; touch another city&rsquo;s anything; write
         canon. A mandate that purported to authorize one of those would be
         refused when previewed — they are listed here so the refusal never
         surprises you.
@@ -1011,7 +1063,7 @@ function CreateNpcForm(props: {
         <p className="text-xs text-text-muted">
           These are examples other owners have used — inspiration, not a menu.
           Using one fills the fields below with editable text. Nothing about
-          the choice is stored: there is no "type" on an NPC.
+          the choice is stored: there is no &ldquo;type&rdquo; on an NPC.
         </p>
       </div>
 
@@ -1047,7 +1099,7 @@ function CreateNpcForm(props: {
         <span className="text-text-muted">Scope — in your words *</span>
         <textarea className="form-input" rows={3} value={scope} onChange={(e) => setScope(e.target.value)} />
         <span className="text-xs text-text-muted">
-          This text is part of the record. It is what "in scope" means for this
+          This text is part of the record. It is what &ldquo;in scope&rdquo; means for this
           NPC, and it is shown to anyone auditing their acts.
         </span>
       </label>
@@ -1095,7 +1147,7 @@ function CreateNpcForm(props: {
       <p className="text-sm text-text-muted">
         Creating {name.trim() === "" ? "this NPC" : name.trim()} is a logged
         action. They become active when the fabric commits it — until then
-        they show as "pending activation." You can edit their character any
+        they show as &ldquo;pending activation.&rdquo; You can edit their character any
         time. Changing their authority creates a new mandate version — the old
         one stays in the record. Creating with no mandate at all is a valid
         completion: they can be tasked by one-off envelopes, and the team

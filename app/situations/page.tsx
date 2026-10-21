@@ -38,7 +38,6 @@ import {
   RULE_AUTHORITY_CHANGED_FLAG,
   RULE_EVALUATION_HELP,
   isHistory,
-  isWaiting,
   kindLabel,
   ruleHandlerAuthorityChanged,
   ruleSentence,
@@ -61,10 +60,62 @@ import {
 } from "@/lib/npcs/client";
 import { SituationCard } from "@/components/sim/SituationCard";
 import { ActionRunner } from "@/components/sim/ActionRunner";
+import { downloadSituationsHistory } from "@/lib/export/fetchPhase5Export";
 import { actionError } from "@/lib/async";
 
 const PAGE_STEP = 20;
 const SORT_STORAGE_KEY = "cowboy-city-situations-sort";
+
+/**
+ * §11.4 export touchpoint: the owner's Situations history, as a
+ * downloadable workbook. The scope is provable by construction —
+ * the fetcher runs the same audience-fenced reads as this page and
+ * the builder re-asserts the scope — so the download is offered
+ * here, to the signed-in owner, and fails closed with the reason
+ * rather than producing a partial file.
+ */
+function ExportControls({ uid }: { uid: string }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const run = async (format: "xlsx" | "csv") => {
+    setBusy(true);
+    setNote("");
+    try {
+      await downloadSituationsHistory(uid, format);
+      setNote("Your Situations history downloaded.");
+    } catch (err) {
+      setNote(actionError(err, "The export was refused — nothing was downloaded."));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 mt-4">
+      <span className="text-sm text-text-muted">Export my Situations history:</span>
+      <button
+        type="button"
+        className="btn btn-secondary text-sm px-4 py-2"
+        disabled={busy}
+        onClick={() => void run("xlsx")}
+      >
+        Excel (.xlsx)
+      </button>
+      <button
+        type="button"
+        className="btn btn-secondary text-sm px-4 py-2"
+        disabled={busy}
+        onClick={() => void run("csv")}
+      >
+        CSV
+      </button>
+      {note && (
+        <span className="text-sm text-text-muted" role="status">
+          {note}
+        </span>
+      )}
+    </div>
+  );
+}
 
 type Facet = "waiting" | "delegated" | "history";
 
@@ -243,6 +294,7 @@ export default function SituationsPage() {
             </Link>
             .
           </p>
+          <ExportControls uid={user.uid} />
         </header>
 
         {loadError && (
@@ -429,7 +481,7 @@ function RulesPanel(props: {
         <h2 className="text-2xl font-bold text-accent-gold">Delegation rules</h2>
         <p className="text-sm text-text-muted mt-1">{RULE_EVALUATION_HELP}</p>
         <p className="text-sm text-text-muted mt-1">
-          Rules route matters; mandates authorize them. A rule whose handler's
+          Rules route matters; mandates authorize them. A rule whose handler&rsquo;s
           mandate has been revoked or replaced stops matching and is flagged —
           it never falls through silently.
         </p>
@@ -484,7 +536,7 @@ function RulesPanel(props: {
                 {authorityChanged && (
                   <p role="alert" className="text-sm font-bold">
                     {RULE_AUTHORITY_CHANGED_FLAG} — this rule no longer matches.
-                    Its handler's mandate was revoked or replaced; author the
+                    Its handler&rsquo;s mandate was revoked or replaced; author the
                     rule again against the current mandate to route these
                     matters once more.
                   </p>

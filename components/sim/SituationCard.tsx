@@ -190,7 +190,7 @@ export function SituationCard({
       {situation.delegationCycleCount > 0 && !terminal && (
         <p className="text-sm text-text-muted">
           This matter came back to your queue after a delegation (cycle{" "}
-          {situation.delegationCycleCount}) — the delegate's handling of it is
+          {situation.delegationCycleCount}) — the delegate&rsquo;s handling of it is
           in the Log.
         </p>
       )}
@@ -475,8 +475,8 @@ export function SituationCard({
                 <h4 className="font-bold">Let it sit</h4>
                 <p className="text-sm text-text-muted">
                   Saying nothing is a decision too, and a complete one: the Log
-                  records the non-response — "No response — {cityName(cityId)}
-                  's leader didn't say anything" — and the card closes as
+                  records the non-response — &ldquo;No response — {cityName(cityId)}
+                  &rsquo;s leader didn&rsquo;t say anything&rdquo; — and the card closes as
                   silent. Nothing is sent to anyone, and nobody is reminded.
                 </p>
                 {user && (

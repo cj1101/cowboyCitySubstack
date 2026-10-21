@@ -89,7 +89,6 @@ export function ActionRunner({
       startedRef.current = true;
       void start();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart, user]);
 
   useEffect(() => {

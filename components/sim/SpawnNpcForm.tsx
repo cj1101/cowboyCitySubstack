@@ -138,7 +138,7 @@ export function SpawnNpcForm({
           {pendingCount > 0
             ? " An NPC you created is still pending activation — it becomes taskable when the fabric commits its creation."
             : ""}{" "}
-          A one-off persona label can't be tasked on its own — the task has to
+          A one-off persona label can&rsquo;t be tasked on its own — the task has to
           name a standing NPC, so the work is attributable.{" "}
           <Link href="/settings/npcs" className="text-accent-gold underline">
             Create or check your NPCs in Settings

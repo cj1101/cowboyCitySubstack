@@ -41,22 +41,6 @@ import type { TaskEnvelopeRecord, TaskOutputRecord } from "@/lib/envelopes/types
 const QUEUE_LIMIT = 200;
 const RULES_LIMIT = 100;
 
-function asDate(value: unknown): Date {
-  if (value instanceof Date) return value;
-  if (
-    value &&
-    typeof value === "object" &&
-    typeof (value as { toDate?: unknown }).toDate === "function"
-  ) {
-    return (value as { toDate: () => Date }).toDate();
-  }
-  if (typeof value === "string" || typeof value === "number") {
-    const d = new Date(value);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  return new Date(0);
-}
-
 function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
