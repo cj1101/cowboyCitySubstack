@@ -64,6 +64,7 @@ import { GOVERNANCE_DESCRIPTORS } from "../lib/sim/rules/governance";
 import {
   DEFAULT_PERMISSION_MODE,
   buildMandateVersion,
+  mandateHash,
   memberActor,
   memberInCharacterActor,
   npcActorStanding,
@@ -1136,6 +1137,64 @@ check("ruleHash parity: Vera's computeRuleHash == the governance copy == the pin
   assert.equal(computeRuleHash(payload as never), expected, "her module's own function, her S4e payload");
   assert.equal(computeDelegationRuleHash(payload as never), expected, "the governance copy (PR-2)");
   assert.equal(computeRuleHash({ ...payload, version: 2 } as never), computeDelegationRuleHash({ ...payload, version: 2 } as never), "parity holds off-vector too");
+});
+
+// The Firestore-read form of a value: what a snapshot read returns
+// after the doc has been written — undefined members dropped, Dates
+// back as Timestamp-shaped values, explicit nulls preserved.
+function firestoreReadForm<T>(value: T): T {
+  if (value instanceof Date) {
+    return { seconds: Math.floor(value.getTime() / 1000), nanoseconds: 0 } as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => firestoreReadForm(v)) as T;
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      out[k] = firestoreReadForm(v);
+    }
+    return out as T;
+  }
+  return value;
+}
+check("mandateHash round-trip pin: the stored hash recomputes over the Firestore-read form", () => {
+  // The mandate-side mirror of the parity discipline above, pinned
+  // after PR #45 fix round 1: the authority stage and the
+  // standing-Log verifier recompute lib/npcs mandateHash over
+  // SNAPSHOT docs (the Firestore-read form), so the stored hash must
+  // survive the write/read round-trip exactly. The gate suite's N2
+  // asserts the same property against a real emulator read-back;
+  // this pure pin catches a payload-form drift without the emulator.
+  const built = buildMandateVersion({
+    version: 1,
+    npcId: "charA2",
+    cityId: "cityA",
+    ownerUid: "ownerA",
+    permissionMode: "act-for-me",
+    scopeFreeform: "Run routine harbor funds when a situation calls.",
+    structuredScope: {
+      triggerKinds: ["situation"],
+      allowedActionTypes: ["fixture_adjust"],
+      namedRecordIds: [],
+      counterpartyCityIds: null,
+    },
+    caps: {
+      perActionRubars: 100_000,
+      perResolutionPeriodRubars: 1_000_000,
+      periodDefinition: null,
+      maxProjectPhase: null,
+      allowPartialExecution: false,
+    },
+    negotiationBounds: null,
+    alwaysEscalate: [],
+    responseStyle: null,
+    expiresAtSeq: null,
+    horizonActions: null,
+    sourceActionId: "act-governance-harness-pin",
+  }, new Date(0));
+  const readBack = firestoreReadForm({ ...built, effectiveSeq: 42 });
+  assert.ok(!(readBack.createdAt instanceof Date), "the transform must actually bite: createdAt returns Timestamp-shaped");
+  assert.equal(mandateHash(readBack), built.mandateHash);
 });
 
 check("situation.handle records the §6.3A self-handling decision; the card stays open", () => {

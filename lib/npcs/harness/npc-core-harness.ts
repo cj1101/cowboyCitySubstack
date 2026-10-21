@@ -9,7 +9,9 @@
  *
  *   N1  Default-mode assignment (P5-K3: fresh NPC = ask-first)
  *   N2  Mandate hash stability + golden vectors (canonical cross-check
- *       against node:crypto, an independent digest path)
+ *       against node:crypto, an independent digest path) + the
+ *       Firestore-read-form round-trip pin (the stored hash must
+ *       recompute over the doc as the stage/verifier read it back)
  *   N3  Freeform-definition acceptance (CJ openness; TC-N14/N17) and
  *       the one content rule (no numeric personality, Vera §8.2)
  *   N4  Attribution shape (brief §3.2; Vera §6; exactly one authority
@@ -146,6 +148,42 @@ check("status/effective fields are excluded from the hash", () => {
   const pending = buildMandateVersion(MANDATE_GOLDEN_VECTORS[0].payload as unknown as MandateVersionInput, NOW);
   const effective = { ...pending, effectiveSeq: 42, supersededSeq: 99 };
   assert.equal(mandateHash(effective), pending.mandateHash);
+});
+// The Firestore-read form of a value: what a snapshot read returns
+// after the doc has been written — undefined members dropped, Dates
+// back as Timestamp-shaped values, explicit nulls preserved.
+function firestoreReadForm<T>(value: T): T {
+  if (value instanceof Date) {
+    return { seconds: Math.floor(value.getTime() / 1000), nanoseconds: 0 } as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => firestoreReadForm(v)) as T;
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      out[k] = firestoreReadForm(v);
+    }
+    return out as T;
+  }
+  return value;
+}
+check("the stored hash recomputes over the Firestore-read form (round-trip pin)", () => {
+  // The authority stage (lib/sim/authorityStage.ts) and the
+  // standing-Log verifier (lib/sim/verify.ts) recompute mandateHash
+  // over SNAPSHOT docs — the Firestore-read form, not the builder's
+  // in-memory object. The payload's normalization (fixed field set,
+  // absent≡null rebuilds, lifecycle stamps and createdAt excluded)
+  // must absorb that form exactly. Any future payload field whose
+  // stored form differs (a Date, an undefined-prone member) breaks
+  // HERE, in the open, instead of failing every mandate verification
+  // in production (PR #45 fix round 1: the gate suite's N2 failure
+  // was the mirror-image mistake — the authority dialect's hash
+  // applied to a stored doc).
+  const built = buildMandateVersion(MANDATE_GOLDEN_VECTORS[0].payload as unknown as MandateVersionInput, NOW);
+  const standing = { ...built, effectiveSeq: 42 };
+  const readBack = firestoreReadForm(standing);
+  assert.ok(!(readBack.createdAt instanceof Date), "the transform must actually bite: createdAt returns Timestamp-shaped");
+  assert.equal(mandateHash(readBack), built.mandateHash);
 });
 check("mutating any authority field changes the hash", () => {
   const base = MANDATE_GOLDEN_VECTORS[0].payload;

@@ -284,3 +284,103 @@ record and the body are the same text by design; if they ever
 diverge, this record governs.
 
 *— Rafe (Muse Eng), Phase 5 Build Lead, 2026-10-21.*
+
+---
+
+## CI fix round 1 (PR #45) — N2 mandateHash mismatch: SUITE bug, engine untouched
+
+**Result that indicted:** Sim core failed inside npc-core at
+`tests/npc-core.test.ts:521` — "mandateHash equality: the standing
+version recomputes to its own hash (P5-G2's in-suite half)":
+recomputed `fbb085a3f88694eb…` vs stored `ca28282cc2a4214f…`
+(Install · Typecheck · Lint · Build, Rules, and Vercel all green;
+N0 census and N1 passed before the failure). Log:
+`pr45-simcore-log.txt`.
+
+**Root cause — the suite applied the wrong dialect's hash to a raw
+stored doc, skipping the projection.** N2 asserted
+`computeMandateHash(version)` (lib/authority) over the Firestore-read
+version doc. That function's payload is the authority dialect's
+projection shape — `{mandateId, version, mode, scope, expiresAtSeq,
+horizonActions, createdByUid}` — while a stored version doc
+(lib/npcs `SimMandateVersion`) carries `permissionMode`,
+`scopeFreeform`, `structuredScope`, `caps`, `ownerUid`, and no
+`mandateId` at all. Four of the seven payload fields read as
+`undefined` and are dropped by canonical JSON, so the digest the
+suite computed was over `{"expiresAtSeq":null,"horizonActions":null,
+"version":1}` — a payload containing **none of the mandate's
+content**.
+
+**Field-level evidence (pure probe, run locally against the landed
+code; suite inputs mirrored through the handler's own builder
+path):**
+- The probe reproduces CI's "actual" `fbb085a3f88694eb…` **exactly**
+  by applying `computeMandateHash` to the raw (round-tripped) stored
+  doc — and reproduces it again for a *different* mandate (the
+  suite's envoy): under the suite's form the "recomputed" digest is
+  mandate-independent, which no real recompute can be.
+- The stored-regime recompute — lib/npcs `mandateHash` over
+  `MANDATE_HASH_FIELDS` — over the same Firestore-round-tripped doc
+  equals the builder's stored hash exactly: the recompute the
+  engine performs is round-trip stable.
+
+**Which layer was wrong, and the proof the engine never depended on
+the raw form:** every production verification site uses the stored
+regime or a projection, never `computeMandateHash` over a stored
+doc — `lib/sim/authorityStage.ts` recomputes
+`storedMandateHash(versionDoc)` (lib/npcs) for its stored-regime
+integrity check and calls `computeMandateHash` only over its own
+projection (`projected.mandateHash = computeMandateHash(projected)`);
+`lib/sim/verify.ts` recomputes with the same lib/npcs function over
+resolved versions; `lib/sim/rules/governance.ts`'s flip path uses
+`mandateHash(asVersion(citedDoc))`. A full call-site sweep of
+`computeMandateHash(` confirms the suite's line was the **only**
+place in the codebase feeding it a raw stored doc (the remaining
+sites: the stage's projection, `verifyMandateHash` over dialect
+records, and the authority/envelopes harnesses over module-built
+records). Cato's golden vectors — the plan-time form — are
+untouched and still pin the canonical payload.
+
+**Fix (suite only; no engine file changed):**
+`tests/npc-core.test.ts` N2 now asserts the stored-regime recompute
+(`mandateHash` from lib/npcs over the read-back doc — the stage's
+and verifier's own check), with the dialect seam stated in a comment
+at the assertion and in the section header; the unused authority
+imports are gone.
+
+**Durable pin (the divergence class cannot regress silently):**
+a pure round-trip check — builder object → Firestore-shaped
+round-trip (undefined members dropped, Dates back Timestamp-shaped,
+`effectiveSeq` stamped) → stored-regime recompute equality — now
+stands in both pure venues: `lib/npcs/harness/npc-core-harness.ts`
+(beside the golden vectors; 36 → **37 checks**) and
+`tests/governance-harness.ts` (the CI-run pure chain, beside the
+ruleHash parity pin; 57 → **58 checks**). The fixed N2 assertion is
+itself the emulator-venue tripwire: it recomputes over a real
+emulator read-back on every PR.
+
+**Sibling sweep — delegationRuleHash (the same class, checked
+before N3 could run): CLEAN.** `computeRuleHash`
+(lib/sim/delegation.ts) takes an explicit payload object on every
+path — the module builder, governance's exact copy
+(`computeDelegationRuleHash`), and the suite's N3, which constructs
+the payload field-by-field rather than reading a doc. Fire-time
+code (`lib/sim/delegation.ts`) carries the stored `ruleHash`
+forward and never recomputes over a doc. Parity stays pinned at
+`0b37d446…4520` (PR-3) in the governance harness. No other suite
+section recomputes a hash over a raw doc (line 1469ff read the
+stored hashes into export fixtures; they do not recompute).
+
+**Local regression (fix branch tip):** `tsc --noEmit` clean;
+scoped ESLint on the three touched files clean; `next build`
+green; pure battery green — npc-core harness 37, authority +
+envelopes harnesses all-pass, and the test:sim pure chain at
+landed counts (cat1 all, defense 12, chains 34, cat2 34, acq 14,
+market 27, lore 27, closeout 29, governance 58 incl. the new pin,
+situations 32, banking 54, wake 23). The npc-core suite itself
+remains CI's venue — the sandbox emulator still cannot boot
+(firebase-tools config-store error, the standing blocker); the
+case to watch on re-run is N2 passing and the suite proceeding
+through N3–N11 for the first time.
+
+*— Rafe (Muse Eng), Phase 5 Build Lead, PR #45 fix round 1, 2026-10-21.*

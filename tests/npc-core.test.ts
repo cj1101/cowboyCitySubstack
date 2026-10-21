@@ -57,8 +57,8 @@ import { RULE_DESCRIPTORS } from "../lib/sim/rules/registry";
 import { RESOLVER_RULES_VERSION } from "../lib/sim/state";
 import { buildSituationDoc } from "../lib/sim/situations";
 import { computeRuleHash } from "../lib/sim/delegation";
-import { computeMandateHash } from "../lib/authority/mandate";
-import type { MandateVersionRecord } from "../lib/authority/types";
+import { mandateHash as storedMandateHash } from "../lib/npcs";
+import type { SimMandateVersion } from "../lib/npcs";
 import { envelopeTaskId } from "../lib/envelopes";
 import {
   delegatedActionId,
@@ -482,8 +482,11 @@ async function main() {
   // ======================================================================
   // N2 — Mandates (P5-G4): mandate.set stamps root + version + the
   // NPC snapshot in ONE resolution; the standing version's mandateHash
-  // recomputes from its own fields (the countersign's in-suite hash
-  // equality); a Tier B allowedActionType is refused at authoring.
+  // recomputes from its own fields under the STORED regime (lib/npcs
+  // mandateHash — the recompute the authority stage and the
+  // standing-Log verifier perform over snapshot docs; the
+  // countersign's in-suite hash equality); a Tier B allowedActionType
+  // is refused at authoring.
   // ======================================================================
   const MANDATE_CAPS = {
     perActionRubars: 100_000,
@@ -518,8 +521,22 @@ async function main() {
       typeof version.mandateHash === "string" && (version.mandateHash as string).length === 64,
       "the version carries its mandateHash"
     );
+    // The hash regime of a STANDING doc is the stored regime: lib/npcs
+    // mandateHash over MANDATE_HASH_FIELDS, recomputed over the doc as
+    // read — exactly the integrity check the authority stage
+    // (lib/sim/authorityStage.ts) and the standing-Log verifier
+    // (lib/sim/verify.ts) run. The authority dialect's
+    // computeMandateHash must never be applied to a stored doc: it
+    // hashes the stage's PROJECTION (mandateId/mode/scope/
+    // createdByUid), fields the stored shape does not carry (it
+    // carries permissionMode/scopeFreeform/structuredScope/caps/
+    // ownerUid and no mandateId), so over a raw doc it digests a
+    // near-empty payload — PR #45 CI round 1 failed on exactly that:
+    // the "recomputed" digest fbb085a3… is the canonical hash of
+    // {version, expiresAtSeq, horizonActions} alone, identical for
+    // every mandate (proven in the fix round's pure probe).
     assert.equal(
-      computeMandateHash(version as unknown as MandateVersionRecord),
+      storedMandateHash(version as unknown as SimMandateVersion),
       version.mandateHash,
       "mandateHash equality: the standing version recomputes to its own hash (P5-G2's in-suite half)"
     );
