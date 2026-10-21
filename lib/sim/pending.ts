@@ -339,8 +339,9 @@ export async function scanRipeness(
     try {
       const paths = collectRipeningReadPaths(claimed);
       const queries = collectRipeningReadQueries(claimed);
-      // Only delivery pendings declare ripening queries today; with
-      // none declared the snapshot materializes exactly as before.
+      // Delivery and schedule pendings declare ripening queries;
+      // with none declared the snapshot materializes exactly as
+      // before.
       // With queries, the materializer binds every result doc into
       // the snapshot (and its query records ride the commit, so the
       // in-transaction recompute finds the same materialized set).

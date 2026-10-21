@@ -367,8 +367,12 @@ function premiumLogViews(
 
 /** The premium Log queries every banking read plan that derives
  * ladder/coverage state declares (filters on the classification
- * stamps' dotted paths — the F-01 query machinery walks them). */
-function premiumQueries(bankCorporationId: string): CollectionQuerySpec[] {
+ * stamps' dotted paths — the F-01 query machinery walks them).
+ * Exported for the Lead's ripening read collector (PR-6 assembly
+ * A1): the schedule dispatch declares these same specs for a
+ * ripening snapshot, so the marker/settlement views the composition
+ * derives are the views every banking read plan derives. */
+export function premiumQueries(bankCorporationId: string): CollectionQuerySpec[] {
   return [
     {
       id: "premiumMarkers",
