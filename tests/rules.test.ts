@@ -1077,6 +1077,19 @@ async function main() {
     isAdmin: false,
     accessLevel: "guest",
   });
+  // The fabric service identities hold user records too — the engine's
+  // operating model (sim-core and play-core seed the same records):
+  // read plans materialize over the fabric identity through the client
+  // SDK, so the service user must satisfy isViewer() for the
+  // viewer-gated clauses it legitimately reads (sim_world/current, the
+  // deposit-insurance fund singleton, …). Its custom claims, not this
+  // record, gate every fabric write. Seeded here since PR #44: before
+  // this, the rules fixture carried no fabric user docs (a Phase 2
+  // vintage gap — the fabric contexts then exercised only
+  // claims-gated write fences), and the fund block's fabric viewer
+  // read was the first assertion to reach a viewer-only clause.
+  await seedUser(env, "fabricSvc", { email: "fabric@realm.test", status: "approved", isAdmin: false });
+  await seedUser(env, "fabricWkr", { email: "worker@realm.test", status: "approved", isAdmin: false });
   await env.withSecurityRulesDisabled(async (context) => {
     const fs = context.firestore();
     await setDoc(doc(fs, "factions", "cityA"), {

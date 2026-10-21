@@ -983,3 +983,106 @@ market 27, lore 27; registry probe census 79 with every
 descriptor resolving; tsc clean; scoped lint clean; `next
 build` green. Rules + Sim core suites are CI's venue on this
 PR.
+
+## CI fix round 1 (PR #44) — Rules suite: the fabric fixture gap (Rafe)
+
+**Symptom.** The Rules suite ran its full length and died at the end
+of the finance posture block with an uncaught FirebaseError
+permission-denied: "evaluation error at L1560:22 for 'get' @ L1560,
+false for 'get' @ L1560". Install, Sim core, and Vercel were green.
+
+**L1560 identified.** firestore.rules L1560 is the deposit-insurance
+fund singleton's read clause — `allow read: if isViewer() &&
+docId == 'main'` in `match /sim_deposit_insurance_fund/{docId}`
+(L1559–1562), landed at assembly (catch #2). The failing assertion
+is the fund block's `assertSucceeds(getDoc(fundRef(fabricWorker)))`:
+the guest and member reads before it (both seeded viewers) succeed,
+and the worker read is the first assertion in the suite's history to
+exercise a fabric identity against a purely viewer-gated clause.
+
+**Root cause — the test fixture, not the clause.** The rules
+suite's sim fixture never seeded user records for the fabric
+identities. `isViewer()` is `isSignedIn() && hasUser() &&
+!isSuspended()`; with no `users/fabricWkr` doc, `hasUser()` is
+false and every viewer-gated clause evaluates false for the fabric
+identities. The gap is Phase 2 vintage: the fabric contexts were
+introduced for claims-gated write fences, where a user record is
+irrelevant, and no later section reached a viewer-only clause with
+a fabric identity until the fund block.
+
+**The engine's model, proven in the sibling suites.** Both engine
+fixtures seed the records this one lacked — sim-core.test.ts
+(fabricSvc/fabricWkr user docs, `{email, status: "approved",
+isAdmin: false}`) and play-core.test.ts (same) — because the
+dispatcher materializes read plans over the fabric committer
+identity through the client SDK, in the caller's identity
+(dispatcher.ts's `committerDb` + readers.ts), and the wake runner
+executes the whole wake signed in as the fabric service user
+"exactly as production fabric would" (scripts/sim-run-wake.ts).
+Viewer-only clauses the fabric legitimately reads —
+sim_world/current, sim_fabric_status/current — have depended on
+the service user being a viewer all along. The rules suite was the
+lone fixture not encoding it.
+
+**Why the clause stands.** The design's posture for the fund is
+viewer read of `main` + committer-only writes (the banking
+amendment's recorded posture, landed verbatim at assembly).
+Widening it with an `isFabricService()` branch would exceed the
+design and break symmetry with the three sibling viewer-only
+singleton clauses, none of which carries a fabric branch — the
+model puts the service user's viewer status in its user record,
+not in per-clause branches. (Contrast deposits / loans / member
+accounts, whose designs name the fabric identity in the read
+matrix — finance §1.2/§2.7 — and whose clauses carry the branch
+for that reason.) Per the PR #41 round-2 lesson, neither side was
+edited until the evidence indicted one: the suite was taught
+nothing, and the clause was widened by nothing.
+
+**Fix.** Two `seedUser` lines in the rules suite's sim section
+(fabricSvc, fabricWkr — same shape as the sim-core/play-core
+fixtures) plus a comment at the seed site stating the discipline.
+Assertions untouched; rules untouched.
+
+**Sibling sweep.**
+- Loans clause vs handler shapes — clean. loans.ts writes
+  `borrower: LedgerRef` (personal `{kind, memberId}`; company
+  `{kind, corporationId, cityId}`; treasury `{kind, cityId}`) and
+  top-level `bankCorporationId` / `bankCityId` (loans.ts:45–46,
+  167–168) — exactly the fields the clause keys on; the
+  corporation read-back (`sim_cities/{bankCityId}/corporations/
+  {bankCorporationId}` → `ownerMemberId`) is the Phase 4 deposits
+  pattern. The A11 matrix assertions preceding the fatal line all
+  behaved as designed, and the test fixtures mirror the handler
+  shapes, not merely the clause.
+- Deposits mirror — clean: banking.ts writes `depositor:
+  LedgerRef` (banking.ts:167/235/251), the grammar the deposits
+  clause keys on.
+- Fund update/delete postures — consistent: create, update, and
+  delete share the single `isFabricCommitter() && docId == 'main'`
+  line (L1561), so no posture divergence between them is possible;
+  the clause keys on docId only (no fund-record fields), so the
+  field-divergence class cannot occur here. Fund consumers
+  verified against the landed posture: resolver snapshot reads
+  (lib/sim/rules/finance.ts) and the as-requester export read
+  (lib/export/fetchBankingExport.ts).
+- Fixture-flip sweep — clean. Every fabric-context assertion in
+  the suite was enumerated: write denials are claims-, ownership-,
+  or shape-gated (a user record with `isAdmin: false`, no city
+  ownership, and a uid matching no fixture owner opens none of
+  them — including the publications "fabric never publishes"
+  create, the drafts badge fence, and the posts sim branch); read
+  successes ride explicit fabric branches; no assertion anywhere
+  denies a fabric read on viewer/member grounds. The sections
+  after the finance block (cases, acquisition, Phase 5
+  governance), which ran green in PR #41 and never executed in
+  PR #44's run, contain no assertion the seeding can flip.
+
+**Regression (local).** Pure battery green at landed counts
+(banking 54, governance 57, situations 32, wake 23, closeout 29,
+chains 34, cat2 34, cat1 all, defense 12, acq 14, market 27,
+lore 27); tsc clean; ESLint on the touched file 0 errors (one
+pre-existing warning at tests/rules.test.ts:2095, `_dropped`, in
+an untouched region); `next build` green. The rules suite itself
+is CI's venue: the case to watch is the fund block completing and
+the suite running to its final ok line, with the cases,
+acquisition, and Phase 5 governance sections executing after it.
