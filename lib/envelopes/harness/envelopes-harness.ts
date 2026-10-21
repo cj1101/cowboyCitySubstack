@@ -139,12 +139,12 @@ function makeMandateVersion(overrides?: Partial<MandateVersionRecord>): MandateV
 
 function spawnInput(overrides?: Partial<EnvelopeSpawnInput>): EnvelopeSpawnInput {
   return {
-    requesterUid: OWNER,
+    requestingMemberId: OWNER,
     npcId: "npc-envoy",
     cityId: "cascadia",
     threadRef: { kind: "deal-room", id: "thread-1" },
     taskType: "negotiation",
-    intentText: "Work the trade terms with Evan City inside the bounds.",
+    task: "Work the trade terms with Evan City inside the bounds.",
     structuredIntent: null,
     bounds: { counterpartyCityIds: ["evan-city"], negotiationBounds: BOUNDS },
     spawnActionId: "act-spawn-1",
@@ -206,7 +206,7 @@ function spawnInput(overrides?: Partial<EnvelopeSpawnInput>): EnvelopeSpawnInput
     validateEnvelopeSpawn(npc, env, { source: "owner-direct", mandateVersion: null, cities: CITIES }),
     []
   );
-  const foreignRequester = buildTaskEnvelope(spawnInput({ requesterUid: OTHER }));
+  const foreignRequester = buildTaskEnvelope(spawnInput({ requestingMemberId: OTHER }));
   assert.ok(
     validateEnvelopeSpawn(npc, foreignRequester, { source: "owner-direct", mandateVersion: null, cities: CITIES })
       .some((v) => v.includes("not the NPC's owner"))

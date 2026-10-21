@@ -36,8 +36,8 @@ export class EnvelopeValidationError extends Error {}
 
 /** Deterministic task id from requester + client request id (§2.5):
  * a retried spawn re-derives the same id and collides harmlessly. */
-export function envelopeTaskId(requesterUid: string, clientRequestId: string): string {
-  return `env_${sha256Hex({ requesterUid, clientRequestId }).slice(0, 32)}`;
+export function envelopeTaskId(requestingMemberId: string, clientRequestId: string): string {
+  return `env_${sha256Hex({ requestingMemberId, clientRequestId }).slice(0, 32)}`;
 }
 
 const TASK_TYPES: ReadonlySet<string> = new Set([
@@ -69,17 +69,17 @@ export function buildTaskEnvelope(input: EnvelopeSpawnInput): TaskEnvelopeRecord
       "a negotiation envelope requires negotiationBounds (spec §8.4 layer 1: no bounds, no envoy work)"
     );
   }
-  if (!input.requesterUid || !input.npcId || !input.cityId) {
-    throw new EnvelopeValidationError("envelope requires requesterUid, npcId, and cityId");
+  if (!input.requestingMemberId || !input.npcId || !input.cityId) {
+    throw new EnvelopeValidationError("envelope requires requestingMemberId, npcId, and cityId");
   }
   return {
-    taskId: envelopeTaskId(input.requesterUid, input.clientRequestId),
-    requesterUid: input.requesterUid,
+    taskId: envelopeTaskId(input.requestingMemberId, input.clientRequestId),
+    requestingMemberId: input.requestingMemberId,
     npcId: input.npcId,
     cityId: input.cityId,
     threadRef: input.threadRef,
     taskType: input.taskType,
-    intentText: input.intentText,
+    task: input.task,
     structuredIntent: input.structuredIntent,
     bounds: {
       mayCommit: false,
@@ -212,9 +212,9 @@ export function validateEnvelopeSpawn(
   if (env.cityId !== npc.cityId) {
     violations.push(`envelope city ${env.cityId} is not the NPC's city ${npc.cityId}`);
   }
-  if (env.requesterUid !== npc.ownerUid) {
+  if (env.requestingMemberId !== npc.ownerUid) {
     violations.push(
-      `requester ${env.requesterUid} is not the NPC's owner ${npc.ownerUid} — only the owner tasks their own NPC`
+      `requester ${env.requestingMemberId} is not the NPC's owner ${npc.ownerUid} — only the owner tasks their own NPC`
     );
   }
 

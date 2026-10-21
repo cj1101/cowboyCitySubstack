@@ -52,6 +52,14 @@ import {
 } from "./rules/pendingRules";
 import { planWrite, plannedDoc, ruleEffectDraft, summaryDraft } from "./rules/planHelpers";
 import {
+  collectNpcStageReadPlan,
+  planForStageVerdict,
+  runAuthorityStage,
+  stampMandateCitation,
+  type StageResult,
+} from "./authorityStage";
+import type { AuthorityVerdict } from "../authority";
+import {
   COUNTER_MEANS_QUERY_ID,
   buildDeliveryPlan,
   type DeliverySpec,
@@ -261,6 +269,16 @@ export function collectActionReadPlan(
     const extra = descriptor.readPlan({ action, seedDocs });
     for (const path of extra.paths ?? []) paths.add(path);
     for (const spec of extra.queries ?? []) queries.push(spec);
+  }
+  // Phase 5 authority stage (PR-2): an NPC-actor action's stage reads
+  // derive from the actor's own citation (npc doc, mandate root + the
+  // cited version — the root path carries the mandateId, so no seed
+  // round-trip is needed), the terms record, counterparty factions,
+  // and the period-usage Log query (counted by mandate citation).
+  if (action.actor.type === "npc") {
+    const stageReads = collectNpcStageReadPlan(action);
+    for (const path of stageReads.paths) paths.add(path);
+    for (const spec of stageReads.queries) queries.push(spec);
   }
   return { paths: [...paths], queries };
 }
@@ -562,6 +580,31 @@ export function resolveAction(
   const citations = extractCitations(action);
   const descriptor = descriptorForActionKind(action.actionType);
 
+  // Phase 5 authority stage (brief §5.1, PR-2): EVERY npc-actor action
+  // passes the stage BEFORE descriptor dispatch — including unruled
+  // kinds (the attempt then carries ruleIds [] / classes []). A
+  // non-resolve verdict becomes a plan here (planForStageVerdict); a
+  // resolve verdict lets dispatch proceed and stamps the summary
+  // entry's classification with the mandate citation + trigger.
+  let stage: (StageResult & {
+    verdict: Extract<AuthorityVerdict, { disposition: "resolve" }>;
+  }) | null = null;
+  if (action.actor.type === "npc") {
+    const result = runAuthorityStage(snapshot, action, opts.prepared);
+    if (result.verdict.disposition !== "resolve") {
+      const plan = planForStageVerdict(action, result, descriptor?.id ?? null, opts.prepared);
+      validatePlan(plan, {
+        baselineRegistry: opts.baselineRegistry,
+        covertEntriesAllowed: descriptor?.visibility === "covert",
+        snapshot,
+      });
+      return finalizePlan(plan);
+    }
+    stage = result as StageResult & {
+      verdict: Extract<AuthorityVerdict, { disposition: "resolve" }>;
+    };
+  }
+
   if (!descriptor) {
     // §5.5 unruled: narrative-only plan, baseline null, changes []. The
     // action still enters the Log (auditability), and that entry is what
@@ -600,6 +643,9 @@ export function resolveAction(
         : [],
       planHash: "",
     };
+    // An unruled kind under a passing mandate resolves as the narrative
+    // plan with the citation stamped (brief §5.1).
+    if (stage) stampMandateCitation(plan, stage);
     validatePlan(plan, { baselineRegistry: opts.baselineRegistry, covertEntriesAllowed: false, snapshot });
     return finalizePlan(plan);
   }
@@ -640,6 +686,11 @@ export function resolveAction(
       },
     ];
   }
+
+  // Resolve verdicts stamp the summary with the mandate citation +
+  // trigger — including rejected-handler-path plans (the resolver's
+  // rejection conversion above rebuilt the summary entry).
+  if (stage) stampMandateCitation(plan, stage);
 
   validatePlan(plan, {
     baselineRegistry: opts.baselineRegistry,
