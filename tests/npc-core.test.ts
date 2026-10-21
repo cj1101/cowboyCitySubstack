@@ -887,9 +887,14 @@ async function main() {
 
     const envelope = await adminDoc(`sim_task_envelopes/${askTaskId}`);
     assert.equal(envelope?.status, "DONE");
-    const outputs = await adminDb.collection("sim_task_outputs").where("taskId", "==", askTaskId).get();
-    assert.equal(outputs.size, 1, "exactly one output record stands");
-    assert.equal(outputs.docs[0].data().outcome, "DONE");
+    // Outputs are addressed by doc id — the §4.3 exactly-one mechanism
+    // (the record carries outputId/envelopeTaskId, never a `taskId`
+    // field, and every production reader doc()-reads it). A field
+    // query on `taskId` matches zero standing outputs (round 9).
+    const output = await adminDoc(`sim_task_outputs/${askTaskId}`);
+    assert.ok(output, "exactly one output record stands");
+    assert.equal(output?.envelopeTaskId, askTaskId);
+    assert.equal(output?.outcome, "DONE");
 
     const cardAfter = await adminDoc(`sim_situations/${askSituationId}`);
     assert.equal(cardAfter?.status, "awaiting_owner", "the draft rests with the owner (ask-first)");
@@ -971,8 +976,8 @@ async function main() {
       "the cancelled envelope never completes"
     );
     assert.equal(
-      (await adminDb.collection("sim_task_outputs").where("taskId", "==", taskId).get()).size,
-      0,
+      await adminDoc(`sim_task_outputs/${taskId}`),
+      null,
       "no output ever stands for it"
     );
 
@@ -1002,8 +1007,8 @@ async function main() {
     );
     assert.equal(claimedEnvelopes.find((c) => c.taskId === silentTaskId)?.npcId, "charB1");
     assert.equal(
-      (await adminDb.collection("sim_task_outputs").where("taskId", "==", silentTaskId).get()).size,
-      1,
+      (await adminDoc(`sim_task_outputs/${silentTaskId}`))?.envelopeTaskId,
+      silentTaskId,
       "its output stands as a draft in the thread"
     );
     assert.equal(
@@ -1412,8 +1417,8 @@ async function main() {
     const taskId = envelopeTaskId("ownerA", "npc-core-g13");
     assert.equal((await adminDoc(`sim_task_envelopes/${taskId}`))?.status, "DONE");
     assert.equal(
-      (await adminDb.collection("sim_task_outputs").where("taskId", "==", taskId).get()).size,
-      1,
+      (await adminDoc(`sim_task_outputs/${taskId}`))?.envelopeTaskId,
+      taskId,
       "the novel NPC's task resolves with its output standing"
     );
     await verifyOk();
