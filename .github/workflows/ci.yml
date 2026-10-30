@@ -3,17 +3,19 @@
 # Spec: workstreams/phase0-readiness.md §4 (Priya, DevOps). Draft adapted from
 # workstreams/ci-workflow-draft.yml (Osei, QA) per that spec's adaptation pass.
 #
-# One required check: "Install · Typecheck · Lint · Build"
+# Required checks: "Install · Typecheck · Lint · Build" and "Rules tests"
 #   npm ci -> npm run typecheck -> npm run lint -> npm run build
-# That job's definition below is the branch-protection contract — do not
-# rename it, and do not fold other steps into it.
+# Those jobs' definitions below are the branch-protection contract — do
+# not rename them, and do not fold other steps into them.
 #
-# A second job, "Rules tests (non-required)", runs the Firestore/Storage
-# rules suite (test:rules, Firebase emulators) purely to establish the
-# suite's baseline in a clean environment. It is NOT a required check and
-# must NOT be added to branch protection: it stays non-required until it
-# passes green and stable on unmodified master, and is promoted only via
-# a separate PR (phase0-readiness.md §4.4).
+# The second job, "Rules tests", runs the Firestore/Storage rules suite
+# (test:rules, Firebase emulators). It began as a non-required baseline
+# job and was promoted to required after green, stable runs on
+# unmodified master met the promotion criteria (phase0-readiness.md
+# §4.4; evidence in workstreams/rules-promotion-evidence.md). Its
+# display name IS its branch-protection context: renaming it without
+# updating branch protection in the same window would block all merges
+# on a check that never reports.
 #
 # Deliberately NOT here (phase0-readiness.md §3):
 #   - No `npm test` step: package.json has no `test` script; a step that
@@ -73,30 +75,31 @@ jobs:
 
   rules-tests:
     # =========================================================================
-    # NON-REQUIRED — do NOT add this job to branch protection.
+    # REQUIRED — this job is in branch protection as "Rules tests".
     #
-    # Purpose: establish the rules suite's true baseline in GitHub Actions.
-    # The suite has never been observed to run anywhere: in the dev sandbox,
-    # the Firestore emulator rejects its own rules-upload endpoint for every
+    # Purpose: run the rules suite's true baseline in GitHub Actions.
+    # The suite cannot be observed locally: in the dev sandbox, the
+    # Firestore emulator rejects its own rules-upload endpoint for every
     # client (a sandbox loopback defect — see
     # workstreams/test-rules-baseline-report.md), so no local baseline
-    # exists. Actions runners have clean loopback; this job IS the baseline
-    # venue.
+    # exists. Actions runners have clean loopback; this job IS the
+    # baseline venue.
     #
-    # Failure semantics: a red run here is expected while the baseline is
-    # being established, and it must not block merges. That is guaranteed by
-    # branch protection listing only "Install · Typecheck · Lint · Build"
-    # as a required status check — this job is simply not in that list.
-    # Do NOT paper over failures with `continue-on-error: true`: the check
-    # must show its real color in the PR checks list, or the baseline
-    # evidence is worthless. The distinct check name ("Rules tests
-    # (non-required)") keeps it visually separate from the required check.
+    # Failure semantics: a red run blocks merges — that is the point of
+    # the promotion. The suite earned required status by running green
+    # and stable on unmodified master (promotion criteria:
+    # phase0-readiness.md §4.4; evidence:
+    # workstreams/rules-promotion-evidence.md — Theo's addendum: four
+    # consecutive green master-push runs at the evidence date, and every
+    # master-push run green since). Do NOT paper over failures with
+    # `continue-on-error: true`: the check must show its real color in
+    # the PR checks list, or the evidence is worthless.
     #
-    # Promotion (phase0-readiness.md §4.4): a separate PR may add this job
-    # to branch protection only after green, stable runs on unmodified
-    # master — working bar: 3 consecutive green runs on master.
+    # Name trap: this job's display name IS its branch-protection
+    # context. Renaming it without updating branch protection in the
+    # same window blocks all merges on a check that never reports.
     # =========================================================================
-    name: Rules tests (non-required)
+    name: Rules tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
