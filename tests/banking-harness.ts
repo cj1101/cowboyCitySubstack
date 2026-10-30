@@ -90,7 +90,7 @@ import {
 } from "../lib/export/datasets/bankingWorkbook";
 import type { ExportContext } from "../lib/export/datasets/cityData";
 import { ExportError } from "../lib/export/sheetSpec";
-import type { HandlerContext } from "../lib/sim/rules/registry";
+import { descriptorForActionKind, RULE_DESCRIPTORS, type HandlerContext } from "../lib/sim/rules/registry";
 import type { ResolutionPlan, SimAction, SimActor, SimSnapshot, SnapshotQueryRecord } from "../lib/sim/state";
 
 const NOW = "2026-10-20T12:00:00.000Z";
@@ -633,6 +633,133 @@ check("item 12: premium ripening computes the due from Log inputs alone; zero-fi
 
 check("W1 conservation: paired posting + standing A-B assertions clean over the whole book", () => {
   assertConservationClean(w1, w1Events, "W1");
+});
+
+// ---------------------------------------------------------------------------
+// W1b — DIF founding ROUTE (B2.3 route A): item 11 proved the
+// builder; this section proves the DISPATCH — adopt_dif_founding
+// driven through run()/runAction() (the real resolver, the real
+// read plan), under the wiring's admin-member gate. The builder is
+// driven directly exactly once, for plan parity on identical state.
+// ---------------------------------------------------------------------------
+
+section("W1b — DIF founding dispatcher route (B-12 adopt_dif_founding)");
+
+const ADMIN_UID = "adminUid";
+const FABRIC_UID = "fabricCommitterUid";
+
+const wRoute = seedWorld();
+const wRouteEvents: ConservationEvent[] = [];
+wRoute.set(`users/${ADMIN_UID}`, { email: "admin@fixture.test", status: "approved", isAdmin: true });
+wRoute.set(`users/${OWNER_A}`, { email: "owner-a@fixture.test", status: "approved", isAdmin: false });
+// The fabric committer's Step 1 profile shape, posture verbatim: an
+// approved minimal doc — isAdmin false.
+wRoute.set(`users/${FABRIC_UID}`, { email: "fabric@fixture.test", status: "approved", isAdmin: false });
+seedAccount(wRoute, OWNER_A, 500000);
+seedAccount(wRoute, MEMBER_C, 100000);
+seedCorp(wRoute, { homeCityId: CITY, corporationId: "bankR", ownerMemberId: OWNER_A, companyCashRubars: 200000 });
+charter(wRoute, wRouteEvents, OWNER_A, CITY, "bankR");
+deposit(wRoute, wRouteEvents, MEMBER_C, CITY, "bankR", 50000);
+
+check("route: descriptorForActionKind binds adopt_dif_founding to B-12; the census stays 79 (a kind binding, not a new descriptor)", () => {
+  assert.equal(descriptorForActionKind("adopt_dif_founding")?.id, "B-12");
+  assert.equal(typeof FINANCE_DESCRIPTORS["B-12"].handlers.adopt_dif_founding, "function");
+  assert.ok(FINANCE_DESCRIPTORS["B-12"].actionKinds.includes("adopt_dif_founding"));
+  assert.equal(Object.keys(RULE_DESCRIPTORS).length, 79);
+});
+
+check("route gate: a non-admin member's founding attempt rejects not-admin-member; no fund stands", () => {
+  const { plan } = run(wRoute, action(memberActor(OWNER_A), OWNER_A, "adopt_dif_founding", {}));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "not-admin-member");
+  assert.equal(maybeDoc(wRoute, INSURANCE_FUND_PATH), null);
+});
+
+check("route gate: the fabric committer identity is refused — this is a member act, not a fabric one", () => {
+  const { plan } = run(wRoute, action(memberActor(FABRIC_UID), FABRIC_UID, "adopt_dif_founding", {}));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "not-admin-member");
+  assert.equal(maybeDoc(wRoute, INSURANCE_FUND_PATH), null);
+});
+
+check("route gate: a system actor is refused — no member principal holds the admin posture", () => {
+  const systemActor: SimActor = {
+    type: "system", memberId: null, npcId: null, onBehalfOfMemberId: null,
+    mandateId: null, mandateVersion: null, envelopeId: null,
+  };
+  const { plan } = run(wRoute, action(systemActor, "system", "adopt_dif_founding", {}));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "not-admin-member");
+  assert.equal(maybeDoc(wRoute, INSURANCE_FUND_PATH), null);
+});
+
+check("route: an admin member's founding act resolves through the dispatcher — and the plan is the builder's plan", () => {
+  const act = action(memberActor(ADMIN_UID), ADMIN_UID, "adopt_dif_founding", {});
+  // Builder parity on the identical pre-state (item 11's direct
+  // drive): same fund write, same seeded chains, same founding
+  // classification.
+  const snapshotDocs: World = new Map(wRoute);
+  const queryRecords = materializeQueries(wRoute, [{ id: "allDeposits", collectionPath: "sim_bank_deposits", filters: [] }], snapshotDocs);
+  const directCtx: HandlerContext = {
+    snapshot: snapshotFromDocs(snapshotDocs, NOW, queryRecords), action: act, resolutionId: act.actionId,
+    baselineRegistry: registry, citableBaseline: null, citations: {} as HandlerContext["citations"],
+  };
+  const direct = buildDifFoundingPlan(directCtx);
+  assert.equal(direct.outcome, "resolved", direct.rejection?.summaryText ?? "");
+  const { plan, event } = run(wRoute, act);
+  assert.equal(plan.outcome, "resolved", plan.rejection?.summaryText ?? "");
+  assert.ok(event);
+  if (event) wRouteEvents.push(event);
+  const fundWrite = (p: ResolutionPlan) => p.writes.find((w) => w.path === INSURANCE_FUND_PATH)?.afterDoc;
+  assert.deepEqual(fundWrite(plan), fundWrite(direct), "the routed fund write is the builder's fund write");
+  const pendingIds = (p: ResolutionPlan) =>
+    p.pendingCreates.map((d) => (d.doc as Record<string, unknown>).pendingId as string).sort();
+  assert.deepEqual(pendingIds(plan), pendingIds(direct), "the routed plan seeds the builder's premium chains");
+  const summaryOf = (p: ResolutionPlan) => p.entries[p.entries.length - 1];
+  assert.deepEqual(
+    (summaryOf(plan).classification as Record<string, unknown>).difFounding,
+    (summaryOf(direct).classification as Record<string, unknown>).difFounding,
+    "the routed summary carries the builder's difFounding classification"
+  );
+  // The committed state: fund standing, election NONE, the
+  // pre-founding deposit uninsured for life (aggregate derives 0),
+  // bankR's period-0 chain seeded off the founding summary seq.
+  const fund = fundRecordOf(doc(wRoute, INSURANCE_FUND_PATH));
+  assert.ok(fund);
+  assert.equal(fund?.grandfathering, "none");
+  assert.equal(fund?.fundCashRubars, 0);
+  assert.equal(fund?.totalInsuredLiabilitiesRubars, 0);
+  const seeded = doc(wRoute, "sim_pending_consequences/prem_bankR_0");
+  assert.equal((seeded.ripenCondition as Record<string, unknown>).requiredSeq, counterSeq(wRoute) + 1000, "requiredSeq = founding summary seq + 1000");
+});
+
+check("route: a second founding act rejects fund-exists through the dispatcher (once-ever, BNK-D18)", () => {
+  const { plan } = run(wRoute, action(memberActor(ADMIN_UID), ADMIN_UID, "adopt_dif_founding", {}));
+  assert.equal(plan.outcome, "rejected");
+  assert.equal(plan.rejection?.code, "fund-exists");
+});
+
+check("route: B-12's premium read plan is unchanged by the branch (byte-stable paths + query ids)", () => {
+  const premiumAct = action(memberActor(OWNER_A), OWNER_A, "pay_insurance_premium", {
+    cityId: CITY, corporationId: "bankR",
+  });
+  const seedDocs: World = new Map();
+  for (const path of collectActionReadPaths(premiumAct)) seedDocs.set(path, wRoute.get(path) ?? null);
+  const shape = collectActionReadPlan(premiumAct, seedDocs);
+  const expectedPaths = new Set([
+    ...collectActionReadPaths(premiumAct),
+    INSURANCE_FUND_PATH,
+    `sim_cities/${CITY}/corporations/bankR`,
+  ]);
+  assert.deepEqual(new Set(shape.paths), expectedPaths);
+  assert.deepEqual(
+    shape.queries.map((q) => q.id),
+    ["premiumMarkers", "premiumSettlements", "situationsByKey0", "assessmentMarkers"]
+  );
+});
+
+check("W1b conservation: paired posting + standing A-B assertions clean over the route world", () => {
+  assertConservationClean(wRoute, wRouteEvents, "W1b");
 });
 
 // ---------------------------------------------------------------------------
