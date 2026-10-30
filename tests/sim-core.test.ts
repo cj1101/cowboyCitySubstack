@@ -67,6 +67,12 @@ import {
   buildFixtureBaselineRegistry,
   FIXTURE_BASELINE_TEXTS,
 } from "../lib/sim/baseline/fixtures";
+import {
+  P3FIX_CITY_B,
+  P3FIX_CITY_B_STAT_OVERRIDES,
+  P3FIX_MEMBER_C,
+  P3FIX_OWNER_B,
+} from "../lib/sim/fixtures/p3fix";
 import { verifyStandingLog, hashWorldStateSlices, type StandingWorld } from "../lib/sim/verify";
 import { planLogWorkbooks, type ExportEntry } from "../lib/export/logWorkbook";
 import type { CollectionQuerySpec, PreparedPayload, SimActor } from "../lib/sim/state";
@@ -114,8 +120,8 @@ async function main() {
 
   await env.clearFirestore();
   await seedUser("ownerA", { email: "a@realm.test", status: "approved", isAdmin: false });
-  await seedUser("ownerB", { email: "b@realm.test", status: "approved", isAdmin: false });
-  await seedUser("memberC", { email: "c@realm.test", status: "approved", isAdmin: false });
+  await seedUser(P3FIX_OWNER_B.uid, P3FIX_OWNER_B.userDoc);
+  await seedUser(P3FIX_MEMBER_C.uid, P3FIX_MEMBER_C.userDoc);
   await seedUser("adminD", { email: "d@realm.test", status: "approved", isAdmin: true });
   // The fabric service users carry user docs so viewer-gated reads
   // (factions, cities, the Log) work under their claim-bearing contexts;
@@ -134,16 +140,11 @@ async function main() {
       factionId: "cityA",
       role: "owner",
     });
-    await setDoc(doc(fs, "factions", "cityB"), {
-      name: "Fixture City B",
-      slug: "fixture-b",
-      ownerUids: ["ownerB"],
-    });
-    await setDoc(doc(fs, "faction_members", "ownerB_cityB"), {
-      uid: "ownerB",
-      factionId: "cityB",
-      role: "owner",
-    });
+    await setDoc(doc(fs, "factions", P3FIX_CITY_B.factionId), P3FIX_CITY_B.factionDoc);
+    await setDoc(
+      doc(fs, "faction_members", P3FIX_CITY_B.membershipDocId),
+      P3FIX_CITY_B.membershipDoc
+    );
   });
 
   const genesisResult = await runGenesis(adminDb, {});
@@ -172,9 +173,7 @@ async function main() {
       ...cityB,
       stats: {
         ...(cityB.stats as Record<string, unknown>),
-        treasuryRubars: 500_000,
-        infrastructure: 80,
-        population: 800,
+        ...P3FIX_CITY_B_STAT_OVERRIDES,
       },
     });
   });
