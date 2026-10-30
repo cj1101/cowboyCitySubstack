@@ -11,6 +11,16 @@
  * docHash on the world doc at creation and asserts the stamp
  * post-commit; if none is ratified, no stamp fields are written.
  *
+ * Pristine sweep vs the Step 2 smoke doc: the post-commit sweep
+ * tolerates exactly one pre-genesis document — the runbook §2.4
+ * check-4 smoke record at `sim_fabric_status/current`, identified by
+ * its exact sanctioned shape (see isStep2SmokeStatusDoc). The smoke
+ * runs BEFORE genesis by runbook design, so the Phase 1-era "every
+ * swept collection empty" expectation could never hold on a correctly
+ * sequenced chain: the 2026-10-30 production genesis committed a
+ * correct world and then failed this sweep on that doc (production
+ * log §3). Any other pre-genesis state still fails the sweep.
+ *
  * PRODUCTION GUARD: genesis refuses to run unless FIRESTORE_EMULATOR_HOST
  * is set (the emulator), OR both an explicit `allowProduction` option AND
  * the `SIM_GENESIS_ALLOW_PRODUCTION=1` environment variable are present.
@@ -105,6 +115,41 @@ const SIM_COLLECTIONS_TO_SWEEP = [
   "sim_fabric_status",
   "sim_character_extensions",
 ];
+
+/** The `source` tag the runbook §2.4 smoke writes on its status doc. */
+export const STEP2_SMOKE_STATUS_SOURCE = "step2-smoke";
+
+/**
+ * The one pre-genesis document the pristine sweep tolerates: the
+ * Step 2 §2.4 check-4 smoke record. The runbook designates
+ * `sim_fabric_status/current` as the fabric smoke target — the
+ * committer identity writes it during Step 2, BEFORE Step 3 genesis
+ * runs — so a correctly sequenced chain always has it in place when
+ * the sweep executes. Only the fabric committer can write the
+ * collection at all (the landed rules grant `sim_fabric_status`
+ * writes to `isFabricService()`), and the smoke's content is fully
+ * determined by the runbook procedure: `source: "step2-smoke"` plus
+ * `rulesDeployedFrom` carrying the deploying tree's commit id.
+ *
+ * The tolerance is shape-exact, NOT a collection exemption: the doc
+ * must sit at id `current` and carry EXACTLY those two fields, with
+ * `rulesDeployedFrom` a git commit id (hex, short or full). Any other
+ * doc in the collection — and any deviation in this doc's shape —
+ * fails the sweep exactly as before. If the runbook's smoke shape
+ * ever changes, this predicate changes in the same PR, deliberately.
+ */
+export function isStep2SmokeStatusDoc(
+  docId: string,
+  data: Record<string, unknown>
+): boolean {
+  if (docId !== "current") return false;
+  if (Object.keys(data).length !== 2) return false;
+  if (data.source !== STEP2_SMOKE_STATUS_SOURCE) return false;
+  const deployedFrom = data.rulesDeployedFrom;
+  return (
+    typeof deployedFrom === "string" && /^[0-9a-f]{7,40}$/.test(deployedFrom)
+  );
+}
 
 export async function runGenesis(
   db: Firestore,
@@ -234,6 +279,27 @@ export async function runGenesis(
   }
   for (const name of SIM_COLLECTIONS_TO_SWEEP) {
     const snap = await db.collection(name).get();
+    if (name === "sim_fabric_status") {
+      // The designated Step 2 smoke doc (isStep2SmokeStatusDoc) is
+      // expected pre-genesis state, not contamination — genesis never
+      // writes this collection, so anything in it pre-dates the run.
+      // Tolerate exactly that doc; fail on anything else.
+      const unexpected = snap.docs.filter(
+        (docSnap) =>
+          !isStep2SmokeStatusDoc(
+            docSnap.id,
+            docSnap.data() as Record<string, unknown>
+          )
+      );
+      if (unexpected.length > 0) {
+        throw new Error(
+          `genesis verification: expected 0 doc(s) in ${name} besides the designated Step 2 smoke doc, found unexpected doc(s): ${unexpected
+            .map((docSnap) => docSnap.id)
+            .join(", ")}`
+        );
+      }
+      continue;
+    }
     const expected =
       name === "sim_world" || name === "sim_counters" || name === "sim_log_entries"
         ? 1
