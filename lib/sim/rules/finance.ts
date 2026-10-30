@@ -5191,8 +5191,12 @@ function insurancePaymentReadPlan(citesRule: "B-12" | "B-14") {
 }
 
 // ---------------------------------------------------------------------------
-// DIF founding (V2-§1.1, BNK-D18) — an ADOPTION ACT, exported for
-// the Lead to wire to the Town Hall / genesis route. The act: the
+// DIF founding (V2-§1.1, BNK-D18) — an ADOPTION ACT. Landed as a
+// builder "exported for the Lead to wire"; the wiring stands below
+// (B2.3 route A): `adopt_dif_founding` dispatches under this
+// descriptor through difFoundingHandler's admin-member gate, and
+// Phase 7's Town Hall governance supersession will cite this route.
+// The act: the
 // singleton record is created exactly once (a second act rejects
 // fund-exists); the grandfathering election is NONE (pre-founding
 // deposits derive uninsured for life — M12's only lawful
@@ -5325,6 +5329,81 @@ export function buildDifFoundingPlan(ctx: HandlerContext): ResolutionPlan {
       },
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// DIF founding — the dispatcher wiring (B2.3 route A, 2026-10-30).
+// `adopt_dif_founding` dispatches under B-12 — the descriptor the
+// builder itself declares — through the gate below.
+//
+// THE GATE (the wiring's responsibility; the builder checks only
+// fund-exists): founding is an adoption act, submittable only by a
+// site admin acting as a member in their own name. "Site admin" is
+// the site's own posture — the actor's `users/{uid}` profile doc
+// carrying `isAdmin: true` (the same stored fact firestore.rules'
+// isAdmin() and lib/membership.ts read) — read as a stored record
+// through the read plan, never from actor nomination. Every other
+// actor form is refused: a non-admin member, an NPC (even mandated —
+// an adoption act is not delegable), a shared-office or system
+// actor, and the fabric service identities (their Step 1 profile
+// docs carry isAdmin: false; this is a member act, not a fabric
+// one).
+// ---------------------------------------------------------------------------
+
+function rejectNonAdminMember(ctx: HandlerContext, descriptorId: string): ResolutionPlan | null {
+  const actor = ctx.action.actor;
+  const memberId = actor.type === "member" ? actor.memberId : null;
+  const profile = memberId ? snapshotDoc(ctx.snapshot, `users/${memberId}`) : null;
+  if (memberId && profile?.isAdmin === true) return null;
+  return rejectedPlan(
+    descriptorId,
+    "not-admin-member",
+    [descriptorId],
+    `${descriptorId}: founding the Deposit Insurance Fund is an adoption act (BNK-D18) — submittable only by a site admin acting as a member in their own name (the users/{uid} profile's isAdmin posture). It is not delegable to an NPC, not an office act, and not a fabric act.`
+  );
+}
+
+function difFoundingHandler(ctx: HandlerContext): ResolutionPlan {
+  const gate = rejectNonAdminMember(ctx, "B-12");
+  if (gate) return gate;
+  return buildDifFoundingPlan(ctx);
+}
+
+/** Founding read plan: the fund singleton, the gate's profile read
+ * (keyed off the authenticated actor, per the charter hook's
+ * actor-keyed precedent), the standing deposit book (the builder's
+ * insured-aggregate derivation input), and the corporations of
+ * every city the act targets — the poolDistributionReads posture:
+ * subcollection reads are city-scoped in this engine, so the
+ * operated founding names every standing city among its targets
+ * and premium-chain seeding covers the chartered banks standing
+ * in them. */
+function difFoundingReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  const paths: string[] = [INSURANCE_FUND_PATH];
+  const actor = seeds.action.actor;
+  if (actor.type === "member" && actor.memberId) paths.push(`users/${actor.memberId}`);
+  const queries: CollectionQuerySpec[] = [
+    { id: "allDeposits", collectionPath: "sim_bank_deposits", filters: [] },
+  ];
+  const cityIds = new Set<string>(seeds.action.targetCityIds);
+  const record = seeds.action.structuredAction ?? {};
+  if (typeof record.cityId === "string") cityIds.add(record.cityId);
+  for (const cid of cityIds) {
+    queries.push({
+      id: `cityCorporations_${cid}`,
+      collectionPath: `sim_cities/${cid}/corporations`,
+      filters: [],
+    });
+  }
+  return { paths, queries };
+}
+
+/** B-12's read-plan hook: the founding kind takes its own read set;
+ * the premium kind keeps the landed insurance-payment plan exactly
+ * (byte-stable — the branch delegates to the same factory). */
+function bankInsuranceReadPlan(seeds: ReadPlanSeeds): DescriptorReadPlan {
+  if (seeds.action.actionType === "adopt_dif_founding") return difFoundingReadPlan(seeds);
+  return insurancePaymentReadPlan("B-12")(seeds);
 }
 
 // ---------------------------------------------------------------------------
@@ -6063,7 +6142,7 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
   },
   "B-12": {
     id: "B-12",
-    actionKinds: ["pay_insurance_premium"],
+    actionKinds: ["pay_insurance_premium", "adopt_dif_founding"],
     visibility: "public",
     requiresBaseline: false,
     defaultBaselineSections: [],
@@ -6071,11 +6150,16 @@ export const FINANCE_DESCRIPTORS: Record<string, RuleDescriptor> = {
     // the successor premium pending — and any B-14 assessment
     // pending the fund's deficiency raises — in-event, under this
     // descriptor (SPEC-1 perpetuation). The action handler itself
-    // creates none.
+    // creates none. The founding kind also creates pendings: the
+    // period-0 premium chains it seeds for banks chartered at
+    // founding.
     mayCreatePendings: true,
-    handlers: { pay_insurance_premium: payInsurancePremiumHandler },
-    readPlan: insurancePaymentReadPlan("B-12"),
-    summary: "Pay deposit-insurance premiums in full against ripened markers (Tier A, never auto-debit); the settlement classification is the delinquency ladder's input — cure derives, no flag flips.",
+    handlers: {
+      pay_insurance_premium: payInsurancePremiumHandler,
+      adopt_dif_founding: difFoundingHandler,
+    },
+    readPlan: bankInsuranceReadPlan,
+    summary: "Pay deposit-insurance premiums in full against ripened markers (Tier A, never auto-debit); the settlement classification is the delinquency ladder's input — cure derives, no flag flips. Also carries the DIF founding adoption act (adopt_dif_founding, BNK-D18): a site-admin member founds the fund exactly once — grandfathering NONE, premium chains seeded for the banks chartered in the act's target cities; a second founding rejects fund-exists.",
   },
   "B-14": {
     id: "B-14",
