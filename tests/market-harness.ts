@@ -16,7 +16,10 @@
  * cities) are re-asserted with checkStandingRecords after each phase
  * — including P4-K21 share conservation (Σ holdings + retired ==
  * sharesOutstanding), wired here with the holdings supply that M-01/
- * M-02 now make lawful (the Lead wires the same supply in verify.ts).
+ * M-02 now make lawful. The closing section proves the same supply
+ * as wired into verify.ts itself (B2.1 §3d): verifyStandingLog
+ * collects sim_holdings from the standing state and activates the
+ * assertion inside the standing verifier.
  *
  * The world's seq advances as the committer's would: each applied
  * plan consumes one seq per Log entry, so placedAtSeq/expiresAtSeq
@@ -34,6 +37,7 @@ import {
 import { deriveRealmIndex } from "../lib/market/realmIndex";
 import { buildFixtureBaselineRegistry } from "../lib/sim/baseline/fixtures";
 import { buildCorporationDoc } from "../lib/sim/corporations";
+import { buildLogEntry } from "../lib/sim/log";
 import {
   buildHoldingDoc,
   buildListingDoc,
@@ -56,6 +60,8 @@ import {
   MARKET_DESCRIPTORS,
   composeMarketRepricing,
 } from "../lib/sim/rules/market";
+import { ruleEffectDraft } from "../lib/sim/rules/planHelpers";
+import { verifyStandingLog, type StandingWorld } from "../lib/sim/verify";
 import {
   emptyPlan,
   type PreparedPayload,
@@ -1385,6 +1391,108 @@ check("Realm index (pure derivation): float-honest labels, the level from the an
   assert.equal(index.weights.length, 2, "delisted companies exit the composition");
   assert.equal(index.concentrationWarnings.length, 1);
   assert.equal(index.concentrationWarnings[0].corporationId, "corpAa");
+});
+
+// ---------------------------------------------------------------------------
+// Standing-Log verifier venue (B2.1 §3d): the verify.ts wiring itself.
+// The sections above prove the conservation checker's share assertion
+// with a hand-fed holdings supply; these checks prove the WIRING —
+// that verifyStandingLog collects sim_holdings from the standing
+// state and activates the assertion (P4-K21) on its own. Synthetic
+// world in the governance harness's mold: a genesis-only Log with no
+// manifests (the per-event pass is inert) and standing docs carrying
+// lastChangedSeq null (no manifest writer can be claimed for them,
+// so no UNLOGGED_STATE fires) — the only findings the standing pass
+// can produce here are the ones under test.
+// ---------------------------------------------------------------------------
+
+function verifierWorld(args: {
+  sharesOutstanding: number;
+  retiredShares: number;
+  holdings: { memberId: string; quantityShares: number }[];
+}): StandingWorld {
+  const genesisDraft = {
+    ...ruleEffectDraft({
+      actor: {
+        type: "system", memberId: null, npcId: null, onBehalfOfMemberId: null,
+        mandateId: null, mandateVersion: null, envelopeId: null,
+      } as SimActor,
+      summaryText: "genesis",
+    }),
+    kind: "genesis" as const,
+    summary: true,
+  };
+  const genesis = buildLogEntry(genesisDraft, {
+    seq: 1, resolutionSeq: 1, resolutionId: "genesis", entryIndexWithinResolution: 0,
+    resolvedAt: NOW, rulesVersion: "sim-rules-0.5.0-phase5",
+    prevHash: "0".repeat(64), wakeActionId: null, executedDuringSeq: null,
+  });
+  const stateDocs = new Map<string, Record<string, unknown>>();
+  stateDocs.set("sim_cities/cityA", { factionId: "cityA", ...cityDoc({}) });
+  stateDocs.set("sim_cities/cityA/corporations/corpV", {
+    ...buildCorporationDoc({
+      corporationId: "corpV", name: "CorpV Co", industry: "industrial",
+      ownerMemberId: "ownerA", founderFigureId: null, homeCityId: "cityA",
+      valuationRubars: 0, legacyBookRubars: null, sourceActionId: "seed",
+      sourceSeq: 1, lastResolutionId: "seed", now: new Date(NOW),
+    }),
+    listed: true,
+    sharesOutstanding: args.sharesOutstanding,
+    retiredShares: args.retiredShares,
+    lastChangedSeq: null,
+  });
+  for (const holding of args.holdings) {
+    stateDocs.set(holdingPath(holding.memberId, "corpV"), {
+      ...buildHoldingDoc({
+        memberId: holding.memberId, corporationId: "corpV", homeCityId: "cityA",
+        quantityShares: holding.quantityShares, committedShares: 0, costBasisRubars: 0,
+        sourceActionId: "seed", sourceSeq: 1, lastResolutionId: "seed", now: new Date(NOW),
+      }),
+      lastChangedSeq: null,
+    });
+  }
+  return {
+    entries: [genesis],
+    manifests: new Map<string, Record<string, unknown>>(),
+    counter: { lastSeq: 1, lastEntryHash: genesis.entryHash as string },
+    world: { lastCommittedSeq: 1 },
+    stateDocs,
+    baselineRegistry: fixtureRegistry,
+  };
+}
+
+check("§3d wiring: a listed company whose holdings under-count sharesOutstanding FAILS standing verification (SHARE_CONSERVATION through verifyStandingLog)", () => {
+  const world = verifierWorld({
+    sharesOutstanding: 1000, retiredShares: 0,
+    holdings: [{ memberId: "ownerA", quantityShares: 600 }],
+  });
+  // Control: the raw checker, given the same corporation WITHOUT the
+  // holdings supply, stays silent — the assertion is the wiring's,
+  // not the record's.
+  const corpDoc = world.stateDocs.get("sim_cities/cityA/corporations/corpV") as Record<string, unknown>;
+  const unwired = checkStandingRecords({ corporations: [corpDoc], deposits: [], loans: [] });
+  assert.ok(
+    !unwired.findings.some((f) => f.code === "SHARE_CONSERVATION"),
+    "without the holdings supply the share assertion stays inert"
+  );
+  const result = verifyStandingLog(world);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.findings.some((f) => f.code === "SHARE_CONSERVATION"),
+    `expected a SHARE_CONSERVATION finding, got: ${JSON.stringify(result.findings)}`
+  );
+});
+
+check("§3d wiring: holdings + retired == sharesOutstanding verifies clean through verifyStandingLog", () => {
+  const result = verifyStandingLog(verifierWorld({
+    sharesOutstanding: 1000, retiredShares: 300,
+    holdings: [
+      { memberId: "ownerA", quantityShares: 650 },
+      { memberId: "memberB", quantityShares: 50 },
+    ],
+  }));
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.ok, true);
 });
 
 console.log(`\nMARKET HARNESS: all ${checks} checks passed (every resolved plan validated by the real validatePlan, conservation-checked by the real finance checker, and standing share conservation asserted with the holdings supply wired).`);

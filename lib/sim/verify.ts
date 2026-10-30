@@ -26,6 +26,7 @@ import { canonicalJson, sha256Hex } from "./canonical";
 import { computeEntryHash, hashSimDoc, projectFirestoreValue } from "./log";
 import { RULE_DESCRIPTORS } from "./rules/registry";
 import { FINANCE_DESCRIPTORS } from "./rules/finance";
+import { MARKET_DESCRIPTORS } from "./rules/market";
 import {
   checkConservationEvent,
   checkStandingRecords,
@@ -604,13 +605,20 @@ export function verifyStandingLog(input: StandingWorld): {
   // PREPARED_HASH_MISMATCH before it can become a standing event).
   const financeRuleIds = new Set([
     ...Object.keys(FINANCE_DESCRIPTORS),
+    // Market §6 operated step (B2.1 §3d; Market prep §5 item 3): the
+    // exchange family joins the finance venue — M-00…M-11 move or
+    // accompany money; M-12 cites nothing and is carried by the
+    // spread for completeness.
+    ...Object.keys(MARKET_DESCRIPTORS),
     // Catalogue I + II assembly (Cat II prep §5 item 3): the budget/
     // tax families whose events move money through the same ledgers —
     // F-09/F-10/F-11 (laws) and R-06/R-07/F-06/F-07 (businesses). The
-    // checker evaluates these events as-is; NO holdings supply is
-    // wired into checkStandingRecords, so the share-conservation
-    // assertion stays inert until step 7 creates holding records
-    // (Cat II flag F1).
+    // checker evaluates these events as-is. The share-conservation
+    // assertion is wired as of the Market §6 step: the standing pass
+    // below supplies the sim_holdings records to
+    // checkStandingRecords, so Σ holdings + retired ==
+    // sharesOutstanding (P4-K21) asserts over every standing
+    // corporation (Cat II flag F1 discharged).
     "F-09",
     "F-10",
     "F-11",
@@ -626,12 +634,18 @@ export function verifyStandingLog(input: StandingWorld): {
     // join the finance venue — a B-05 offer (loan write only) or a
     // premium event is a finance event even when nothing else moves.
     path.startsWith("sim_bank_loans/") ||
-    path.startsWith("sim_deposit_insurance_fund/");
+    path.startsWith("sim_deposit_insurance_fund/") ||
+    // Market §6 operated step (B2.1 §3d): the Market Account record
+    // joins the finance venue — the M-00 founding writes only this
+    // singleton, and it is a finance event even when nothing else
+    // moves.
+    path.startsWith("sim_market_account/");
   const loanDocs: Record<string, unknown>[] = [];
   const depositDocs: Record<string, unknown>[] = [];
   const accountDocs: Record<string, unknown>[] = [];
   const cityDocs: Record<string, unknown>[] = [];
   const corporationDocs: Record<string, unknown>[] = [];
+  const holdingDocs: Record<string, unknown>[] = [];
   for (const [path, docData] of input.stateDocs) {
     const segments = path.split("/");
     if (segments[0] === "sim_bank_loans" && segments.length === 2) loanDocs.push(docData);
@@ -640,6 +654,10 @@ export function verifyStandingLog(input: StandingWorld): {
     else if (segments[0] === "sim_cities" && segments.length === 2) cityDocs.push(docData);
     else if (segments[0] === "sim_cities" && segments.length === 4 && segments[2] === "corporations")
       corporationDocs.push(docData);
+    // Market §6 operated step (B2.1 §3d): the holdings supply — the
+    // wire that activates the checker's P4-K21 share-conservation
+    // assertion in the standing pass below.
+    else if (segments[0] === "sim_holdings" && segments.length === 2) holdingDocs.push(docData);
   }
   for (const [resolutionId, manifest] of input.manifests) {
     const resolutionEntries = entriesByResolution.get(resolutionId) ?? [];
@@ -738,6 +756,7 @@ export function verifyStandingLog(input: StandingWorld): {
     loans: loanDocs,
     memberAccounts: accountDocs,
     cities: cityDocs,
+    holdings: holdingDocs,
     fund: input.stateDocs.get("sim_deposit_insurance_fund/main") ?? null,
     suspensionIntervalsByBank,
   }).findings) {
